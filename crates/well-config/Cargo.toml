@@ -1,0 +1,8 @@
+[package]
+name = "well-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+egui = { version = "0.24", default-features = false }
+# Placeholder for Theia's Prism visual dashboard

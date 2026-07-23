@@ -1,0 +1,28 @@
+[package]
+name = "well"
+version = "0.1.0"
+authors = ["Your Name <your.email@example.com>"]
+edition = "2018"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+winit = { version = "0.30.13", default-features = false, features = ["cocoa"] }
+wgpu = "0.15"
+
+
+
+[[bin]]
+name = "well"
+path = "src/main.rs"
+
+
+
+
+
+
