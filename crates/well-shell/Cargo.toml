@@ -4,4 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Placeholder for Fish core shell integration
+anyhow = "1.0"
+log = "0.4"
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros"] }
+dashmap = "5.5"
+ropey = "1.6"
+winit = "0.30.13"
+wgpu = { version = "0.20", default-features = false, features = ["hal"] }
+pollster = "0.3"
+# Placeholder for Fish core shell integration (Metis)
+# fish_core = { git = "https://github.com/fish-shell/fish-shell.git" }
