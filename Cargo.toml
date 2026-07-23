@@ -4,6 +4,17 @@ version = "0.1.0"
 authors = ["Your Name <your.email@example.com>"]
 edition = "2018"
 
+[workspace]
+resolver = "2"
+members = [
+    "crates/well-shell",
+    "crates/well-prompt",
+    "crates/well-editor",
+    "crates/well-render",
+    "crates/well-config",
+    "crates/well-ipc",
+]
+
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -12,8 +23,201 @@ panic = "abort"
 strip = true
 
 [dependencies]
-winit = { version = "0.30.13", default-features = false, features = ["cocoa"] }
-wgpu = "0.15"
+winit = "0.30.13"
+wgpu = { version = "0.15", default-features = false, features = ["metal", "wgsl"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "well"
+path = "src/main.rs"
+
+name = "well"
+version = "0.1.0"
+authors = ["Your Name <your.email@example.com>"]
+edition = "2018"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/well-shell",
+    "crates/well-prompt",
+    "crates/well-editor",
+    "crates/well-render",
+    "crates/well-config",
+    "crates/well-ipc",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+winit = "0.30.13"
+wgpu = { version = "0.15", default-features = false, features = ["metal", "wgsl"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "well"
+path = "src/main.rs"
+
+name = "well"
+version = "0.1.0"
+authors = ["Your Name <your.email@example.com>"]
+edition = "2018"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/well-shell",
+    "crates/well-prompt",
+    "crates/well-editor",
+    "crates/well-render",
+    "crates/well-config",
+    "crates/well-ipc",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+winit = "0.30.13"
+wgpu = { version = "0.15", default-features = false, features = ["metal", "wgsl"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "well"
+path = "src/main.rs"
+
+name = "well"
+version = "0.1.0"
+authors = ["Your Name <your.email@example.com>"]
+edition = "2018"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/well-shell",
+    "crates/well-prompt",
+    "crates/well-editor",
+    "crates/well-render",
+    "crates/well-config",
+    "crates/well-ipc",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+winit = "0.30.13"
+wgpu = { version = "0.15", default-features = false, features = ["metal", "wgsl"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "well"
+path = "src/main.rs"
+
+name = "well"
+version = "0.1.0"
+authors = ["Your Name <your.email@example.com>"]
+edition = "2018"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/well-shell",
+    "crates/well-prompt",
+    "crates/well-editor",
+    "crates/well-render",
+    "crates/well-config",
+    "crates/well-ipc",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+winit = "0.30.13"
+wgpu = { version = "0.15", default-features = false, features = ["metal", "wgsl"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "well"
+path = "src/main.rs"
+
+name = "well"
+version = "0.1.0"
+authors = ["Your Name <your.email@example.com>"]
+edition = "2018"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/well-shell",
+    "crates/well-prompt",
+    "crates/well-editor",
+    "crates/well-render",
+    "crates/well-config",
+    "crates/well-ipc",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+winit = "0.30.13"
+wgpu = { version = "0.15", default-features = false, features = ["metal", "wgsl"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "well"
+path = "src/main.rs"
+
+name = "well"
+version = "0.1.0"
+authors = ["Your Name <your.email@example.com>"]
+edition = "2018"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+winit = "0.30.13"
+wgpu = { version = "0.15", default-features = false, features = ["metal", "wgsl"] }
 
 
 
