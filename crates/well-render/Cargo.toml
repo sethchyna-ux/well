@@ -1,0 +1,10 @@
+[package]
+name = "well-render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "22.0"
+bytemuck = { version = "1.16", features = ["derive"] }
+font8x8 = "0.3.1"
+vt100 = { workspace = true }

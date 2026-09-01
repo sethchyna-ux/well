@@ -1,0 +1,12 @@
+/Volumes/DAS/SD-DRIVE/well/target/debug/deps/serial2-8637e98a3b0f40e4.d: /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/lib.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/mod.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/unix/mod.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/into_settings.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/serial_port.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/settings.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/os.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/unix/apple.rs
+
+/Volumes/DAS/SD-DRIVE/well/target/debug/deps/libserial2-8637e98a3b0f40e4.rmeta: /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/lib.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/mod.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/unix/mod.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/into_settings.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/serial_port.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/settings.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/os.rs /Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/unix/apple.rs
+
+/Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/lib.rs:
+/Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/mod.rs:
+/Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/unix/mod.rs:
+/Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/into_settings.rs:
+/Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/serial_port.rs:
+/Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/settings.rs:
+/Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/os.rs:
+/Users/yocan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serial2-0.2.38/src/sys/unix/apple.rs:

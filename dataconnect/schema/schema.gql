@@ -1,0 +1,42 @@
+type User @table {
+  email: String!
+  username: String!
+  avatarUrl: String
+  subscriptionLevel: String
+}
+
+type Profile @table {
+  name: String!
+  user: User!
+  isDefault: Boolean
+  metadata: String
+}
+
+type ShellConfig @table {
+  profile: Profile!
+  promptTemplate: String!
+  aliasMapping: String!
+  environmentVariables: String
+}
+
+type CommandHistory @table {
+  user: User!
+  commandString: String!
+  timestamp: Timestamp!
+  contextTag: String
+}
+
+type TerminalTheme @table {
+  name: String!
+  colorPalette: String!
+  profile: Profile!
+  blurIntensity: Float
+  backgroundOpacity: Float
+}
+
+type DeviceSync @table {
+  user: User!
+  deviceName: String!
+  lastSeen: Timestamp!
+  currentProfile: Profile
+}
