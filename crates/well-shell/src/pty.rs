@@ -16,9 +16,22 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    /// Spawns a new interactive login shell (defaulting to $SHELL or /bin/zsh)
+    /// Spawns a new interactive login shell (defaulting to /opt/homebrew/bin/fish, $SHELL, or /bin/zsh)
     /// connected to a virtual terminal screen buffer of dimensions (rows, cols).
     pub fn spawn<F>(rows: u16, cols: u16, on_output: F) -> Result<Self, Box<dyn std::error::Error>>
+    where
+        F: Fn() + Send + 'static,
+    {
+        Self::spawn_with_shell(rows, cols, None, on_output)
+    }
+
+    /// Spawns a new interactive shell with an optional custom shell executable path.
+    pub fn spawn_with_shell<F>(
+        rows: u16,
+        cols: u16,
+        custom_shell: Option<&str>,
+        on_output: F,
+    ) -> Result<Self, Box<dyn std::error::Error>>
     where
         F: Fn() + Send + 'static,
     {
@@ -30,7 +43,15 @@ impl PtySession {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell = if let Some(s) = custom_shell {
+            s.to_string()
+        } else if std::path::Path::new("/opt/homebrew/bin/fish").exists() {
+            "/opt/homebrew/bin/fish".to_string()
+        } else if std::path::Path::new("/usr/local/bin/fish").exists() {
+            "/usr/local/bin/fish".to_string()
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+        };
         let mut cmd = CommandBuilder::new(&shell);
         cmd.arg("-l");
         cmd.env("TERM", "xterm-256color");

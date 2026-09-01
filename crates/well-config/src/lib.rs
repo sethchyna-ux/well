@@ -11,7 +11,7 @@ pub use hyprlang::{HyprlangDocument, HyprlangEmitter, HyprlangParser};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use egui::{Color32, Context, RichText, ScrollArea, Slider, Ui};
+use egui::{Color32, Context, RichText, ScrollArea, Slider, Stroke, Ui};
 use serde::{Deserialize, Serialize};
 use well_ipc::{HermesChannel, TheiaConfigPayload};
 
@@ -80,10 +80,18 @@ impl TheiasPrismPanel {
             KeybindingRow { chord: "Cmd+-".to_string(), action: "Decrease Font Size".to_string(), conflict: false },
         ];
 
+        let default_shell = if std::path::Path::new("/opt/homebrew/bin/fish").exists() {
+            "/opt/homebrew/bin/fish".to_string()
+        } else if std::path::Path::new("/usr/local/bin/fish").exists() {
+            "/usr/local/bin/fish".to_string()
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+        };
+
         let mut panel = Self {
             channel,
             config: initial_config,
-            shell_path: std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string()),
+            shell_path: default_shell,
             active_font_name: "OpenDyslexic Nerd Font (Active)".to_string(),
             abbreviations: initial_abbrevs,
             new_keyword: String::new(),
@@ -92,7 +100,7 @@ impl TheiasPrismPanel {
             new_chord: String::new(),
             new_action: String::new(),
             active_tab: 0,
-            is_open: true, // Open by default on launch so settings are immediately visible
+            is_open: false, // Closed by default on launch for clean workspace
             status_notification: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -168,25 +176,193 @@ impl TheiasPrismPanel {
     }
 
     pub fn render_window(&mut self, ctx: &Context) {
-        let mut undo_clicked = false;
-        let mut redo_clicked = false;
+        // 1. Configure dark glassmorphic styling on egui context
+        let mut visuals = egui::Visuals::dark();
+        visuals.window_fill = Color32::from_rgba_premultiplied(13, 16, 24, 242);
+        visuals.window_stroke = Stroke::new(1.0f32, Color32::from_rgba_premultiplied(56, 189, 248, 80));
+        visuals.window_rounding = egui::Rounding::same(14.0);
+        visuals.window_shadow = egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 8.0),
+            blur: 24.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(220),
+        };
+        visuals.panel_fill = Color32::from_rgba_premultiplied(18, 22, 32, 245);
+        visuals.widgets.noninteractive.bg_fill = Color32::from_rgba_premultiplied(22, 28, 40, 190);
+        visuals.widgets.noninteractive.rounding = egui::Rounding::same(6.0);
+        visuals.widgets.inactive.bg_fill = Color32::from_rgba_premultiplied(26, 33, 48, 200);
+        visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
+        visuals.widgets.hovered.bg_fill = Color32::from_rgba_premultiplied(38, 48, 70, 255);
+        visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0f32, Color32::from_rgb(57, 255, 20));
+        visuals.widgets.active.bg_fill = Color32::from_rgba_premultiplied(48, 62, 88, 255);
+        visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+        visuals.selection.bg_fill = Color32::from_rgba_premultiplied(57, 255, 20, 50);
+        visuals.selection.stroke = Stroke::new(1.0f32, Color32::from_rgb(57, 255, 20));
+        ctx.set_visuals(visuals);
+
         let mut toggle_clicked = false;
 
-        egui::Area::new(egui::Id::new("settings_hud_button"))
+        // 2. Sleek minimalist HUD pill in top-right corner
+        egui::Area::new(egui::Id::new("settings_hud_pill"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
             .show(ctx, |ui| {
-                let btn_text = if self.is_open { "✖ Close Settings" } else { "⚙️ Settings (Cmd+,)" };
-                if ui.button("↶ Undo").clicked() && !self.undo_stack.is_empty() {
-                    undo_clicked = true;
-                }
-                if ui.button("↷ Redo").clicked() && !self.redo_stack.is_empty() {
-                    redo_clicked = true;
-                }
-                let color = if self.is_open { Color32::from_rgb(255, 0, 127) } else { Color32::from_rgb(57, 255, 20) };
-                if ui.button(RichText::new(btn_text).color(color).strong()).clicked() {
+                let (btn_text, text_color, border_color) = if self.is_open {
+                    ("✕ Close Settings (Esc)", Color32::from_rgb(255, 100, 130), Color32::from_rgba_premultiplied(255, 80, 120, 120))
+                } else {
+                    ("⚙ Settings (Cmd+,)", Color32::from_rgb(180, 200, 220), Color32::from_rgba_premultiplied(56, 189, 248, 70))
+                };
+                let btn = egui::Button::new(RichText::new(btn_text).size(11.5).strong().color(text_color))
+                    .fill(Color32::from_rgba_premultiplied(16, 20, 30, 210))
+                    .stroke(Stroke::new(1.0f32, border_color))
+                    .rounding(egui::Rounding::same(16.0));
+                if ui.add(btn).clicked() {
                     toggle_clicked = true;
                 }
             });
+
+        if toggle_clicked {
+            self.is_open = !self.is_open;
+        }
+
+        if !self.is_open {
+            return;
+        }
+
+        let mut is_open = self.is_open;
+        let mut apply_clicked = false;
+        let mut save_clicked = false;
+        let mut reset_clicked = false;
+        let mut undo_clicked = false;
+        let mut redo_clicked = false;
+
+        egui::Window::new(
+            RichText::new("WELL // CONTROL CENTER")
+                .color(Color32::from_rgb(57, 255, 20))
+                .strong()
+                .size(13.5),
+        )
+        .open(&mut is_open)
+        .default_width(640.0)
+        .default_height(580.0)
+        .min_width(520.0)
+        .min_height(420.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            // Modern Segmented Tab Bar Navigation
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                let tabs: [(usize, &str, Color32); 8] = [
+                    (0, "Appearance", Color32::from_rgb(57, 255, 20)),
+                    (1, "Typography", Color32::from_rgb(56, 189, 248)),
+                    (2, "Shortcuts", Color32::from_rgb(250, 204, 21)),
+                    (3, "Metis Shell", Color32::from_rgb(255, 0, 127)),
+                    (4, "CRT Shaders", Color32::from_rgb(168, 85, 247)),
+                    (5, "Profiles & Hyprlang", Color32::from_rgb(0, 240, 255)),
+                    (6, "Scripts & Engine", Color32::from_rgb(57, 255, 20)),
+                    (7, "Help & Docs", Color32::from_rgb(148, 163, 184)),
+                ];
+
+                for (idx, label, accent) in tabs {
+                    let is_active = self.active_tab == idx;
+                    let (fill, stroke, text_color) = if is_active {
+                        (
+                            Color32::from_rgba_premultiplied(accent.r() / 5, accent.g() / 5, accent.b() / 5, 200),
+                            Stroke::new(1.0f32, accent),
+                            accent,
+                        )
+                    } else {
+                        (
+                            Color32::from_rgba_premultiplied(22, 28, 40, 160),
+                            Stroke::new(1.0f32, Color32::from_rgba_premultiplied(255, 255, 255, 20)),
+                            Color32::from_rgb(148, 163, 184),
+                        )
+                    };
+
+                    let btn = egui::Button::new(RichText::new(label).size(12.0).strong().color(text_color))
+                        .fill(fill)
+                        .stroke(stroke)
+                        .rounding(egui::Rounding::same(8.0));
+                    if ui.add(btn).clicked() {
+                        self.active_tab = idx;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Active Tab Content
+            ScrollArea::vertical().show(ui, |ui| {
+                match self.active_tab {
+                    0 => self.render_appearance_tab(ui),
+                    1 => self.render_typography_tab(ui),
+                    2 => self.render_shortcuts_tab(ui),
+                    3 => self.render_shell_tab(ui),
+                    4 => self.render_shaders_tab(ui),
+                    5 => self.render_profiles_tab(ui),
+                    6 => self.render_script_tab(ui),
+                    7 => self.render_help_tab(ui),
+                    _ => self.render_appearance_tab(ui),
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Bottom Action & Telemetry Bar
+            ui.horizontal(|ui| {
+                let apply_btn = egui::Button::new(RichText::new("⚡ Apply Live").color(Color32::from_rgb(57, 255, 20)).strong())
+                    .fill(Color32::from_rgba_premultiplied(20, 50, 30, 220))
+                    .stroke(Stroke::new(1.0f32, Color32::from_rgb(57, 255, 20)))
+                    .rounding(egui::Rounding::same(6.0));
+                if ui.add(apply_btn).clicked() {
+                    apply_clicked = true;
+                }
+
+                let save_btn = egui::Button::new(RichText::new("💾 Save Config").color(Color32::from_rgb(56, 189, 248)))
+                    .fill(Color32::from_rgba_premultiplied(20, 40, 60, 220))
+                    .stroke(Stroke::new(1.0f32, Color32::from_rgb(56, 189, 248)))
+                    .rounding(egui::Rounding::same(6.0));
+                if ui.add(save_btn).clicked() {
+                    save_clicked = true;
+                }
+
+                let can_undo = !self.undo_stack.is_empty();
+                let can_redo = !self.redo_stack.is_empty();
+                ui.add_enabled_ui(can_undo, |ui| {
+                    if ui.button("↶ Undo").clicked() {
+                        undo_clicked = true;
+                    }
+                });
+                ui.add_enabled_ui(can_redo, |ui| {
+                    if ui.button("↷ Redo").clicked() {
+                        redo_clicked = true;
+                    }
+                });
+
+                let reset_btn = egui::Button::new(RichText::new("↺ Reset").color(Color32::from_rgb(255, 100, 130)))
+                    .fill(Color32::from_rgba_premultiplied(40, 20, 30, 200))
+                    .stroke(Stroke::new(1.0f32, Color32::from_rgba_premultiplied(255, 100, 130, 120)))
+                    .rounding(egui::Rounding::same(6.0));
+                if ui.add(reset_btn).clicked() {
+                    reset_clicked = true;
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some((msg, created)) = &self.status_notification {
+                        if created.elapsed().as_secs() < 4 {
+                            ui.label(RichText::new(format!("● {}", msg)).color(Color32::from_rgb(57, 255, 20)).size(11.5));
+                        } else {
+                            ui.label(RichText::new("● Hermes Seqlock Active").color(Color32::from_rgb(100, 120, 140)).size(11.5));
+                        }
+                    } else {
+                        ui.label(RichText::new("● Hermes Seqlock Active").color(Color32::from_rgb(100, 120, 140)).size(11.5));
+                    }
+                });
+            });
+        });
 
         if undo_clicked {
             if let Some(prev) = self.undo_stack.pop() {
@@ -202,90 +378,6 @@ impl TheiasPrismPanel {
                 self.channel.sync_state(self.config.clone());
             }
         }
-        if toggle_clicked {
-            self.is_open = !self.is_open;
-        }
-
-        if !self.is_open {
-            return;
-        }
-
-        let mut is_open = self.is_open;
-        let mut apply_clicked = false;
-        let mut save_clicked = false;
-        let mut reset_clicked = false;
-
-        egui::Window::new(RichText::new("🏛️ Theia's Prism — Control Center").color(Color32::from_rgb(57, 255, 20)).strong())
-            .open(&mut is_open)
-            .default_width(540.0)
-            .default_height(580.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                // Top Tab Bar Navigation
-                ui.horizontal(|ui| {
-                    let c_green = Color32::from_rgb(57, 255, 20);
-                    let c_blue = Color32::from_rgb(56, 189, 248);
-                    let c_magenta = Color32::from_rgb(255, 0, 127);
-                    let c_purple = Color32::from_rgb(168, 85, 247);
-                    let c_amber = Color32::from_rgb(250, 204, 21);
-                    let c_cyan = Color32::from_rgb(0, 240, 255);
-
-                    if ui.selectable_label(self.active_tab == 0, RichText::new("🎨 Appearance").color(if self.active_tab == 0 { c_green } else { Color32::GRAY })).clicked() { self.active_tab = 0; }
-                    if ui.selectable_label(self.active_tab == 1, RichText::new("🔤 Typography").color(if self.active_tab == 1 { c_blue } else { Color32::GRAY })).clicked() { self.active_tab = 1; }
-                    if ui.selectable_label(self.active_tab == 2, RichText::new("⌨️ Shortcuts").color(if self.active_tab == 2 { c_amber } else { Color32::GRAY })).clicked() { self.active_tab = 2; }
-                    if ui.selectable_label(self.active_tab == 3, RichText::new("🐚 Metis Shell").color(if self.active_tab == 3 { c_magenta } else { Color32::GRAY })).clicked() { self.active_tab = 3; }
-                    if ui.selectable_label(self.active_tab == 4, RichText::new("📺 CRT Shaders").color(if self.active_tab == 4 { c_purple } else { Color32::GRAY })).clicked() { self.active_tab = 4; }
-                    if ui.selectable_label(self.active_tab == 5, RichText::new("💾 Profiles").color(if self.active_tab == 5 { c_cyan } else { Color32::GRAY })).clicked() { self.active_tab = 5; }
-                    if ui.selectable_label(self.active_tab == 6, RichText::new("📜 Script").color(if self.active_tab == 6 { c_green } else { Color32::GRAY })).clicked() { self.active_tab = 6; }
-                    if ui.selectable_label(self.active_tab == 7, RichText::new("▶️ Run").color(if self.active_tab == 7 { c_blue } else { Color32::GRAY })).clicked() { self.active_tab = 7; }
-                    if ui.selectable_label(self.active_tab == 8, RichText::new("🚀 Go").color(if self.active_tab == 8 { c_magenta } else { Color32::GRAY })).clicked() { self.active_tab = 8; }
-                    if ui.selectable_label(self.active_tab == 9, RichText::new("📁 File").color(if self.active_tab == 9 { c_amber } else { Color32::GRAY })).clicked() { self.active_tab = 9; }
-                    if ui.selectable_label(self.active_tab == 10, RichText::new("❓ Help").color(if self.active_tab == 10 { c_cyan } else { Color32::GRAY })).clicked() { self.active_tab = 10; }
-                });
-                ui.separator();
-
-                // Active Tab Content
-                ScrollArea::vertical().show(ui, |ui| {
-                    match self.active_tab {
-                        0 => self.render_appearance_tab(ui),
-                        1 => self.render_typography_tab(ui),
-                        2 => self.render_shortcuts_tab(ui),
-                        3 => self.render_shell_tab(ui),
-                        4 => self.render_shaders_tab(ui),
-                        5 => self.render_profiles_tab(ui),
-                        6 => self.render_script_tab(ui),
-                        7 => self.render_run_tab(ui),
-                        8 => self.render_go_tab(ui),
-                        9 => self.render_file_tab(ui),
-                        10 => self.render_help_tab(ui),
-                        _ => self.render_profiles_tab(ui),
-                    }
-                });
-
-                ui.separator();
-
-                // Bottom Action & Telemetry Bar
-                ui.horizontal(|ui| {
-                    if ui.button(RichText::new("⚡ Apply Live").color(Color32::from_rgb(57, 255, 20)).strong()).clicked() {
-                        apply_clicked = true;
-                    }
-                    if ui.button(RichText::new("💾 Save Config").color(Color32::from_rgb(56, 189, 248))).clicked() {
-                        save_clicked = true;
-                    }
-                    if ui.button(RichText::new("🔄 Reset").color(Color32::from_rgb(255, 0, 127))).clicked() {
-                        reset_clicked = true;
-                    }
-
-                    if let Some((msg, created)) = &self.status_notification {
-                        if created.elapsed().as_secs() < 4 {
-                            ui.label(RichText::new(msg).color(Color32::from_rgb(57, 255, 20)));
-                        }
-                    } else {
-                        ui.label(RichText::new("Lock-free atomic Seqlock active").color(Color32::from_rgb(148, 163, 184)));
-                    }
-                });
-            });
-
         if apply_clicked {
             self.undo_stack.push(self.config.clone());
             self.redo_stack.clear();
@@ -544,19 +636,19 @@ impl TheiasPrismPanel {
         let mut export_hyprlang_req = false;
 
         ui.horizontal(|ui| {
-            if ui.button("💾 Save Profile").clicked() {
+            if ui.button("Save Profile").clicked() {
                 save_profile_req = true;
             }
-            if ui.button("📂 Load Profile").clicked() {
+            if ui.button("Load Profile").clicked() {
                 load_profile_req = true;
             }
-            if ui.button("📥 Import Hyprlang (.hl)").clicked() {
+            if ui.button("Import Hyprlang (.hl)").clicked() {
                 import_hyprlang_req = true;
             }
-            if ui.button("📤 Export Hyprlang (.hl)").clicked() {
+            if ui.button("Export Hyprlang (.hl)").clicked() {
                 export_hyprlang_req = true;
             }
-            if ui.button("🔄 Reset Defaults").clicked() {
+            if ui.button("Reset Defaults").clicked() {
                 self.reset_to_defaults();
             }
         });
@@ -597,28 +689,39 @@ impl TheiasPrismPanel {
     }
 
     fn render_script_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("📝 Script Tab").color(Color32::from_rgb(57, 255, 20)));
-        ui.label("Placeholder for script management UI.");
-    }
-
-    fn render_run_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("▶️ Run Tab").color(Color32::from_rgb(56, 189, 248)));
-        ui.label("Placeholder for run commands UI.");
-    }
-
-    fn render_go_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("🚀 Go Tab").color(Color32::from_rgb(255, 0, 127)));
-        ui.label("Placeholder for Go language integration UI.");
-    }
-
-    fn render_file_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("📁 File Tab").color(Color32::from_rgb(250, 204, 21)));
-        ui.label("Placeholder for file explorer UI.");
+        ui.heading(RichText::new("Automations & HyperShell Execution").color(Color32::from_rgb(57, 255, 20)));
+        ui.add_space(6.0);
+        ui.label(RichText::new("HyperShell Async Engine").strong());
+        ui.label("Integrated non-blocking command execution pipeline with sub-millisecond task dispatch.");
+        ui.add_space(8.0);
+        ui.label(RichText::new("Quick Automation Triggers:").strong());
+        ui.horizontal(|ui| {
+            if ui.button("Run Benchmark Suite (Hyperfine)").clicked() {
+                let _ = std::process::Command::new("./well-benchmarks.sh").spawn();
+                self.status_notification = Some(("Launched Hyperfine benchmark".into(), Instant::now()));
+            }
+            if ui.button("Launch Fish Transience Check").clicked() {
+                let _ = std::process::Command::new("/opt/homebrew/bin/fish").arg("-c").arg("echo 'Fish active'").spawn();
+            }
+        });
     }
 
     fn render_help_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("❓ Help Tab").color(Color32::from_rgb(0, 240, 255)));
-        ui.label("Placeholder for help and documentation UI.");
+        ui.heading(RichText::new("Well Terminal — Architecture & Shortcuts").color(Color32::from_rgb(0, 240, 255)));
+        ui.add_space(6.0);
+        ui.label(RichText::new("Global Hotkeys:").strong());
+        ui.label("• Cmd+, or F12 / F1: Toggle Theia Control Center");
+        ui.label("• Esc: Close Theia Control Center");
+        ui.label("• Cmd+D / Cmd+Shift+D: Split Pane Horizontal / Vertical");
+        ui.label("• Cmd+K: Clear Terminal Buffer");
+        ui.label("• Cmd+= / Cmd+-: Increase / Decrease Font Size");
+        ui.add_space(8.0);
+        ui.label(RichText::new("Subsystem Telemetry:").strong());
+        ui.label("• ATLAS: Host Windowing & Event Loop (winit/Metal)");
+        ui.label("• ORPHEUS: GPU Text Shaping & WGPU Cell Matrix");
+        ui.label("• METIS: Shell Logic Core & Prefix-Trie History Engine");
+        ui.label("• HERMES: Zero-Lock Atomic Seqlock Inter-Process Bus");
+        ui.label("• HYPRLANG: Native Wayland/Hyprlang (.hl) Parser & Emitter");
     }
 
     // Helper to list profile file names (without extension)
