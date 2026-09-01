@@ -82,6 +82,18 @@ if [ -d "assets/fonts" ]; then
     cp -R assets/fonts/* "${RESOURCES_DIR}/fonts/" 2>/dev/null || true
 fi
 
-echo -e "${SUCCESS} Successfully generated ${APP_BUNDLE}!"
-echo -e "You can test-launch it via: open ${APP_BUNDLE}"
-echo -e "Or install to Applications: cp -R ${APP_BUNDLE} /Applications/"
+# 7. Strip quarantine and sign with ad-hoc signature for macOS Gatekeeper
+echo -e "${INFO} Signing ${APP_BUNDLE} with ad-hoc signature..."
+xattr -cr "${APP_BUNDLE}"
+codesign --force --deep --sign - "${APP_BUNDLE}"
+
+# 8. Deploy directly to /Applications
+echo -e "${INFO} Deploying to /Applications/Well.app..."
+rm -rf /Applications/Well.app
+cp -R "${APP_BUNDLE}" /Applications/
+xattr -cr /Applications/Well.app
+codesign --force --deep --sign - /Applications/Well.app
+touch /Applications/Well.app
+
+echo -e "${SUCCESS} Successfully generated, signed, and installed /Applications/Well.app!"
+echo -e "You can launch it directly from Applications or via: open /Applications/Well.app"
