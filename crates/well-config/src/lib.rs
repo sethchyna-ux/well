@@ -230,6 +230,7 @@ impl TheiasPrismPanel {
         }
 
         let mut is_open = self.is_open;
+        let mut close_clicked = false;
         let mut apply_clicked = false;
         let mut save_clicked = false;
         let mut reset_clicked = false;
@@ -242,12 +243,16 @@ impl TheiasPrismPanel {
                 .strong()
                 .size(13.5),
         )
+        .id(egui::Id::new("theia_control_center_window"))
         .open(&mut is_open)
-        .default_width(640.0)
+        .default_width(680.0)
         .default_height(580.0)
         .min_width(520.0)
         .min_height(420.0)
         .resizable(true)
+        .movable(true)
+        .collapsible(false)
+        .default_pos(egui::pos2(120.0, 60.0))
         .show(ctx, |ui| {
             // Modern Segmented Tab Bar Navigation
             ui.add_space(2.0);
@@ -350,6 +355,14 @@ impl TheiasPrismPanel {
                     reset_clicked = true;
                 }
 
+                let close_btn = egui::Button::new(RichText::new("✕ Close (Esc)").color(Color32::from_rgb(255, 120, 140)).strong())
+                    .fill(Color32::from_rgba_premultiplied(45, 20, 30, 220))
+                    .stroke(Stroke::new(1.0f32, Color32::from_rgba_premultiplied(255, 120, 140, 150)))
+                    .rounding(egui::Rounding::same(6.0));
+                if ui.add(close_btn).clicked() {
+                    close_clicked = true;
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some((msg, created)) = &self.status_notification {
                         if created.elapsed().as_secs() < 4 {
@@ -392,7 +405,11 @@ impl TheiasPrismPanel {
             self.reset_to_defaults();
         }
 
-        self.is_open = is_open;
+        if close_clicked || !is_open {
+            self.is_open = false;
+        } else {
+            self.is_open = true;
+        }
     }
 
     fn render_appearance_tab(&mut self, ui: &mut Ui) {

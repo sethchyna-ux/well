@@ -171,6 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut raw_input = egui::RawInput::default();
     let mut last_cursor_pos = egui::Pos2::ZERO;
+    let start_time = std::time::Instant::now();
 
     let mut state = WellTerminalState::new(Arc::clone(&pty_session));
     let mut modifiers_state = Modifiers::default();
@@ -218,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let pos = egui::pos2(position.x as f32 / scale_factor, position.y as f32 / scale_factor);
                         last_cursor_pos = pos;
                         raw_input.events.push(egui::Event::PointerMoved(pos));
-                        let in_hud_area = pos.x > (surface_config.width as f32 / scale_factor - 180.0) && pos.y < 60.0;
+                        let in_hud_area = pos.x > (surface_config.width as f32 / scale_factor - 200.0) && pos.y < 60.0;
                         if state.config_panel.is_open || in_hud_area {
                             window.request_redraw();
                         }
@@ -237,9 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             pressed,
                             modifiers: egui_modifiers_from_winit(&modifiers_state),
                         });
-                        if state.config_panel.is_open {
-                            window.request_redraw();
-                        }
+                        window.request_redraw();
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
                         let (dx, dy) = match delta {
@@ -273,10 +272,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Check Cmd+, or Ctrl+, or F12 / F1 settings drawer toggle
                         if let Key::Named(NamedKey::F5) = logical_key {
-                run_go_demo();
-                return;
-            }
-            let toggle_drawer = match &logical_key {
+                            run_go_demo();
+                            return;
+                        }
+                        let toggle_drawer = match &logical_key {
                             Key::Character(c) if (c == "," || c == "<") && (is_super || is_ctrl) => true,
                             Key::Named(NamedKey::F12) | Key::Named(NamedKey::F1) => true,
                             _ => false,
@@ -285,6 +284,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if toggle_drawer {
                             state.config_panel.is_open = !state.config_panel.is_open;
                             println!("Theia's Prism drawer toggled: is_open = {}", state.config_panel.is_open);
+                            window.request_redraw();
+                            return;
+                        }
+
+                        // Escape key ALWAYS closes Theia when open
+                        if state.config_panel.is_open && matches!(logical_key, Key::Named(NamedKey::Escape)) {
+                            state.config_panel.is_open = false;
+                            println!("Theia Control Center closed via Escape");
                             window.request_redraw();
                             return;
                         }
@@ -312,9 +319,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         repeat: false,
                                         modifiers: egui_modifiers_from_winit(&modifiers_state),
                                     });
-                                }
-                                Key::Named(NamedKey::Escape) => {
-                                    state.config_panel.is_open = false;
                                 }
                                 _ => ()
                             }
@@ -409,6 +413,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Pass 2: Overlay egui UI (Persistent Settings HUD button & Control Center)
                         {
+                            raw_input.time = Some(start_time.elapsed().as_secs_f64());
+                            raw_input.predicted_dt = 1.0 / 60.0;
                             raw_input.screen_rect = Some(egui::Rect::from_min_size(
                                 egui::Pos2::ZERO,
                                 egui::vec2(
@@ -420,6 +426,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let full_output = egui_ctx.run(input, |ctx| {
                                 state.config_panel.render_window(ctx);
                             });
+
+                            let wants_repaint = full_output.viewport_output
+                                .get(&egui::ViewportId::ROOT)
+                                .map(|v| v.repaint_delay.is_zero())
+                                .unwrap_or(false);
+                            if wants_repaint || state.config_panel.is_open {
+                                window.request_redraw();
+                            }
 
                             let paint_jobs = egui_ctx.tessellate(full_output.shapes, scale_factor);
                             let screen_descriptor = egui_wgpu::ScreenDescriptor {
