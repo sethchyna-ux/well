@@ -22,6 +22,7 @@ use well_editor::MnemeEditor;
 use well_ipc::{HermesChannel, TheiaConfigPayload};
 use well_prompt::{AstraeaStateVector, PromptCompiler};
 use well_render::{CellInstance, OrpheusRenderer};
+use std::process::Command;
 use well_shell::{MetisExecutor, PtySession};
 
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +54,16 @@ impl WellTerminalState {
             config_panel,
             pty_session,
         }
+    }
+}
+
+fn run_go_demo() {
+    let bin_path = std::path::Path::new("go-demo/go-demo");
+    match Command::new(bin_path).output() {
+        Ok(output) => {
+            println!("Go demo output: {}", String::from_utf8_lossy(&output.stdout));
+        }
+        Err(e) => eprintln!("Failed to run go demo: {}", e),
     }
 }
 
@@ -261,7 +272,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let is_ctrl = modifiers_state.state().control_key();
 
                         // Check Cmd+, or Ctrl+, or F12 / F1 settings drawer toggle
-                        let toggle_drawer = match &logical_key {
+                        if let Key::Named(NamedKey::F5) = logical_key {
+                run_go_demo();
+                return;
+            }
+            let toggle_drawer = match &logical_key {
                             Key::Character(c) if (c == "," || c == "<") && (is_super || is_ctrl) => true,
                             Key::Named(NamedKey::F12) | Key::Named(NamedKey::F1) => true,
                             _ => false,

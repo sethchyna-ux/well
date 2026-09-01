@@ -3,6 +3,10 @@
 //! Subsystems:
 //! - TheiasPrismPanel: Comprehensive immediate-mode settings GUI built on egui for
 //!   GPU-accelerated terminal configuration synchronized natively over Hermes Seqlock.
+//! - Hyprlang: Native configuration parser and emitter for Hyprlang-syntax (.hl) configs.
+
+pub mod hyprlang;
+pub use hyprlang::{HyprlangDocument, HyprlangEmitter, HyprlangParser};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -78,7 +82,7 @@ impl TheiasPrismPanel {
 
         let mut panel = Self {
             channel,
-            config: initial_config.clone(),
+            config: initial_config,
             shell_path: std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string()),
             active_font_name: "OpenDyslexic Nerd Font (Active)".to_string(),
             abbreviations: initial_abbrevs,
@@ -100,9 +104,14 @@ impl TheiasPrismPanel {
         panel
     }
 
-    fn config_path() -> Option<PathBuf> {
+    pub fn config_path() -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
         Some(PathBuf::from(home).join(".config").join("well").join("config.json"))
+    }
+
+    pub fn hyprlang_path() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        Some(PathBuf::from(home).join(".config").join("well").join("well.hl"))
     }
 
     pub fn save_to_disk(&mut self) -> Result<(), String> {
@@ -159,38 +168,53 @@ impl TheiasPrismPanel {
     }
 
     pub fn render_window(&mut self, ctx: &Context) {
-        // Persistent floating HUD button in top-right corner of the window
-        // Also expose Undo/Redo actions in the HUD when applicable
+        let mut undo_clicked = false;
+        let mut redo_clicked = false;
+        let mut toggle_clicked = false;
+
         egui::Area::new(egui::Id::new("settings_hud_button"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
             .show(ctx, |ui| {
                 let btn_text = if self.is_open { "✖ Close Settings" } else { "⚙️ Settings (Cmd+,)" };
-                // Show Undo/Redo buttons when there is history
                 if ui.button("↶ Undo").clicked() && !self.undo_stack.is_empty() {
-                    if let Some(prev) = self.undo_stack.pop() {
-                        self.redo_stack.push(self.config.clone());
-                        self.config = prev;
-                        self.channel.sync_state(self.config.clone());
-                    }
+                    undo_clicked = true;
                 }
                 if ui.button("↷ Redo").clicked() && !self.redo_stack.is_empty() {
-                    if let Some(next) = self.redo_stack.pop() {
-                        self.undo_stack.push(self.config.clone());
-                        self.config = next;
-                        self.channel.sync_state(self.config.clone());
-                    }
+                    redo_clicked = true;
                 }
                 let color = if self.is_open { Color32::from_rgb(255, 0, 127) } else { Color32::from_rgb(57, 255, 20) };
                 if ui.button(RichText::new(btn_text).color(color).strong()).clicked() {
-                    self.is_open = !self.is_open;
+                    toggle_clicked = true;
                 }
             });
+
+        if undo_clicked {
+            if let Some(prev) = self.undo_stack.pop() {
+                self.redo_stack.push(self.config.clone());
+                self.config = prev;
+                self.channel.sync_state(self.config.clone());
+            }
+        }
+        if redo_clicked {
+            if let Some(next) = self.redo_stack.pop() {
+                self.undo_stack.push(self.config.clone());
+                self.config = next;
+                self.channel.sync_state(self.config.clone());
+            }
+        }
+        if toggle_clicked {
+            self.is_open = !self.is_open;
+        }
 
         if !self.is_open {
             return;
         }
 
         let mut is_open = self.is_open;
+        let mut apply_clicked = false;
+        let mut save_clicked = false;
+        let mut reset_clicked = false;
+
         egui::Window::new(RichText::new("🏛️ Theia's Prism — Control Center").color(Color32::from_rgb(57, 255, 20)).strong())
             .open(&mut is_open)
             .default_width(540.0)
@@ -212,13 +236,11 @@ impl TheiasPrismPanel {
                     if ui.selectable_label(self.active_tab == 3, RichText::new("🐚 Metis Shell").color(if self.active_tab == 3 { c_magenta } else { Color32::GRAY })).clicked() { self.active_tab = 3; }
                     if ui.selectable_label(self.active_tab == 4, RichText::new("📺 CRT Shaders").color(if self.active_tab == 4 { c_purple } else { Color32::GRAY })).clicked() { self.active_tab = 4; }
                     if ui.selectable_label(self.active_tab == 5, RichText::new("💾 Profiles").color(if self.active_tab == 5 { c_cyan } else { Color32::GRAY })).clicked() { self.active_tab = 5; }
-                    // New tabs
                     if ui.selectable_label(self.active_tab == 6, RichText::new("📜 Script").color(if self.active_tab == 6 { c_green } else { Color32::GRAY })).clicked() { self.active_tab = 6; }
                     if ui.selectable_label(self.active_tab == 7, RichText::new("▶️ Run").color(if self.active_tab == 7 { c_blue } else { Color32::GRAY })).clicked() { self.active_tab = 7; }
                     if ui.selectable_label(self.active_tab == 8, RichText::new("🚀 Go").color(if self.active_tab == 8 { c_magenta } else { Color32::GRAY })).clicked() { self.active_tab = 8; }
                     if ui.selectable_label(self.active_tab == 9, RichText::new("📁 File").color(if self.active_tab == 9 { c_amber } else { Color32::GRAY })).clicked() { self.active_tab = 9; }
                     if ui.selectable_label(self.active_tab == 10, RichText::new("❓ Help").color(if self.active_tab == 10 { c_cyan } else { Color32::GRAY })).clicked() { self.active_tab = 10; }
-                    
                 });
                 ui.separator();
 
@@ -245,20 +267,13 @@ impl TheiasPrismPanel {
                 // Bottom Action & Telemetry Bar
                 ui.horizontal(|ui| {
                     if ui.button(RichText::new("⚡ Apply Live").color(Color32::from_rgb(57, 255, 20)).strong()).clicked() {
-                        self.channel.sync_state(self.config.clone());
-                        self.status_notification = Some(("Live synced over Hermes Seqlock".to_string(), Instant::now()));
-                        // Push previous state onto undo stack
-                        self.undo_stack.push(self.config.clone());
-                        // Clear redo stack on new change
-                        self.redo_stack.clear();
+                        apply_clicked = true;
                     }
-
                     if ui.button(RichText::new("💾 Save Config").color(Color32::from_rgb(56, 189, 248))).clicked() {
-                        let _ = self.save_to_disk();
+                        save_clicked = true;
                     }
-
                     if ui.button(RichText::new("🔄 Reset").color(Color32::from_rgb(255, 0, 127))).clicked() {
-                        self.reset_to_defaults();
+                        reset_clicked = true;
                     }
 
                     if let Some((msg, created)) = &self.status_notification {
@@ -271,6 +286,19 @@ impl TheiasPrismPanel {
                 });
             });
 
+        if apply_clicked {
+            self.undo_stack.push(self.config.clone());
+            self.redo_stack.clear();
+            self.channel.sync_state(self.config.clone());
+            self.status_notification = Some(("Live synced over Hermes Seqlock".to_string(), Instant::now()));
+        }
+        if save_clicked {
+            let _ = self.save_to_disk();
+        }
+        if reset_clicked {
+            self.reset_to_defaults();
+        }
+
         self.is_open = is_open;
     }
 
@@ -279,6 +307,7 @@ impl TheiasPrismPanel {
         ui.add_space(4.0);
 
         ui.label(RichText::new("Select Active Color Theme:").strong());
+        let mut new_theme = None;
         ui.horizontal(|ui| {
             let themes = [
                 (0, "Cyber-Neon (Active)", Color32::from_rgb(57, 255, 20)),
@@ -290,11 +319,14 @@ impl TheiasPrismPanel {
             for (id, name, color) in themes {
                 let is_selected = self.config.theme_id == id;
                 if ui.selectable_label(is_selected, RichText::new(name).color(if is_selected { color } else { Color32::GRAY })).clicked() {
-                    self.config.theme_id = id;
-                    self.channel.sync_state(self.config.clone());
+                    new_theme = Some(id);
                 }
             }
         });
+        if let Some(id) = new_theme {
+            self.config.theme_id = id;
+            self.channel.sync_state(self.config.clone());
+        }
 
         ui.add_space(8.0);
         ui.label(RichText::new("Theme Swatch Preview (Cyber-Neon):").weak());
@@ -318,21 +350,31 @@ impl TheiasPrismPanel {
 
         ui.separator();
         ui.label(RichText::new("Window Transparency & Blur:").strong());
-        ui.add(Slider::new(&mut self.config.background_opacity, 0.2..=1.0).text("Background Opacity"));
-        ui.add(Slider::new(&mut self.config.glass_blur_radius, 0.0..=50.0).text("Glass Blur Radius (px)"));
+        if ui.add(Slider::new(&mut self.config.background_opacity, 0.2..=1.0).text("Background Opacity")).changed() {
+            self.channel.sync_state(self.config.clone());
+        }
+        if ui.add(Slider::new(&mut self.config.glass_blur_radius, 0.0..=50.0).text("Glass Blur Radius (px)")).changed() {
+            self.channel.sync_state(self.config.clone());
+        }
 
         ui.separator();
         ui.label(RichText::new("Cursor Styling:").strong());
+        let mut new_cursor = None;
         ui.horizontal(|ui| {
             let cursors = [(0, "Block (█)"), (1, "Beam (|)"), (2, "Underline (_) ")];
             for (style, name) in cursors {
                 if ui.selectable_label(self.config.cursor_style == style, name).clicked() {
-                    self.config.cursor_style = style;
-                    self.channel.sync_state(self.config.clone());
+                    new_cursor = Some(style);
                 }
             }
         });
-        ui.checkbox(&mut self.config.cursor_blink, "Enable Cursor Blinking");
+        if let Some(style) = new_cursor {
+            self.config.cursor_style = style;
+            self.channel.sync_state(self.config.clone());
+        }
+        if ui.checkbox(&mut self.config.cursor_blink, "Enable Cursor Blinking").changed() {
+            self.channel.sync_state(self.config.clone());
+        }
     }
 
     fn render_typography_tab(&mut self, ui: &mut Ui) {
@@ -340,14 +382,18 @@ impl TheiasPrismPanel {
         ui.add_space(4.0);
 
         ui.label(RichText::new("Active Monospace Font:").strong());
+        let mut selected_font = None;
         ui.horizontal(|ui| {
             let fonts = ["OpenDyslexic Nerd Font (Active)", "JetBrains Mono", "Fira Code", "System Monospace"];
             for f in fonts {
                 if ui.selectable_label(self.active_font_name == f, f).clicked() {
-                    self.active_font_name = f.to_string();
+                    selected_font = Some(f.to_string());
                 }
             }
         });
+        if let Some(f) = selected_font {
+            self.active_font_name = f;
+        }
 
         ui.add_space(8.0);
         ui.label(RichText::new("Dynamic Font Sizing:").strong());
@@ -360,37 +406,34 @@ impl TheiasPrismPanel {
 
         ui.separator();
         ui.label(RichText::new("Typography Features:").strong());
-        ui.checkbox(&mut self.config.enable_kitty_keyboard, "Kitty Keyboard Protocol (Precise Modifiers)");
-        ui.label(RichText::new("Subpixel Antialiasing: Enabled (fontdue 8-bit coverage)").weak());
+        if ui.checkbox(&mut self.config.enable_kitty_keyboard, "Kitty Keyboard Protocol (Precise Modifiers)").changed() {
+            self.channel.sync_state(self.config.clone());
+        }
     }
 
     fn render_shortcuts_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("Keyboard Shortcuts & Hotkeys").color(Color32::from_rgb(250, 204, 21)));
+        ui.heading(RichText::new("Command & Keybinding Mapping").color(Color32::from_rgb(250, 204, 21)));
         ui.add_space(4.0);
 
-        ui.label(RichText::new("Configured Hotkeys:").strong());
-
-        let mut to_remove = None;
-        for (i, row) in self.keybindings.iter().enumerate() {
+        let mut to_delete = None;
+        for (idx, kb) in self.keybindings.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&row.chord).color(Color32::from_rgb(56, 189, 248)).strong());
-                ui.label("➔");
-                ui.label(&row.action);
+                ui.text_edit_singleline(&mut kb.chord);
+                ui.text_edit_singleline(&mut kb.action);
                 if ui.button("❌").clicked() {
-                    to_remove = Some(i);
+                    to_delete = Some(idx);
                 }
             });
         }
-        if let Some(idx) = to_remove {
+        if let Some(idx) = to_delete {
             self.keybindings.remove(idx);
         }
 
         ui.separator();
-        ui.label(RichText::new("Add Custom Shortcut:").strong());
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.new_chord);
             ui.text_edit_singleline(&mut self.new_action);
-            if ui.button("➕ Add Keybinding").clicked() && !self.new_chord.is_empty() && !self.new_action.is_empty() {
+            if ui.button("➕ Add Shortcut").clicked() && !self.new_chord.is_empty() {
                 self.keybindings.push(KeybindingRow {
                     chord: self.new_chord.clone(),
                     action: self.new_action.clone(),
@@ -403,32 +446,41 @@ impl TheiasPrismPanel {
     }
 
     fn render_shell_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("Metis Shell & Intelligent Abbreviations").color(Color32::from_rgb(255, 0, 127)));
+        ui.heading(RichText::new("Metis Shell & Telemetry Config").color(Color32::from_rgb(255, 0, 127)));
         ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Shell Executable Path:").strong());
-            ui.text_edit_singleline(&mut self.shell_path);
-        });
-
-        ui.add(Slider::new(&mut self.config.scrollback_limit, 10_000..=500_000).text("History Scrollback Limit (lines)"));
-        ui.checkbox(&mut self.config.enable_transient_prompt, "Enable Astraea Transient Prompt (❯ on Return)");
-        ui.add(Slider::new(&mut self.config.scan_timeout_ms, 5..=100).text("Git/SCM Status Timeout (ms)"));
+        ui.label("Executable Shell Binary:");
+        ui.text_edit_singleline(&mut self.shell_path);
 
         ui.separator();
-        ui.label(RichText::new("Metis Prefix Abbreviations:").strong());
-        let mut to_remove = None;
-        for (i, abbrev) in self.abbreviations.iter().enumerate() {
+        ui.label(RichText::new("Starship Prompt Integration & Timeouts:").strong());
+        if ui.checkbox(&mut self.config.enable_transient_prompt, "Enable Starship Transience (Instant Prompt Refresh)").changed() {
+            self.channel.sync_state(self.config.clone());
+        }
+
+        if ui.add(Slider::new(&mut self.config.scan_timeout_ms, 10..=100).text("Directory Scan Timeout (ms)")).changed() {
+            self.channel.sync_state(self.config.clone());
+        }
+        if ui.add(Slider::new(&mut self.config.command_timeout_ms, 100..=2000).text("Command Execution Timeout (ms)")).changed() {
+            self.channel.sync_state(self.config.clone());
+        }
+        if ui.add(Slider::new(&mut self.config.scrollback_limit, 10_000..=500_000).text("Scrollback Buffer Depth")).changed() {
+            self.channel.sync_state(self.config.clone());
+        }
+
+        ui.separator();
+        ui.label(RichText::new("Fish Abbreviation Expansion:").strong());
+        let mut del_abbrev = None;
+        for (idx, ab) in self.abbreviations.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&abbrev.keyword).color(Color32::from_rgb(57, 255, 20)).strong());
-                ui.label("➔");
-                ui.label(&abbrev.expansion);
+                ui.text_edit_singleline(&mut ab.keyword);
+                ui.text_edit_singleline(&mut ab.expansion);
                 if ui.button("❌").clicked() {
-                    to_remove = Some(i);
+                    del_abbrev = Some(idx);
                 }
             });
         }
-        if let Some(idx) = to_remove {
+        if let Some(idx) = del_abbrev {
             self.abbreviations.remove(idx);
         }
 
@@ -462,7 +514,7 @@ impl TheiasPrismPanel {
     }
 
     fn render_profiles_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("Configuration Profiles & Hermes IPC").color(Color32::from_rgb(0, 240, 255)));
+        ui.heading(RichText::new("Configuration Profiles & Hyprlang/Hermes").color(Color32::from_rgb(0, 240, 255)));
         ui.add_space(4.0);
 
         // Show profile selector
@@ -475,9 +527,6 @@ impl TheiasPrismPanel {
                     for name in &profiles {
                         ui.selectable_value(&mut self.current_profile, Some(name.clone()), name);
                     }
-                    if ui.button("<New>").clicked() {
-                        self.current_profile = Some("new_profile".to_string());
-                    }
                 });
         });
 
@@ -489,26 +538,62 @@ impl TheiasPrismPanel {
         ui.label(format!("Background Opacity: {:.2}", self.config.background_opacity));
 
         ui.separator();
+        let mut save_profile_req = false;
+        let mut load_profile_req = false;
+        let mut import_hyprlang_req = false;
+        let mut export_hyprlang_req = false;
+
         ui.horizontal(|ui| {
             if ui.button("💾 Save Profile").clicked() {
-                if let Some(name) = &self.current_profile {
-                    let name_clone = name.clone();
-                    let _ = self.save_profile(&name_clone);
-                }
+                save_profile_req = true;
             }
             if ui.button("📂 Load Profile").clicked() {
-                if let Some(name) = &self.current_profile {
-                    let name_clone = name.clone();
-                    let _ = self.load_profile(&name_clone);
-                }
+                load_profile_req = true;
             }
-            if ui.button("📤 Export JSON").clicked() {
-                // For simplicity, copy to clipboard (requires egui integration later)
+            if ui.button("📥 Import Hyprlang (.hl)").clicked() {
+                import_hyprlang_req = true;
+            }
+            if ui.button("📤 Export Hyprlang (.hl)").clicked() {
+                export_hyprlang_req = true;
             }
             if ui.button("🔄 Reset Defaults").clicked() {
                 self.reset_to_defaults();
             }
         });
+
+        if save_profile_req {
+            if let Some(name) = self.current_profile.clone() {
+                let _ = self.save_profile(&name);
+            }
+        }
+        if load_profile_req {
+            if let Some(name) = self.current_profile.clone() {
+                let _ = self.load_profile(&name);
+            }
+        }
+        if import_hyprlang_req {
+            if let Some(path) = Self::hyprlang_path() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(doc) = HyprlangParser::parse(&content) {
+                        self.config = HyprlangParser::to_theia_config(&doc);
+                        self.keybindings = HyprlangParser::to_keybinding_rows(&doc);
+                        self.channel.sync_state(self.config.clone());
+                        self.status_notification = Some(("Imported from Hyprlang (.hl)".into(), Instant::now()));
+                    }
+                }
+            }
+        }
+        if export_hyprlang_req {
+            let hl_str = HyprlangEmitter::emit(&self.config, &self.keybindings);
+            if let Some(path) = Self::hyprlang_path() {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&path, hl_str).is_ok() {
+                    self.status_notification = Some((format!("Exported to {}", path.display()), Instant::now()));
+                }
+            }
+        }
     }
 
     fn render_script_tab(&mut self, ui: &mut Ui) {
@@ -535,6 +620,7 @@ impl TheiasPrismPanel {
         ui.heading(RichText::new("❓ Help Tab").color(Color32::from_rgb(0, 240, 255)));
         ui.label("Placeholder for help and documentation UI.");
     }
+
     // Helper to list profile file names (without extension)
     fn list_profile_names(&self) -> Vec<String> {
         if let Some(mut dir) = Self::config_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {

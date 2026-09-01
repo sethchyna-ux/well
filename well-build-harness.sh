@@ -51,14 +51,21 @@ cargo check --workspace
 echo -e "${INFO} Running Subsystem Unit Tests..."
 cargo test --workspace
 
+# 5. Optional Hyperfine Benchmarking Step
+if [ "${1:-}" == "--benchmark" ] || [ "${1:-}" == "-b" ]; then
+    echo -e "${INFO} Executing Hyperfine Subsystem Benchmarks..."
+    ./well-benchmarks.sh
+fi
+
 echo -e "--------------------------------------------------------"
 echo -e "${SUCCESS} ALL WELL (PHREAR) SUBSYSTEMS COMPILED & TESTED!"
 echo -e "Subsystems verified:"
 echo -e "  • ATLAS      (winit Windowing Loop)"
 echo -e "  • ORPHEUS    (WebGPU Text Shaper & CRT Shader)"
-echo -e "  • METIS      (Fish Shell Core & O(k) Prefix Trie)"
+echo -e "  • METIS      (Fish Shell Core, HyperShell Engine & O(k) Prefix Trie)"
 echo -e "  • MNEME      (Ropey B-Tree Editor & Tree-sitter AST)"
 echo -e "  • ASTRAEA    (Sub-100µs Memory-Mapped State Vector)"
-echo -e "  • THEIA      (Visual egui Control Panel Dashboard)"
+echo -e "  • THEIA      (Visual egui Dashboard & Hyprlang .hl Engine)"
 echo -e "  • HERMES     (Lock-Free Seqlock IPC & JSON-RPC)"
+echo -e "  • HYPERFINE  (Subsystem Latency & Startup Benchmark Suite)"
 echo -e "--------------------------------------------------------"

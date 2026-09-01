@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn test_hermes_seqlock_consistency() {
         let default_payload = TheiaConfigPayload::default();
-        let channel = HermesChannel::new(default_payload);
+        let channel = HermesChannel::new(default_payload.clone());
         let read1 = channel.read_state();
         assert_eq!(read1.theme_id, default_payload.theme_id);
 

@@ -7,6 +7,9 @@
 pub mod pty;
 pub use pty::PtySession;
 
+pub mod hypershell;
+pub use hypershell::{HyperShellEngine, PipelineStage, TaskResult};
+
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
