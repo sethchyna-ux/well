@@ -50,6 +50,7 @@ pub struct TheiasPrismPanel {
     pub active_shader: String,
     pub shader_uniforms: ShaderUniforms,
     pub active_tab: usize,
+    pub is_open: bool,
 }
 
 impl TheiasPrismPanel {
@@ -77,7 +78,49 @@ impl TheiasPrismPanel {
             active_shader: "CRT curved curvature".to_string(),
             shader_uniforms: ShaderUniforms::default(),
             active_tab: 0,
+            is_open: false,
         }
+    }
+
+    pub fn render_window(&mut self, ctx: &Context) {
+        if !self.is_open {
+            return;
+        }
+
+        let mut is_open = self.is_open;
+        egui::Window::new(RichText::new("🏛️ Theia's Prism — Control Center").color(Color32::from_rgb(0, 240, 255)).strong())
+            .open(&mut is_open)
+            .default_width(460.0)
+            .default_height(520.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(self.active_tab == 0, "Astraea (Prompt)").clicked() { self.active_tab = 0; }
+                    if ui.selectable_label(self.active_tab == 1, "Metis (Shell)").clicked() { self.active_tab = 1; }
+                    if ui.selectable_label(self.active_tab == 2, "Orpheus (Shaders)").clicked() { self.active_tab = 2; }
+                    if ui.selectable_label(self.active_tab == 3, "Hermes (IPC)").clicked() { self.active_tab = 3; }
+                });
+                ui.separator();
+
+                ScrollArea::vertical().show(ui, |ui| {
+                    match self.active_tab {
+                        0 => self.render_astraea_tab(ui),
+                        1 => self.render_metis_tab(ui),
+                        2 => self.render_orpheus_tab(ui),
+                        _ => self.render_hermes_tab(ui),
+                    }
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(RichText::new("⚡ Apply & Sync to Hermes").color(Color32::BLACK)).clicked() {
+                        self.channel.sync_state(self.config);
+                    }
+                    ui.label(RichText::new("Lock-free atomic Seqlock active").weak());
+                });
+            });
+
+        self.is_open = is_open;
     }
 
     pub fn render(&mut self, ctx: &Context) {
