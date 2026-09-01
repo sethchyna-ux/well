@@ -7,6 +7,7 @@ The `well-shell` crate supervises the interactive terminal session, handles pseu
 ## Architecture & Modules
 
 ### 1. Pseudo-Terminal Host (`pty.rs` / `PtySession`)
+
 * **Shell Spawner**: Spawns interactive login shells, prioritizing `/opt/homebrew/bin/fish` -> `$SHELL` -> `/bin/zsh`.
 * **Automated Device Attribute Responder (`handle_terminal_queries`)**:
   * Intercepts VT/ANSI device queries written by modern shells like Fish 4.x.
@@ -17,10 +18,12 @@ The `well-shell` crate supervises the interactive terminal session, handles pseu
 * **VT100 Integration**: Feeds raw ANSI escape sequences directly into an internal `vt100::Parser` screen buffer for zero-overhead rendering.
 
 ### 2. Metis Autocomplete Core (`lib.rs` / `MetisExecutor`)
+
 * **In-Memory Prefix Trie**: Fast $\mathcal{O}(k)$ autocomplete where $k$ is active query length.
 * **Smart Ranking**: Tracks execution frequencies and timestamps for intelligent predictive suggestion.
 
 ### 3. HyperShell Engine (`hypershell.rs` / `HyperShellEngine`)
+
 * **Asynchronous Pipelines**: Runs multi-stage pipelines (`cmd1 | cmd2 | cmd3`) with Tokio streams.
 * **Background Tasks**: Non-blocking background job scheduling with microsecond-level wall-time telemetry (`TaskResult`).
 * **History Feed**: Automatically seeds executed commands into `MetisHistory` for subsequent trie autocomplete.

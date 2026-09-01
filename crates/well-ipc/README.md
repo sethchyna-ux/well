@@ -7,6 +7,7 @@ The `well-ipc` crate implements the high-speed inter-thread and inter-process co
 ## Subsystems
 
 ### 1. Hermes Seqlock (`HermesChannel` / `HermesSeqlock`)
+
 * **Role**: Coordinates lock-free state synchronization between the GUI configuration thread (Theia) and concurrent worker/rendering threads (Atlas & Orpheus).
 * **Guarantees**:
   * Lock-free atomic sequence counter (`AtomicU64`) using `SeqCst` ordering.
@@ -28,6 +29,7 @@ let current_config = channel.read_state();
 ```
 
 ### 2. Caduceus RPC (`CaduceusServer`)
+
 * **Role**: In-process asynchronous JSON-RPC 2.0 protocol engine for AI agent orchestration and remote tooling.
 * **Capabilities**:
   * Registers custom RPC methods (`echo`, `eval`, `inspect_metrics`).
