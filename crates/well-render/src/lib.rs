@@ -972,8 +972,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_vt100_to_cells() {
         let mut parser = vt100::Parser::new(24, 80, 0);
