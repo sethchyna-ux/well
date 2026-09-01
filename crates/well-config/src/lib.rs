@@ -725,21 +725,82 @@ impl TheiasPrismPanel {
     }
 
     fn render_help_tab(&mut self, ui: &mut Ui) {
-        ui.heading(RichText::new("Well Terminal — Architecture & Shortcuts").color(Color32::from_rgb(0, 240, 255)));
-        ui.add_space(6.0);
-        ui.label(RichText::new("Global Hotkeys:").strong());
-        ui.label("• Cmd+, or F12 / F1: Toggle Theia Control Center");
-        ui.label("• Esc: Close Theia Control Center");
-        ui.label("• Cmd+D / Cmd+Shift+D: Split Pane Horizontal / Vertical");
-        ui.label("• Cmd+K: Clear Terminal Buffer");
-        ui.label("• Cmd+= / Cmd+-: Increase / Decrease Font Size");
-        ui.add_space(8.0);
-        ui.label(RichText::new("Subsystem Telemetry:").strong());
-        ui.label("• ATLAS: Host Windowing & Event Loop (winit/Metal)");
-        ui.label("• ORPHEUS: GPU Text Shaping & WGPU Cell Matrix");
-        ui.label("• METIS: Shell Logic Core & Prefix-Trie History Engine");
-        ui.label("• HERMES: Zero-Lock Atomic Seqlock Inter-Process Bus");
-        ui.label("• HYPRLANG: Native Wayland/Hyprlang (.hl) Parser & Emitter");
+        ui.heading(RichText::new("Well-Shell Codex & Architecture Documentation").color(Color32::from_rgb(0, 240, 255)));
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            ui.label(RichText::new("Overview").strong().color(Color32::from_rgb(57, 255, 20)));
+            ui.label("Well-Shell (Phrear) is a native, sub-millisecond hardware-accelerated GPU terminal environment written in Rust with direct Metal/WebGPU instancing, zero-lock Hermes IPC, and native Fish 4.x + Starship prompt integration.");
+            ui.add_space(8.0);
+
+            ui.label(RichText::new("Keyboard Shortcuts:").strong().color(Color32::from_rgb(250, 204, 21)));
+            egui::Grid::new("shortcuts_grid")
+                .striped(true)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Shortcut").strong());
+                    ui.label(RichText::new("Action").strong());
+                    ui.label(RichText::new("Subsystem").strong());
+                    ui.end_row();
+
+                    ui.label("Cmd+, / Ctrl+,");
+                    ui.label("Toggle Theia Control Center");
+                    ui.label("Theia's Prism");
+                    ui.end_row();
+
+                    ui.label("Esc");
+                    ui.label("Dismiss / Close Control Center");
+                    ui.label("Theia's Prism");
+                    ui.end_row();
+
+                    ui.label("F1 / F12");
+                    ui.label("Alternate Control Center Toggle");
+                    ui.label("Theia's Prism");
+                    ui.end_row();
+
+                    ui.label("Cmd + D");
+                    ui.label("Split Pane Horizontal");
+                    ui.label("Metis Shell");
+                    ui.end_row();
+
+                    ui.label("Cmd + Shift + D");
+                    ui.label("Split Pane Vertical");
+                    ui.label("Metis Shell");
+                    ui.end_row();
+
+                    ui.label("Cmd + K");
+                    ui.label("Clear Terminal Buffer");
+                    ui.label("Orpheus Screen");
+                    ui.end_row();
+
+                    ui.label("Cmd+= / Cmd+-");
+                    ui.label("Increase / Decrease Font Size");
+                    ui.label("Orpheus Atlas");
+                    ui.end_row();
+
+                    ui.label("F5");
+                    ui.label("Run Diagnostics / Embedded Demo");
+                    ui.label("Metis Engine");
+                    ui.end_row();
+                });
+
+            ui.add_space(10.0);
+            ui.label(RichText::new("Subsystem Pantheon:").strong().color(Color32::from_rgb(56, 189, 248)));
+            ui.label("• ATLAS: Host platform windowing & winit event loop pacer (Metal / WebGPU).");
+            ui.label("• ORPHEUS: Single-pass GPU cell matrix renderer with fontdue glyph cache & CRT shaders.");
+            ui.label("• METIS: Interactive PTY supervisor with sub-0.1ms DA1/DA2 responder for Fish 4.x.");
+            ui.label("• HYPERSHELL: Asynchronous multi-stage task pipeline and background job execution engine.");
+            ui.label("• HERMES: Zero-lock atomic Seqlock (AtomicU64) for lock-free state synchronization.");
+            ui.label("• HYPRLANG: Declarative Wayland-style block configuration parser and emitter (.hl).");
+            ui.label("• ASTRAEA: Sub-100µs atomic prompt vector compiler bypassing process fork overhead.");
+            ui.label("• MNEME: Inline multi-line composition editor powered by an O(log n) B-tree rope buffer.");
+
+            ui.add_space(8.0);
+            ui.label(RichText::new("Configuration & Profiles:").strong().color(Color32::from_rgb(168, 85, 247)));
+            ui.label("• Profiles are stored under ~/.config/well/profiles/<name>.json.");
+            ui.label("• Use the 'Profiles & Hyprlang' tab to switch profiles, export .hl, or import .hl files.");
+            ui.label("• All settings changes update live over Hermes Seqlock without requiring an app restart.");
+        });
     }
 
     // Helper to list profile file names (without extension)
