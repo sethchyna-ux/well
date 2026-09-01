@@ -58,13 +58,25 @@ cat << 'EOF' > "${CONTENTS}/Info.plist"
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
 </dict>
 </plist>
 EOF
 
-# 5. Copy font assets if present
+# 5. Copy icon and asset files
+if [ -f "assets/AppIcon.icns" ]; then
+    cp "assets/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
+fi
+if [ -f "assets/images/logo.png" ]; then
+    cp "assets/images/logo.png" "${RESOURCES_DIR}/logo.png"
+fi
+
+# 6. Copy font assets if present
 if [ -d "assets/fonts" ]; then
     mkdir -p "${RESOURCES_DIR}/fonts"
     cp -R assets/fonts/* "${RESOURCES_DIR}/fonts/" 2>/dev/null || true
