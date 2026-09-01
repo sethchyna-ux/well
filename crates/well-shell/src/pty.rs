@@ -15,6 +15,46 @@ pub struct PtySession {
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
 
+/// Inspects incoming terminal output stream from the child process and auto-replies
+/// to standard VT/ANSI query escape sequences (DA1 Primary Device Attributes, DA2, DSR, etc.).
+///
+/// Modern shells like Fish 4.x send DA1 (`\x1b[c` or `\x1b[0c`) upon startup and block for up to
+/// 10 seconds if no response is received. Answering immediately makes shell startup instantaneous.
+fn handle_terminal_queries<W: Write + ?Sized>(data: &[u8], parser: &Arc<Mutex<vt100::Parser>>, writer: &mut W) {
+    // 1. Primary Device Attributes (DA1): \x1b[c or \x1b[0c
+    // Fish specifically requires a CSI sequence starting with '?' and ending with 'c'.
+    // Standard VT220 / xterm response: \x1b[?62;1;2;6;7;8;9c or \x1b[?1;2c
+    if data.windows(3).any(|w| w == b"\x1b[c") || data.windows(4).any(|w| w == b"\x1b[0c") {
+        let _ = writer.write_all(b"\x1b[?62;1;2;6;7;8;9c");
+        let _ = writer.flush();
+    }
+
+    // 2. Secondary Device Attributes (DA2): \x1b[>c or \x1b[>0c
+    if data.windows(4).any(|w| w == b"\x1b[>c") || data.windows(5).any(|w| w == b"\x1b[>0c") {
+        let _ = writer.write_all(b"\x1b[>0;10;1c");
+        let _ = writer.flush();
+    }
+
+    // 3. Device Status Report (Cursor Position): \x1b[6n
+    if data.windows(4).any(|w| w == b"\x1b[6n") {
+        let (row, col) = if let Ok(p) = parser.lock() {
+            let (r, c) = p.screen().cursor_position();
+            (r + 1, c + 1)
+        } else {
+            (1, 1)
+        };
+        let resp = format!("\x1b[{};{}R", row, col);
+        let _ = writer.write_all(resp.as_bytes());
+        let _ = writer.flush();
+    }
+
+    // 4. Device Status: \x1b[5n -> \x1b[0n (Ready, no malfunction)
+    if data.windows(4).any(|w| w == b"\x1b[5n") {
+        let _ = writer.write_all(b"\x1b[0n");
+        let _ = writer.flush();
+    }
+}
+
 impl PtySession {
     /// Spawns a new interactive login shell (defaulting to /opt/homebrew/bin/fish, $SHELL, or /bin/zsh)
     /// connected to a virtual terminal screen buffer of dimensions (rows, cols).
@@ -66,10 +106,14 @@ impl PtySession {
         let writer = pair.master.take_writer()?;
         let mut reader = pair.master.try_clone_reader()?;
 
+        let writer_arc = Arc::new(Mutex::new(writer));
+        let writer_clone = Arc::clone(&writer_arc);
+
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 10_000)));
         let parser_clone = Arc::clone(&parser);
 
-        // Background reader thread: captures raw ANSI/VT escape stream and processes into vt100 screen
+        // Background reader thread: captures raw ANSI/VT escape stream, responds to terminal queries,
+        // and processes into vt100 screen buffer
         thread::Builder::new()
             .name("well-pty-reader".to_string())
             .spawn(move || {
@@ -78,8 +122,12 @@ impl PtySession {
                     match reader.read(&mut buf) {
                         Ok(0) => break, // EOF
                         Ok(n) => {
+                            let slice = &buf[..n];
+                            if let Ok(mut w) = writer_clone.lock() {
+                                handle_terminal_queries(slice, &parser_clone, &mut **w);
+                            }
                             if let Ok(mut p) = parser_clone.lock() {
-                                p.process(&buf[..n]);
+                                p.process(slice);
                             }
                             on_output();
                         }
@@ -90,7 +138,7 @@ impl PtySession {
 
         Ok(Self {
             parser,
-            writer: Arc::new(Mutex::new(writer)),
+            writer: writer_arc,
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
         })
