@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build and distribution
+/dist/
+/target/zig-out/
+*.a
+*.o
+*.dylib
