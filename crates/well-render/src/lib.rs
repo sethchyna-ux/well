@@ -648,6 +648,7 @@ impl OrpheusRenderer {
         view: &wgpu::TextureView,
         encoder: &mut wgpu::CommandEncoder,
         cells: &[CellInstance],
+        clear_color: Option<wgpu::Color>,
     ) {
         if !cells.is_empty() {
             let max_cells = (self.instance_buffer.size() / std::mem::size_of::<CellInstance>() as u64) as usize;
@@ -655,13 +656,14 @@ impl OrpheusRenderer {
             self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(upload_cells));
         }
 
+        let default_clear = wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 };
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("OrpheusRenderPass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
+                    load: wgpu::LoadOp::Clear(clear_color.unwrap_or(default_clear)),
                     store: wgpu::StoreOp::Store,
                 },
             })],

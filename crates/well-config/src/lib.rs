@@ -358,7 +358,8 @@ impl TheiasPrismPanel {
                             ui.label(RichText::new("● Hermes Seqlock Active").color(Color32::from_rgb(100, 120, 140)).size(11.5));
                         }
                     } else {
-                        ui.label(RichText::new("● Hermes Seqlock Active").color(Color32::from_rgb(100, 120, 140)).size(11.5));
+                        let seq = self.channel.sequence();
+                        ui.label(RichText::new(format!("● Hermes Seqlock Active (Seq #{})", seq)).color(Color32::from_rgb(57, 255, 20)).size(11.5));
                     }
                 });
             });

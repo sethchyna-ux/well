@@ -395,7 +395,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
 
-                        renderer.draw_frame(&view, &mut encoder, &cells);
+                        // Read live configuration vector via Hermes Seqlock (atomic zero-lock synchronization)
+                        let live_config = state.channel.read_state();
+                        let op = (live_config.background_opacity as f64).clamp(0.05, 1.0);
+                        let clear_color = match live_config.theme_id {
+                            1 => wgpu::Color { r: 0.10 * op, g: 0.11 * op, b: 0.15 * op, a: op }, // Tokyo Night
+                            2 => wgpu::Color { r: 0.01 * op, g: 0.06 * op, b: 0.02 * op, a: op }, // Matrix Green
+                            3 => wgpu::Color { r: 0.12 * op, g: 0.04 * op, b: 0.14 * op, a: op }, // Synthwave '84
+                            _ => wgpu::Color { r: 0.02 * op, g: 0.03 * op, b: 0.05 * op, a: op }, // Cyber-Neon
+                        };
+
+                        renderer.draw_frame(&view, &mut encoder, &cells, Some(clear_color));
 
                         // Pass 2: Overlay egui UI (Persistent Settings HUD button & Control Center)
                         {

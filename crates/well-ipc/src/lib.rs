@@ -126,6 +126,11 @@ impl HermesSeqlock {
         let current = self.counter.load(Ordering::SeqCst);
         seq == current && seq % 2 == 0
     }
+
+    /// Returns current atomic sequence counter (even = idle, odd = writing).
+    pub fn sequence(&self) -> u64 {
+        self.counter.load(Ordering::SeqCst)
+    }
 }
 
 /// HermesChannel: Dual-slot shared-memory synchronization context.
@@ -165,6 +170,11 @@ impl<T: Clone> HermesChannel<T> {
             }
             std::hint::spin_loop();
         }
+    }
+
+    /// Returns current atomic sequence counter for IPC telemetry.
+    pub fn sequence(&self) -> u64 {
+        self.seqlock.sequence()
     }
 }
 
