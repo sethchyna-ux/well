@@ -730,12 +730,20 @@ impl OrpheusRenderer {
                     let mut fg = if is_default_fg {
                         // Semantic Cyber-Neon mapping when no explicit ANSI color is forced
                         if cell.bold() {
-                            0xF08 // Bold text: Vibrant Electric Neon Magenta (#FF007F)
+                            if ch.is_ascii_uppercase() {
+                                0x235 // Bold uppercase: Darker Slate-Navy (#223355)
+                            } else {
+                                0xF08 // Bold text: Vibrant Electric Neon Magenta (#FF007F)
+                            }
                         } else if cell.italic() {
-                            0xA5F // Italic text: Deep Neon Purple (#A855F7)
+                            if ch.is_ascii_uppercase() {
+                                0x124 // Italic uppercase: Deep Dark Slate (#112244)
+                            } else {
+                                0xA5F // Italic text: Deep Neon Purple (#A855F7)
+                            }
                         } else {
                             match ch {
-                                'A'..='Z' => 0x258, // Caps / Uppercase: Darker Slate-Cobalt Blue (#225588)
+                                'A'..='Z' => 0x124, // Caps / Uppercase: Deep Dark Slate-Cobalt (#112244)
                                 '0'..='9' => 0xA5F, // Numbers: Deep Neon Purple (#A855F7)
                                 '%' | '$' | '>' | '❯' | '#' | 'λ' | '➜' => 0xF08, // Prompt symbols: Electric Neon Magenta (#FF007F)
                                 '/' | '.' | '_' | '-' | ':' | '@' | '~' | '=' | '+' | '*' | '&' | '|' | '!' | '?' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' => 0x89A, // Punctuation & path separators: Slate Grey (#88929A)

@@ -239,7 +239,7 @@ impl TheiasPrismPanel {
 
         egui::Window::new(
             RichText::new("WELL // CONTROL CENTER")
-                .color(Color32::from_rgb(57, 255, 20))
+                .color(Color32::from_rgb(34, 180, 50))
                 .strong()
                 .size(13.5),
         )
