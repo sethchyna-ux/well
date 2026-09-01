@@ -102,6 +102,7 @@ pub struct OrpheusRenderer {
     pub next_stylized_slot: u32,
     pub next_double_wide_slot: u32,
     pub next_emoji_slot: u32,
+    pub font: Option<fontdue::Font>,
 }
 
 impl OrpheusRenderer {
@@ -130,7 +131,7 @@ impl OrpheusRenderer {
         // 1. Create a 2D Texture Array for the Glyph Atlas (layer-based texture format)
         // Array layers contain 1x32 grids of glyphs for cache-coherent GPU texture lookups.
         let atlas_width = cell_width as u32 * 32;
-        let atlas_height = cell_height as u32 * 32;
+        let atlas_height = cell_height as u32;
         let atlas_layers = 256; // 256 layers to hold all categories (ASCII, CJK, Emojis)
         
 
@@ -342,10 +343,11 @@ impl OrpheusRenderer {
         });
         queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(&indices));
 
-        // Flat cell buffer allocation
+        // Flat cell buffer allocation with ample headroom for full grid + cursor
+        let instance_buffer_size = ((grid_rows * grid_cols + 512).max(16384) * std::mem::size_of::<CellInstance>() as u32) as u64;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("OrpheusInstanceBuffer"),
-            size: (grid_rows * grid_cols * std::mem::size_of::<CellInstance>() as u32) as u64,
+            size: instance_buffer_size,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -371,6 +373,10 @@ impl OrpheusRenderer {
             next_stylized_slot: SLOT_ASCII_STYLIZED_START,
             next_double_wide_slot: SLOT_DOUBLE_WIDE_START,
             next_emoji_slot: SLOT_EMOJI_START,
+            font: {
+                let font_bytes = include_bytes!("../../../assets/fonts/OpenDyslexicNerdFont-Regular.otf");
+                fontdue::Font::from_bytes(&font_bytes[..], fontdue::FontSettings::default()).ok()
+            },
         };
 
         // Pre-rasterize all standard ASCII characters (32 to 126) + cursor block '█' into atlas
@@ -486,71 +492,107 @@ impl OrpheusRenderer {
                     pixels[idx + 3] = 255;
                 }
             }
-        } else if let Some(glyph) = BASIC_FONTS.get(ch).or_else(|| BLOCK_FONTS.get(ch)).or_else(|| BOX_FONTS.get(ch)) {
-            for font_y in 0..8u32 {
-                let row_byte = glyph[font_y as usize];
-                for font_x in 0..8u32 {
-                    if (row_byte >> font_x) & 1 == 1 {
-                        let start_x = (font_x * w) / 8;
-                        let end_x = ((font_x + 1) * w) / 8;
-                        let start_y = (font_y * h) / 8;
-                        let end_y = ((font_y + 1) * h) / 8;
+        } else {
+            let mut rasterized = false;
 
-                        for py in start_y..end_y {
-                            for px in start_x..end_x {
-                                if px < w && py < h {
+            if let Some(font) = &self.font {
+                // OpenDyslexic Nerd Font rasterization with antialiased coverage
+                let font_size = (h as f32 * 0.72).max(12.0);
+                let (metrics, bitmap) = font.rasterize(ch, font_size);
+
+                if metrics.width > 0 && metrics.height > 0 && !bitmap.is_empty() {
+                    let x_offset = ((w as i32 - metrics.width as i32) / 2).max(0) as u32;
+                    let baseline = (h as f32 * 0.76) as i32;
+                    let y_offset = (baseline - metrics.height as i32 - metrics.ymin).max(0) as u32;
+
+                    for by in 0..metrics.height {
+                        for bx in 0..metrics.width {
+                            let px = x_offset + bx as u32;
+                            let py = y_offset + by as u32;
+                            if px < w && py < h {
+                                let coverage = bitmap[by * metrics.width + bx];
+                                if coverage > 0 {
                                     let idx = ((py * w + px) * 4) as usize;
                                     pixels[idx] = 255;
                                     pixels[idx + 1] = 255;
                                     pixels[idx + 2] = 255;
-                                    pixels[idx + 3] = 255;
+                                    pixels[idx + 3] = coverage;
                                 }
                             }
                         }
                     }
+                    rasterized = true;
                 }
             }
-        } else if ch == '❯' || ch == '>' {
-            for y in 0..h {
-                let mid = h / 2;
-                let dist = if y < mid { y } else { h - 1 - y };
-                let target_x = (dist * (w.saturating_sub(2))) / (mid.max(1)) + 1;
-                for px in target_x.saturating_sub(1)..=(target_x + 1) {
-                    if px < w {
-                        let idx = ((y * w + px) * 4) as usize;
-                        pixels[idx] = 255;
-                        pixels[idx + 1] = 255;
-                        pixels[idx + 2] = 255;
-                        pixels[idx + 3] = 255;
-                    }
-                }
-            }
-        } else if ch == '═' {
-            let y1 = h / 3;
-            let y2 = (2 * h) / 3;
-            for x in 0..w {
-                let idx1 = ((y1 * w + x) * 4) as usize;
-                pixels[idx1] = 255;
-                pixels[idx1 + 1] = 255;
-                pixels[idx1 + 2] = 255;
-                pixels[idx1 + 3] = 255;
 
-                let idx2 = ((y2 * w + x) * 4) as usize;
-                pixels[idx2] = 255;
-                pixels[idx2 + 1] = 255;
-                pixels[idx2 + 2] = 255;
-                pixels[idx2 + 3] = 255;
-            }
-        } else if ch == '•' {
-            let mid_x = w / 2;
-            let mid_y = h / 2;
-            for y in (mid_y.saturating_sub(2))..=(mid_y + 2).min(h - 1) {
-                for x in (mid_x.saturating_sub(2))..=(mid_x + 2).min(w - 1) {
-                    let idx = ((y * w + x) * 4) as usize;
-                    pixels[idx] = 255;
-                    pixels[idx + 1] = 255;
-                    pixels[idx + 2] = 255;
-                    pixels[idx + 3] = 255;
+            if !rasterized {
+                if let Some(glyph) = BASIC_FONTS.get(ch).or_else(|| BLOCK_FONTS.get(ch)).or_else(|| BOX_FONTS.get(ch)) {
+                    for font_y in 0..8u32 {
+                        let row_byte = glyph[font_y as usize];
+                        for font_x in 0..8u32 {
+                            if (row_byte >> font_x) & 1 == 1 {
+                                let start_x = (font_x * w) / 8;
+                                let end_x = ((font_x + 1) * w) / 8;
+                                let start_y = (font_y * h) / 8;
+                                let end_y = ((font_y + 1) * h) / 8;
+
+                                for py in start_y..end_y {
+                                    for px in start_x..end_x {
+                                        if px < w && py < h {
+                                            let idx = ((py * w + px) * 4) as usize;
+                                            pixels[idx] = 255;
+                                            pixels[idx + 1] = 255;
+                                            pixels[idx + 2] = 255;
+                                            pixels[idx + 3] = 255;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if ch == '❯' || ch == '>' {
+                    for y in 0..h {
+                        let mid = h / 2;
+                        let dist = if y < mid { y } else { h - 1 - y };
+                        let target_x = (dist * (w.saturating_sub(2))) / (mid.max(1)) + 1;
+                        for px in target_x.saturating_sub(1)..=(target_x + 1) {
+                            if px < w {
+                                let idx = ((y * w + px) * 4) as usize;
+                                pixels[idx] = 255;
+                                pixels[idx + 1] = 255;
+                                pixels[idx + 2] = 255;
+                                pixels[idx + 3] = 255;
+                            }
+                        }
+                    }
+                } else if ch == '═' {
+                    let y1 = h / 3;
+                    let y2 = (2 * h) / 3;
+                    for x in 0..w {
+                        let idx1 = ((y1 * w + x) * 4) as usize;
+                        pixels[idx1] = 255;
+                        pixels[idx1 + 1] = 255;
+                        pixels[idx1 + 2] = 255;
+                        pixels[idx1 + 3] = 255;
+
+                        let idx2 = ((y2 * w + x) * 4) as usize;
+                        pixels[idx2] = 255;
+                        pixels[idx2 + 1] = 255;
+                        pixels[idx2 + 2] = 255;
+                        pixels[idx2 + 3] = 255;
+                    }
+                } else if ch == '•' {
+                    let mid_x = w / 2;
+                    let mid_y = h / 2;
+                    for y in (mid_y.saturating_sub(2))..=(mid_y + 2).min(h - 1) {
+                        for x in (mid_x.saturating_sub(2))..=(mid_x + 2).min(w - 1) {
+                            let idx = ((y * w + x) * 4) as usize;
+                            pixels[idx] = 255;
+                            pixels[idx + 1] = 255;
+                            pixels[idx + 2] = 255;
+                            pixels[idx + 3] = 255;
+                        }
+                    }
                 }
             }
         }
@@ -607,8 +649,11 @@ impl OrpheusRenderer {
         encoder: &mut wgpu::CommandEncoder,
         cells: &[CellInstance],
     ) {
-        // Upload dynamic instanced layout parameters to our buffer
-        self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(cells));
+        if !cells.is_empty() {
+            let max_cells = (self.instance_buffer.size() / std::mem::size_of::<CellInstance>() as u64) as usize;
+            let upload_cells = if cells.len() > max_cells { &cells[..max_cells] } else { cells };
+            self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(upload_cells));
+        }
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("OrpheusRenderPass"),
@@ -625,14 +670,16 @@ impl OrpheusRenderer {
             occlusion_query_set: None,
         });
 
-        render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        
-        // Single draw call for the entire cell matrix
-        render_pass.draw_indexed(0..6, 0, 0..(cells.len() as u32));
+        if !cells.is_empty() {
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            
+            // Single draw call for the entire cell matrix
+            render_pass.draw_indexed(0..6, 0, 0..(cells.len() as u32));
+        }
     }
 
     /// Helper to convert a string slice into a row of CellInstances
@@ -663,8 +710,8 @@ impl OrpheusRenderer {
         let rows = (screen_rows as u32).min(max_rows);
         let cols = (screen_cols as u32).min(max_cols);
 
-        let default_fg = 0xDDD; // Soft terminal white
-        let default_bg = 0x000; // Transparent background
+        let default_fg = 0x3F1; // Neon Green default terminal text (#39FF14)
+        let default_bg = 0x000; // Deep obsidian black (#050508)
 
         for row in 0..rows {
             for col in 0..cols {
@@ -676,7 +723,41 @@ impl OrpheusRenderer {
                         continue;
                     }
 
-                    let mut fg = vt100_color_to_rgb(cell.fgcolor(), default_fg);
+                    let is_default_fg = cell.fgcolor() == vt100::Color::Default;
+
+                    let mut fg = if is_default_fg {
+                        // Semantic Cyber-Neon mapping when no explicit ANSI color is forced
+                        if cell.bold() {
+                            0xF08 // Bold text: Vibrant Electric Neon Magenta (#FF007F)
+                        } else if cell.italic() {
+                            0xA5F // Italic text: Deep Neon Purple (#A855F7)
+                        } else {
+                            match ch {
+                                'A'..='Z' => 0x258, // Caps / Uppercase: Darker Slate-Cobalt Blue (#225588)
+                                '0'..='9' => 0xA5F, // Numbers: Deep Neon Purple (#A855F7)
+                                '%' | '$' | '>' | '❯' | '#' | 'λ' | '➜' => 0xF08, // Prompt symbols: Electric Neon Magenta (#FF007F)
+                                '/' | '.' | '_' | '-' | ':' | '@' | '~' | '=' | '+' | '*' | '&' | '|' | '!' | '?' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' => 0x89A, // Punctuation & path separators: Slate Grey (#88929A)
+                                'a'..='z' => 0x3F1, // Normal lowercase: High-Voltage Neon Green (#39FF14)
+                                _ => 0x3BF, // Special symbols: Electric Light Blue (#38BDF8)
+                            }
+                        }
+                    } else {
+                        // Explicit ANSI color from program (e.g. ls, git, nvim)
+                        let base_fg = vt100_color_to_rgb(cell.fgcolor(), default_fg);
+                        if cell.bold() {
+                            // Bold ANSI highlights
+                            match cell.fgcolor() {
+                                vt100::Color::Idx(1) => 0xF29, // Bright Electric Magenta
+                                vt100::Color::Idx(2) => 0x0F4, // Bright Neon Green
+                                vt100::Color::Idx(4) => 0x6DF, // Bright Ice Light Blue
+                                vt100::Color::Idx(5) => 0xC8F, // Bright Neon Purple
+                                _ => 0xF08, // Default bold color: Vibrant Neon Magenta
+                            }
+                        } else {
+                            base_fg
+                        }
+                    };
+
                     let mut bg = vt100_color_to_rgb(cell.bgcolor(), default_bg);
 
                     if cell.inverse() {
@@ -690,13 +771,7 @@ impl OrpheusRenderer {
                         effects |= 1;
                     }
                     if cell.bold() {
-                        let r = ((fg >> 8) & 0xF).min(15);
-                        let g = ((fg >> 4) & 0xF).min(15);
-                        let b = (fg & 0xF).min(15);
-                        fg = ((r.saturating_add(2).min(15)) << 8)
-                            | ((g.saturating_add(2).min(15)) << 4)
-                            | (b.saturating_add(2).min(15));
-                        instance.packed_colors = ((fg & 0xFFF) << 12) | (bg & 0xFFF);
+                        effects |= 2;
                     }
 
                     instance.glyph_id_and_effects |= effects << 13;
@@ -705,19 +780,19 @@ impl OrpheusRenderer {
             }
         }
 
-        // Draw cursor if not hidden
+        // Draw cursor if not hidden: Electric Light Blue block over black
         if !screen.hide_cursor() {
             let (cursor_row, cursor_col) = screen.cursor_position();
             let cr = cursor_row as u32;
             let cc = cursor_col as u32;
             if cr < max_rows && cc < max_cols {
-                cells.push(CellInstance::new(cc, cr, '█', 0x0EF, 0x000));
+                cells.push(CellInstance::new(cc, cr, '█', 0x3BF, 0x000));
             }
         }
     }
 }
 
-/// Converts a vt100::Color attribute into 12-bit packed RGB
+/// Converts a vt100::Color attribute into 12-bit packed RGB with the Cyber-Neon palette
 pub fn vt100_color_to_rgb(color: vt100::Color, default_color: u32) -> u32 {
     match color {
         vt100::Color::Default => default_color,
@@ -728,23 +803,24 @@ pub fn vt100_color_to_rgb(color: vt100::Color, default_color: u32) -> u32 {
             (r4 << 8) | (g4 << 4) | b4
         }
         vt100::Color::Idx(idx) => {
+            // Cyber-Neon Palette: Neon Green, Grey, Black, Magenta, Light Blue, Purple
             const ANSI_COLORS: [u32; 16] = [
-                0x000, // 0: Black
-                0xC11, // 1: Red
-                0x1C1, // 2: Green
-                0xCC1, // 3: Yellow
-                0x24C, // 4: Blue
-                0xC2C, // 5: Magenta
-                0x1CC, // 6: Cyan
-                0xCCC, // 7: White
-                0x666, // 8: Bright Black
-                0xF44, // 9: Bright Red
-                0x4F4, // 10: Bright Green
-                0xFF4, // 11: Bright Yellow
-                0x56F, // 12: Bright Blue
-                0xF5F, // 13: Bright Magenta
-                0x4FF, // 14: Bright Cyan
-                0xFFF, // 15: Bright White
+                0x000, // 0: Obsidian Black (#050508)
+                0xF08, // 1: Neon Magenta (#FF007F)
+                0x3F1, // 2: Neon Green (#39FF14)
+                0xFC1, // 3: Neon Amber/Yellow (#FACC15)
+                0x3BF, // 4: Electric Light Blue (#38BDF8)
+                0xA5F, // 5: Neon Purple (#A855F7)
+                0x0FF, // 6: Neon Cyan (#00F0FF)
+                0x89A, // 7: Slate Grey (#88929A)
+                0x456, // 8: Dark Slate Grey (#475569)
+                0xF29, // 9: Bright Electric Magenta (#FF3399)
+                0x0F4, // 10: Bright High-Voltage Neon Green (#00FF66)
+                0xFF4, // 11: Bright Yellow (#FFFF44)
+                0x6DF, // 12: Bright Ice Light Blue (#67E8F9)
+                0xC8F, // 13: Bright Neon Purple (#C084FC)
+                0x4FF, // 14: Bright Neon Cyan (#38E8FF)
+                0xFFA, // 15: Crisp White-Grey (#F1F5F9)
             ];
             if (idx as usize) < ANSI_COLORS.len() {
                 ANSI_COLORS[idx as usize]
@@ -822,7 +898,9 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     let r_bg = f32((bg_packed >> 8u) & 0xFu) / 15.0;
     let g_bg = f32((bg_packed >> 4u) & 0xFu) / 15.0;
     let b_bg = f32(bg_packed & 0xFu) / 15.0;
-    out.bg_color = vec4<f32>(r_bg, g_bg, b_bg, 1.0);
+    // Default background (0x000) is transparent; custom backgrounds have alpha 1.0
+    let bg_alpha = select(0.0, 1.0, bg_packed != 0u);
+    out.bg_color = vec4<f32>(r_bg, g_bg, b_bg, bg_alpha);
 
     // 2. Decode glyph slot allocations
     let slot_id = instance.glyph_id_and_effects & 0x1FFFu; // 13 bits (Max 8192 slots)
@@ -865,13 +943,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return sampled_color; // Color emoji directly bypassed
     }
 
+    // Composite glyph alpha with cell background (transparent by default so no black boxes)
+    let glyph_alpha = sampled_color.a;
+    let bg_alpha = in.bg_color.a * (1.0 - glyph_alpha);
+    let total_alpha = glyph_alpha + bg_alpha;
+
+    var rgb = in.fg_color.rgb * glyph_alpha + in.bg_color.rgb * bg_alpha;
+    if (total_alpha > 0.001) {
+        rgb = rgb / total_alpha;
+    }
+
+    var final_text_color = vec4<f32>(rgb, total_alpha);
+
     // Apply inline underline/strikethrough effects directly inside the pixel shader
     let has_underline = (in.effects & 1u) != 0u;   // Bit 13 (13 - 13 = 0)
     let has_strikethrough = (in.effects & 2u) != 0u; // Bit 14 (14 - 13 = 1)
-    
-    var final_text_color = mix(in.bg_color, in.fg_color, sampled_color.a);
-
-    // Draw horizontal lines inside specific pixel ranges to preserve rendering bounds
     let pixel_y = in.tex_coord.y;
     if (has_underline && pixel_y > 0.9) {
         final_text_color = in.fg_color;
@@ -903,4 +989,16 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_opendyslexic_fontdue_rasterization() {
+        let font_data = include_bytes!("../../../assets/fonts/OpenDyslexicNerdFont-Regular.otf");
+        let font = fontdue::Font::from_bytes(&font_data[..], fontdue::FontSettings::default())
+            .expect("Failed to parse OpenDyslexic font with fontdue");
+        let (metrics, bitmap) = font.rasterize('A', 32.0);
+        println!("Glyph 'A' metrics: width={}, height={}, bounds={:?}, bitmap len={}", metrics.width, metrics.height, metrics.bounds, bitmap.len());
+        assert!(metrics.width > 0 && metrics.height > 0);
+        assert!(!bitmap.is_empty());
+    }
 }
+

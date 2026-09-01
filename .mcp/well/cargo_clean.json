@@ -1,0 +1,7 @@
+{
+  "toolName": "cargo_clean",
+  "description": "Clean the Well Rust project using `cargo clean`.",
+  "command": "cargo clean",
+  "workingDirectory": "./",
+  "environment": {}
+}

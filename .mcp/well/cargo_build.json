@@ -1,0 +1,7 @@
+{
+  "toolName": "cargo_build",
+  "description": "Build the Well Rust project using cargo.",
+  "command": "cargo build --quiet",
+  "workingDirectory": "./",
+  "environment": {}
+}

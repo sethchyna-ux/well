@@ -7,6 +7,8 @@ members = [
     "crates/well-prompt",
     "crates/well-config",
     "crates/well-render",
+    "crates/well-wasm",
+    "crates/well-metrics",
 ]
 
 [workspace.package]
@@ -46,3 +48,8 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[features]
+default = []
+wasm = ["well-wasm"]
+metrics = ["well-metrics"]

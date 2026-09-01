@@ -33,12 +33,15 @@ impl PtySession {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let mut cmd = CommandBuilder::new(&shell);
         cmd.arg("-l");
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
 
         if let Ok(home) = std::env::var("HOME") {
             cmd.cwd(home);
         }
 
         let child = pair.slave.spawn_command(cmd)?;
+        drop(pair.slave); // Vital: closes slave fd in parent so reader EOF functions correctly on shell exit
         let writer = pair.master.take_writer()?;
         let mut reader = pair.master.try_clone_reader()?;
 

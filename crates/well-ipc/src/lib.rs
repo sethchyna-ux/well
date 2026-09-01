@@ -28,12 +28,22 @@ pub struct TheiaConfigPayload {
     pub enable_transient_prompt: bool,
     pub enable_kitty_keyboard: bool,
     pub scrollback_limit: u32,
+    pub font_size: f32,
+    pub cursor_style: u32, // 0 = Block, 1 = Beam, 2 = Underline
+    pub cursor_blink: bool,
+    pub screen_curvature: f32,
+    pub scanline_frequency: f32,
+    pub glow_radius: f32,
+    pub line_height: f32,
+    // New fields
+    pub profile_name: Option<String>,
+    pub shader_preset: u32,
 }
 
 impl Default for TheiaConfigPayload {
     fn default() -> Self {
         Self {
-            theme_id: 1, // Tokyo Night default
+            theme_id: 0, // Cyber-Neon
             background_opacity: 0.95,
             glass_blur_radius: 20.0,
             scan_timeout_ms: 30,
@@ -41,9 +51,44 @@ impl Default for TheiaConfigPayload {
             enable_transient_prompt: true,
             enable_kitty_keyboard: true,
             scrollback_limit: 100_000,
+            font_size: 14.0,
+            cursor_style: 0, // Block
+            cursor_blink: true,
+            screen_curvature: 0.05,
+            scanline_frequency: 0.5,
+            glow_radius: 1.2,
+            line_height: 1.2,
+            profile_name: None,
+            shader_preset: 0,
         }
     }
 }
+
+impl TheiaConfigPayload {
+    /// Apply a preset of shader parameters.
+    pub fn apply_preset(&mut self, preset_id: u32) {
+        match preset_id {
+            1 => {
+                self.screen_curvature = 0.3;
+                self.scanline_frequency = 1.0;
+                self.glow_radius = 2.0;
+            }
+            2 => {
+                self.screen_curvature = 0.1;
+                self.scanline_frequency = 0.3;
+                self.glow_radius = 0.5;
+            }
+            _ => {}
+        }
+        self.shader_preset = preset_id;
+    }
+
+    /// Rename the current profile.
+    pub fn rename_profile(&mut self, new_name: String) {
+        self.profile_name = Some(new_name);
+    }
+}
+
 
 /// HermesSeqlock: Lock-free atomic synchronization guard for zero-copy state reads.
 pub struct HermesSeqlock {
@@ -185,6 +230,10 @@ pub enum HermesAppCommand {
     InsertEditorText { text: String, respond_to: oneshot::Sender<Result<Value, String>> },
     /// Signal agent lifecycle events
     PublishAgentLifecycle { event_name: String, payload: Value, respond_to: oneshot::Sender<Result<Value, String>> },
+    /// Save a configuration profile
+    SaveProfile { name: String, payload: TheiaConfigPayload, respond_to: oneshot::Sender<Result<Value, String>> },
+    /// Load a configuration profile
+    LoadProfile { name: String, respond_to: oneshot::Sender<Result<Value, String>> },
 }
 
 /// Core service translating incoming JSON-RPC payloads into strongly typed responses.
@@ -304,9 +353,10 @@ mod tests {
 
     #[test]
     fn test_hermes_seqlock_consistency() {
-        let channel = HermesChannel::new(TheiaConfigPayload::default());
+        let default_payload = TheiaConfigPayload::default();
+        let channel = HermesChannel::new(default_payload);
         let read1 = channel.read_state();
-        assert_eq!(read1.theme_id, 1);
+        assert_eq!(read1.theme_id, default_payload.theme_id);
 
         let mut updated = read1;
         updated.theme_id = 42;

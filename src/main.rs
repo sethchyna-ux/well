@@ -150,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. Initialize egui context & egui-wgpu renderer for Theia's Prism overlay
     let egui_ctx = egui::Context::default();
+    egui_ctx.set_pixels_per_point(scale_factor);
     let mut egui_renderer = egui_wgpu::Renderer::new(
         &renderer.device,
         surface_format,
@@ -206,7 +207,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let pos = egui::pos2(position.x as f32 / scale_factor, position.y as f32 / scale_factor);
                         last_cursor_pos = pos;
                         raw_input.events.push(egui::Event::PointerMoved(pos));
-                        if state.config_panel.is_open {
+                        let in_hud_area = pos.x > (surface_config.width as f32 / scale_factor - 180.0) && pos.y < 60.0;
+                        if state.config_panel.is_open || in_hud_area {
                             window.request_redraw();
                         }
                     }
@@ -258,10 +260,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let is_super = modifiers_state.state().super_key();
                         let is_ctrl = modifiers_state.state().control_key();
 
-                        // Check Cmd+, or F12 settings drawer toggle
+                        // Check Cmd+, or Ctrl+, or F12 / F1 settings drawer toggle
                         let toggle_drawer = match &logical_key {
-                            Key::Character(c) if c == "," && is_super => true,
-                            Key::Named(NamedKey::F12) => true,
+                            Key::Character(c) if (c == "," || c == "<") && (is_super || is_ctrl) => true,
+                            Key::Named(NamedKey::F12) | Key::Named(NamedKey::F1) => true,
                             _ => false,
                         };
 
@@ -380,8 +382,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         renderer.draw_frame(&view, &mut encoder, &cells);
 
-                        // Pass 2: If Theia's Prism configuration drawer is active, overlay egui UI
-                        if state.config_panel.is_open {
+                        // Pass 2: Overlay egui UI (Persistent Settings HUD button & Control Center)
+                        {
                             raw_input.screen_rect = Some(egui::Rect::from_min_size(
                                 egui::Pos2::ZERO,
                                 egui::vec2(
