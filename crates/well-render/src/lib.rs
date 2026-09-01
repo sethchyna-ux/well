@@ -883,3 +883,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return final_text_color;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vt100_to_cells() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(b"Hello world\r\n");
+        let (screen_rows, screen_cols) = parser.screen().size();
+        for row in 0..screen_rows {
+            for col in 0..screen_cols {
+                if let Some(cell) = parser.screen().cell(row, col) {
+                    if !cell.contents().is_empty() && cell.contents() != " " {
+                        println!("Cell ({}, {}): {:?}", row, col, cell.contents());
+                    }
+                }
+            }
+        }
+    }
+}

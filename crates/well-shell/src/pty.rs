@@ -107,3 +107,19 @@ impl PtySession {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pty_session_spawns_and_reads() {
+        let session = PtySession::spawn(24, 80, || {}).expect("Failed to spawn PTY");
+        // Give shell 600ms to produce initial prompt or login banner
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let parser = session.parser.lock().unwrap();
+        let contents = parser.screen().contents();
+        println!("PTY SCREEN CONTENTS:\n{:?}", contents);
+        println!("CURSOR POS: {:?}", parser.screen().cursor_position());
+    }
+}
