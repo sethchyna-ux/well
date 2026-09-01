@@ -1,5 +1,6 @@
 # ⚡ Well-Shell (Phrear)
-### *Next-Generation Sub-Millisecond Native GPU Terminal & Shell Environment*
+
+## *Next-Generation Sub-Millisecond Native GPU Terminal & Shell Environment*
 
 [![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![Metal/WebGPU](https://img.shields.io/badge/Graphics-Metal%20%2F%20WebGPU%20(wgpu)-blueviolet.svg?style=flat-square)](https://wgpu.rs)
@@ -157,6 +158,7 @@ Well includes an automated test and benchmarking suite backed by `hyperfine`:
 ```
 
 This tests:
+
 1. Shell startup latencies (`fish` vs `zsh` vs `sh`).
 2. Starship prompt rendering overhead across shells.
 3. Subsystem micro-benchmarks (Hermes Seqlock atomic latency, Astraea prompt compile time).
@@ -165,7 +167,7 @@ This tests:
 
 ## 📦 Workspace Crates
 
-```
+```text
 crates/
 ├── well-core/       # Shared primitives, cell types, coordinate vectors
 ├── well-ipc/        # Hermes atomic Seqlock & Caduceus JSON-RPC server
