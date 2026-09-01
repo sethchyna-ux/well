@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let window = Arc::new(
         WindowBuilder::new()
-            .with_title("Well Terminal (Phrear) — Atlas Metal Host")
+            .with_title("Well-Shell")
             .with_inner_size(LogicalSize::new(1280.0, 720.0))
             .with_min_inner_size(LogicalSize::new(640.0, 360.0))
             .build(&event_loop)?,

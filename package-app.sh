@@ -43,9 +43,9 @@ cat << 'EOF' > "${CONTENTS}/Info.plist"
     <key>CFBundleIdentifier</key>
     <string>org.well.terminal</string>
     <key>CFBundleName</key>
-    <string>Well</string>
+    <string>Well-Shell</string>
     <key>CFBundleDisplayName</key>
-    <string>Well Terminal</string>
+    <string>Well-Shell</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

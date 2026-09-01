@@ -96,6 +96,9 @@ impl PtySession {
         cmd.arg("-l");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        cmd.env("TERM_PROGRAM", "Well-Shell");
+        cmd.env("WELL_SHELL", "1");
+        cmd.env("fish_greeting", "Well-Shell");
 
         if let Ok(home) = std::env::var("HOME") {
             cmd.cwd(home);
