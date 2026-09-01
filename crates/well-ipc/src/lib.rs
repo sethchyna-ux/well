@@ -18,7 +18,7 @@ use serde_json::Value;
 // =========================================================================
 
 /// Configuration Vector payload for the Visual Config Tab (Theia).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TheiaConfigPayload {
     pub theme_id: u32,
     pub background_opacity: f32,
@@ -137,7 +137,7 @@ pub struct HermesChannel<T = TheiaConfigPayload> {
 unsafe impl<T: Send> Send for HermesChannel<T> {}
 unsafe impl<T: Sync> Sync for HermesChannel<T> {}
 
-impl<T: Copy> HermesChannel<T> {
+impl<T: Clone> HermesChannel<T> {
     pub fn new(initial: T) -> Self {
         Self {
             seqlock: HermesSeqlock::new(),
@@ -158,7 +158,8 @@ impl<T: Copy> HermesChannel<T> {
     pub fn read_state(&self) -> T {
         loop {
             let seq = self.seqlock.read_begin();
-            let val = unsafe { *self.payload.get() };
+            // Clone the value to avoid requiring Copy
+            let val = unsafe { (*self.payload.get()).clone() };
             if self.seqlock.read_validate(seq) {
                 return val;
             }

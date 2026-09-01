@@ -78,7 +78,7 @@ impl TheiasPrismPanel {
 
         let mut panel = Self {
             channel,
-            config: initial_config,
+            config: initial_config.clone(),
             shell_path: std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string()),
             active_font_name: "OpenDyslexic Nerd Font (Active)".to_string(),
             abbreviations: initial_abbrevs,
@@ -90,6 +90,9 @@ impl TheiasPrismPanel {
             active_tab: 0,
             is_open: true, // Open by default on launch so settings are immediately visible
             status_notification: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            current_profile: None,
         };
 
         // Attempt to load saved config from disk if available
@@ -109,7 +112,7 @@ impl TheiasPrismPanel {
         }
 
         let persistent = PersistentConfig {
-            theia: self.config,
+            theia: self.config.clone(),
             shell_path: self.shell_path.clone(),
             active_font_name: self.active_font_name.clone(),
             abbreviations: self.abbreviations.clone(),
@@ -122,7 +125,7 @@ impl TheiasPrismPanel {
         std::fs::write(&path, json)
             .map_err(|e| format!("Failed to write to {}: {}", path.display(), e))?;
 
-        self.channel.sync_state(self.config);
+        self.channel.sync_state(self.config.clone());
         self.status_notification = Some((format!("Saved to {}", path.display()), Instant::now()));
         Ok(())
     }
@@ -137,7 +140,7 @@ impl TheiasPrismPanel {
                         self.active_font_name = persistent.active_font_name;
                         self.abbreviations = persistent.abbreviations;
                         self.keybindings = persistent.keybindings;
-                        self.channel.sync_state(self.config);
+                        self.channel.sync_state(self.config.clone());
                     }
                 }
             }
@@ -147,7 +150,7 @@ impl TheiasPrismPanel {
     pub fn reset_to_defaults(&mut self) {
         self.config = TheiaConfigPayload::default();
         self.active_font_name = "OpenDyslexic Nerd Font (Active)".to_string();
-        self.channel.sync_state(self.config);
+        self.channel.sync_state(self.config.clone());
         self.status_notification = Some(("Reset to factory defaults".to_string(), Instant::now()));
         // Clear undo/redo history on reset
         self.undo_stack.clear();
@@ -165,16 +168,16 @@ impl TheiasPrismPanel {
                 // Show Undo/Redo buttons when there is history
                 if ui.button("↶ Undo").clicked() && !self.undo_stack.is_empty() {
                     if let Some(prev) = self.undo_stack.pop() {
-                        self.redo_stack.push(self.config);
+                        self.redo_stack.push(self.config.clone());
                         self.config = prev;
-                        self.channel.sync_state(self.config);
+                        self.channel.sync_state(self.config.clone());
                     }
                 }
                 if ui.button("↷ Redo").clicked() && !self.redo_stack.is_empty() {
                     if let Some(next) = self.redo_stack.pop() {
-                        self.undo_stack.push(self.config);
+                        self.undo_stack.push(self.config.clone());
                         self.config = next;
-                        self.channel.sync_state(self.config);
+                        self.channel.sync_state(self.config.clone());
                     }
                 }
                 let color = if self.is_open { Color32::from_rgb(255, 0, 127) } else { Color32::from_rgb(57, 255, 20) };
@@ -209,6 +212,13 @@ impl TheiasPrismPanel {
                     if ui.selectable_label(self.active_tab == 3, RichText::new("🐚 Metis Shell").color(if self.active_tab == 3 { c_magenta } else { Color32::GRAY })).clicked() { self.active_tab = 3; }
                     if ui.selectable_label(self.active_tab == 4, RichText::new("📺 CRT Shaders").color(if self.active_tab == 4 { c_purple } else { Color32::GRAY })).clicked() { self.active_tab = 4; }
                     if ui.selectable_label(self.active_tab == 5, RichText::new("💾 Profiles").color(if self.active_tab == 5 { c_cyan } else { Color32::GRAY })).clicked() { self.active_tab = 5; }
+                    // New tabs
+                    if ui.selectable_label(self.active_tab == 6, RichText::new("📜 Script").color(if self.active_tab == 6 { c_green } else { Color32::GRAY })).clicked() { self.active_tab = 6; }
+                    if ui.selectable_label(self.active_tab == 7, RichText::new("▶️ Run").color(if self.active_tab == 7 { c_blue } else { Color32::GRAY })).clicked() { self.active_tab = 7; }
+                    if ui.selectable_label(self.active_tab == 8, RichText::new("🚀 Go").color(if self.active_tab == 8 { c_magenta } else { Color32::GRAY })).clicked() { self.active_tab = 8; }
+                    if ui.selectable_label(self.active_tab == 9, RichText::new("📁 File").color(if self.active_tab == 9 { c_amber } else { Color32::GRAY })).clicked() { self.active_tab = 9; }
+                    if ui.selectable_label(self.active_tab == 10, RichText::new("❓ Help").color(if self.active_tab == 10 { c_cyan } else { Color32::GRAY })).clicked() { self.active_tab = 10; }
+                    
                 });
                 ui.separator();
 
@@ -220,6 +230,12 @@ impl TheiasPrismPanel {
                         2 => self.render_shortcuts_tab(ui),
                         3 => self.render_shell_tab(ui),
                         4 => self.render_shaders_tab(ui),
+                        5 => self.render_profiles_tab(ui),
+                        6 => self.render_script_tab(ui),
+                        7 => self.render_run_tab(ui),
+                        8 => self.render_go_tab(ui),
+                        9 => self.render_file_tab(ui),
+                        10 => self.render_help_tab(ui),
                         _ => self.render_profiles_tab(ui),
                     }
                 });
@@ -229,10 +245,10 @@ impl TheiasPrismPanel {
                 // Bottom Action & Telemetry Bar
                 ui.horizontal(|ui| {
                     if ui.button(RichText::new("⚡ Apply Live").color(Color32::from_rgb(57, 255, 20)).strong()).clicked() {
-                        self.channel.sync_state(self.config);
+                        self.channel.sync_state(self.config.clone());
                         self.status_notification = Some(("Live synced over Hermes Seqlock".to_string(), Instant::now()));
                         // Push previous state onto undo stack
-                        self.undo_stack.push(self.config);
+                        self.undo_stack.push(self.config.clone());
                         // Clear redo stack on new change
                         self.redo_stack.clear();
                     }
@@ -275,7 +291,7 @@ impl TheiasPrismPanel {
                 let is_selected = self.config.theme_id == id;
                 if ui.selectable_label(is_selected, RichText::new(name).color(if is_selected { color } else { Color32::GRAY })).clicked() {
                     self.config.theme_id = id;
-                    self.channel.sync_state(self.config);
+                    self.channel.sync_state(self.config.clone());
                 }
             }
         });
@@ -312,7 +328,7 @@ impl TheiasPrismPanel {
             for (style, name) in cursors {
                 if ui.selectable_label(self.config.cursor_style == style, name).clicked() {
                     self.config.cursor_style = style;
-                    self.channel.sync_state(self.config);
+                    self.channel.sync_state(self.config.clone());
                 }
             }
         });
@@ -336,10 +352,10 @@ impl TheiasPrismPanel {
         ui.add_space(8.0);
         ui.label(RichText::new("Dynamic Font Sizing:").strong());
         if ui.add(Slider::new(&mut self.config.font_size, 10.0..=32.0).text("Font Size (pt)")).changed() {
-            self.channel.sync_state(self.config);
+            self.channel.sync_state(self.config.clone());
         }
         if ui.add(Slider::new(&mut self.config.line_height, 1.0..=2.0).text("Line Height Multiplier")).changed() {
-            self.channel.sync_state(self.config);
+            self.channel.sync_state(self.config.clone());
         }
 
         ui.separator();
@@ -435,12 +451,13 @@ impl TheiasPrismPanel {
         ui.add_space(4.0);
 
         if ui.add(Slider::new(&mut self.config.screen_curvature, 0.0..=0.5).text("CRT Barrel Curvature")).changed() {
-            self.channel.sync_state(self.config);
-if ui.add(Slider::new(&mut self.config.scanline_frequency, 0.0..=2.0).text("Scanline Frequency")).changed() {
-            self.channel.sync_state(self.config);
+            self.channel.sync_state(self.config.clone());
+        }
+        if ui.add(Slider::new(&mut self.config.scanline_frequency, 0.0..=2.0).text("Scanline Frequency")).changed() {
+            self.channel.sync_state(self.config.clone());
         }
         if ui.add(Slider::new(&mut self.config.glow_radius, 0.0..=3.0).text("Phosphor Glow Radius")).changed() {
-            self.channel.sync_state(self.config);
+            self.channel.sync_state(self.config.clone());
         }
     }
 
@@ -475,12 +492,14 @@ if ui.add(Slider::new(&mut self.config.scanline_frequency, 0.0..=2.0).text("Scan
         ui.horizontal(|ui| {
             if ui.button("💾 Save Profile").clicked() {
                 if let Some(name) = &self.current_profile {
-                    let _ = self.save_profile(name);
+                    let name_clone = name.clone();
+                    let _ = self.save_profile(&name_clone);
                 }
             }
             if ui.button("📂 Load Profile").clicked() {
                 if let Some(name) = &self.current_profile {
-                    let _ = self.load_profile(name);
+                    let name_clone = name.clone();
+                    let _ = self.load_profile(&name_clone);
                 }
             }
             if ui.button("📤 Export JSON").clicked() {
@@ -492,6 +511,30 @@ if ui.add(Slider::new(&mut self.config.scanline_frequency, 0.0..=2.0).text("Scan
         });
     }
 
+    fn render_script_tab(&mut self, ui: &mut Ui) {
+        ui.heading(RichText::new("📝 Script Tab").color(Color32::from_rgb(57, 255, 20)));
+        ui.label("Placeholder for script management UI.");
+    }
+
+    fn render_run_tab(&mut self, ui: &mut Ui) {
+        ui.heading(RichText::new("▶️ Run Tab").color(Color32::from_rgb(56, 189, 248)));
+        ui.label("Placeholder for run commands UI.");
+    }
+
+    fn render_go_tab(&mut self, ui: &mut Ui) {
+        ui.heading(RichText::new("🚀 Go Tab").color(Color32::from_rgb(255, 0, 127)));
+        ui.label("Placeholder for Go language integration UI.");
+    }
+
+    fn render_file_tab(&mut self, ui: &mut Ui) {
+        ui.heading(RichText::new("📁 File Tab").color(Color32::from_rgb(250, 204, 21)));
+        ui.label("Placeholder for file explorer UI.");
+    }
+
+    fn render_help_tab(&mut self, ui: &mut Ui) {
+        ui.heading(RichText::new("❓ Help Tab").color(Color32::from_rgb(0, 240, 255)));
+        ui.label("Placeholder for help and documentation UI.");
+    }
     // Helper to list profile file names (without extension)
     fn list_profile_names(&self) -> Vec<String> {
         if let Some(mut dir) = Self::config_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
@@ -535,7 +578,7 @@ if ui.add(Slider::new(&mut self.config.scanline_frequency, 0.0..=2.0).text("Scan
             let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
             let payload: TheiaConfigPayload = serde_json::from_str(&data).map_err(|e| e.to_string())?;
             self.config = payload;
-            self.channel.sync_state(self.config);
+            self.channel.sync_state(self.config.clone());
             self.current_profile = Some(name.to_string());
             self.status_notification = Some((format!("Loaded profile {}", name), Instant::now()));
             Ok(())

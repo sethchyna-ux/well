@@ -32,6 +32,8 @@ well-shell = { path = "crates/well-shell" }
 well-editor = { path = "crates/well-editor" }
 well-prompt = { path = "crates/well-prompt" }
 well-config = { path = "crates/well-config" }
+well-metrics = { path = "crates/well-metrics", optional = true }
+well-wasm = { path = "crates/well-wasm", optional = true }
 well-render = { path = "crates/well-render" }
 tokio = { version = "1.38", features = ["full"] }
 winit = { version = "0.29", features = ["rwh_06"] }

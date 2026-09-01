@@ -1,0 +1,6 @@
+cargo:rerun-if-changed=vendor/libghostty
+cargo:rustc-link-search=native=/Volumes/DAS/SD-DRIVE/well/target/debug/build/well-7dfae5692ba4708c/out
+cargo:rustc-link-lib=static=ghostty
+cargo:rustc-link-lib=framework=Metal
+cargo:rustc-link-lib=framework=AppKit
+cargo:rustc-link-lib=framework=CoreText
