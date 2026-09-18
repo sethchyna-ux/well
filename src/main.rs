@@ -268,6 +268,14 @@ fn detect_url_in_line(line: &str) -> Option<(usize, usize, String)> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,egui_extras=trace,egui=trace")).init();
+    
+    // Establish the background Tokio runtime driving Theia and Caduceus
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _rt_guard = rt.enter();
+
     let event_loop = EventLoopBuilder::<PtyEvent>::with_user_event().build()?;
 
     #[cfg(target_os = "macos")]
@@ -1015,6 +1023,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 logical_key,
                                 text,
                                 physical_key,
+                                repeat,
                                 ..
                             },
                         ..
@@ -1412,78 +1421,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        // Otherwise route to interactive PTY session
-                        let kitty_seq = if state.channel.read_state().enable_kitty_keyboard {
-                            let mut kitty_mods = 0;
-                            if is_shift { kitty_mods |= 1; }
-                            if is_alt { kitty_mods |= 2; }
-                            if is_ctrl { kitty_mods |= 4; }
-                            if is_super { kitty_mods |= 8; }
-                            let modifier_val = 1 + kitty_mods;
-                            
-                            if modifier_val > 1 {
-                                match &logical_key {
-                                    Key::Named(NamedKey::ArrowUp) => Some(format!("\x1b[1;{}A", modifier_val).into_bytes()),
-                                    Key::Named(NamedKey::ArrowDown) => Some(format!("\x1b[1;{}B", modifier_val).into_bytes()),
-                                    Key::Named(NamedKey::ArrowRight) => Some(format!("\x1b[1;{}C", modifier_val).into_bytes()),
-                                    Key::Named(NamedKey::ArrowLeft) => Some(format!("\x1b[1;{}D", modifier_val).into_bytes()),
-                                    Key::Named(NamedKey::Home) => Some(format!("\x1b[1;{}H", modifier_val).into_bytes()),
-                                    Key::Named(NamedKey::End) => Some(format!("\x1b[1;{}F", modifier_val).into_bytes()),
-                                    _ => {
-                                        if let Some(txt) = &text {
-                                            if let Some(ch) = txt.chars().next() {
-                                                let codepoint = ch as u32;
-                                                Some(format!("\x1b[{};{}u", codepoint, modifier_val).into_bytes())
-                                            } else { None }
-                                        } else { None }
-                                    }
-                                }
-                            } else { None }
-                        } else { None };
-
-                        let input_bytes: Option<Vec<u8>> = kitty_seq.or_else(|| match logical_key {
-                            Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
-                            Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
-                            Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
-                            Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-                            Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
-                            Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
-                            Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
-                            Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
-                            Key::Named(NamedKey::Home) => Some(b"\x1b[H".to_vec()),
-                            Key::Named(NamedKey::End) => Some(b"\x1b[F".to_vec()),
+                        let mut kitty_mods = 0;
+                        if is_shift { kitty_mods |= 1; }
+                        if is_alt { kitty_mods |= 2; }
+                        if is_ctrl { kitty_mods |= 4; }
+                        if is_super { kitty_mods |= 8; }
+                        
+                        let key_code = match &logical_key {
+                            Key::Named(NamedKey::Enter) => 257,
+                            Key::Named(NamedKey::Escape) => 256,
+                            Key::Named(NamedKey::Backspace) => 258,
+                            Key::Named(NamedKey::ArrowUp) => 259,
+                            Key::Named(NamedKey::ArrowDown) => 260,
+                            Key::Named(NamedKey::ArrowRight) => 261,
+                            Key::Named(NamedKey::ArrowLeft) => 262,
+                            Key::Named(NamedKey::Home) => 268,
+                            Key::Named(NamedKey::End) => 269,
+                            Key::Named(NamedKey::Tab) => 9,
                             _ => {
-                                if let Some(txt) = text {
-                                    if is_ctrl {
-                                        if let Some(ch) = txt.chars().next() {
-                                            if ch.is_ascii_alphabetic() {
-                                                let ctrl_code =
-                                                    (ch.to_ascii_lowercase() as u8) - b'a' + 1;
-                                                Some(vec![ctrl_code])
-                                            } else {
-                                                Some(txt.as_bytes().to_vec())
-                                            }
-                                        } else {
-                                            None
+                                if let Some(txt) = &text {
+                                    if let Some(ch) = txt.chars().next() {
+                                        let mut code = ch as u32;
+                                        if is_ctrl && ch.is_ascii_alphabetic() {
+                                            code = ch.to_ascii_lowercase() as u32;
                                         }
-                                    } else {
-                                        Some(txt.as_bytes().to_vec())
+                                        code
+                                    } else { 0 }
+                                } else { 0 }
+                            }
+                        };
+                        
+                        let event_type = if key_state.is_pressed() {
+                            if repeat { 3 } else { 1 }
+                        } else {
+                            2
+                        };
+                        
+                        if key_code != 0 {
+                            let input = well_ipc::KittyKeyboardInput {
+                                key_code,
+                                modifiers: kitty_mods,
+                                event_type,
+                            };
+                            
+                            // Encode down to legacy PTY format for compatibility sandbox
+                            if let Some(bytes) = well_shell::keyboard::KeyEncoder::encode_legacy(&input) {
+                                if let Ok(mut parser) = pty_session.parser.lock() {
+                                    if parser.screen().scrollback() > 0 {
+                                        parser.screen_mut().set_scrollback(0);
+                                        window.request_redraw();
                                     }
-                                } else {
-                                    None
                                 }
+                                let _ = pty_session.write_all(&bytes);
                             }
-                        });
-
-                        // Automatic scroll-to-bottom ONLY when typing actual input characters/commands
-                        if let Some(bytes) = input_bytes {
-                            if let Ok(mut parser) = pty_session.parser.lock() {
-                                if parser.screen().scrollback() > 0 {
-                                    parser.screen_mut().set_scrollback(0);
-                                    window.request_redraw();
-                                }
-                            }
-                            let _ = pty_session.write_all(&bytes);
                         }
                     }
                     WindowEvent::RedrawRequested => {

@@ -21,7 +21,7 @@ impl<const N: usize> ExecutionRouter<N> {
     /// Handles incoming Kitty Keyboard Input events.
     /// In a fully stateful router, this would route to the active PTY's `write` handle
     /// or directly process the AST command.
-    pub async fn handle_input(&self, input: KittyKeyboardInput, pty: Option<&mut PtySession>) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn handle_input(&self, input: KittyKeyboardInput, pty: Option<&mut PtySession>) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(pty_session) = pty {
             if let Some(legacy_bytes) = KeyEncoder::encode_legacy(&input) {
                 pty_session.write_all(&legacy_bytes)?;

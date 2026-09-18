@@ -52,10 +52,20 @@ impl KeyEncoder {
                 }
             }
             256 => Some(vec![27]), // Esc
+            258 => Some(vec![127]), // Backspace
             259 => Some(Self::csi(vt_mod, b'A')), // Up
             260 => Some(Self::csi(vt_mod, b'B')), // Down
             261 => Some(Self::csi(vt_mod, b'C')), // Right
             262 => Some(Self::csi(vt_mod, b'D')), // Left
+            268 => Some(Self::csi(vt_mod, b'H')), // Home
+            269 => Some(Self::csi(vt_mod, b'F')), // End
+            9 => { // Tab
+                if shift {
+                    Some(vec![27, b'[', b'Z'])
+                } else {
+                    Some(vec![9])
+                }
+            }
             _ => None,
         }
     }
