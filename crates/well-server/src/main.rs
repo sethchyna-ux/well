@@ -19,6 +19,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Simple command dispatch loop
     loop {
+        let block_opt = consumer.try_pop();
+        
+        if let Some(block) = block_opt {
+            // Serialize TypedBlocks and stream them over SSH stdout
+            let encoded = bincode::serialize(&block).unwrap();
+            let len = (encoded.len() as u32).to_be_bytes();
+            let _ = stdout.write_all(&len).await;
+            let _ = stdout.write_all(&encoded).await;
+            let _ = stdout.flush().await;
+            continue;
+        }
+
         tokio::select! {
             res = stdin.read(&mut buf) => {
                 match res {
@@ -31,13 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => break,
                 }
             }
-            Some(block) = async { consumer.try_pop() } => {
-                // Serialize TypedBlocks and stream them over SSH stdout
-                let encoded = bincode::serialize(&block).unwrap();
-                let len = (encoded.len() as u32).to_be_bytes();
-                let _ = stdout.write_all(&len).await;
-                let _ = stdout.write_all(&encoded).await;
-                let _ = stdout.flush().await;
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                // Yield to allow router tasks to execute and populate the ring buffer
             }
         }
     }
