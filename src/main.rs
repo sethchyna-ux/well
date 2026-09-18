@@ -1616,6 +1616,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let win_clone = Arc::clone(&window);
                             let full_output = egui_ctx.run(input, |ctx| {
                                 state.config_panel.render_window(ctx);
+
+                                let (scrollback_offset, max_scrollback) =
+                                    if let Ok(mut parser) = pty_session_clone.parser.lock() {
+                                        let cur = parser.screen().scrollback();
+                                        let max = get_max_scrollback(parser.screen_mut());
+                                        (cur, max)
+                                    } else {
+                                        (0, 0)
+                                    };
                                 
                                 if state.is_vcr_mode {
                                     egui::Window::new("Chronos VCR Timeline")
@@ -1626,34 +1635,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .show(ctx, |ui| {
                                             ui.horizontal(|ui| {
                                                 ui.label("⏱ Time-Travel Scrubbing Active");
+                                                
+                                                let step = (max_scrollback / 10).max(1);
+                                                
                                                 if ui.button("⏪").clicked() {
-                                                    println!("Scrub back");
+                                                    if let Ok(mut parser) = pty_session_clone.parser.lock() {
+                                                        let new_val = scrollback_offset.saturating_add(step).min(max_scrollback);
+                                                        parser.screen_mut().set_scrollback(new_val);
+                                                    }
                                                 }
-                                                // A mock slider for scrubbing
-                                                let mut scrub_val = 100.0;
-                                                ui.add(egui::Slider::new(&mut scrub_val, 0.0..=100.0).text("Time"));
+                                                
+                                                // Slider for scrubbing (0 is present, max_scrollback is oldest).
+                                                // We invert it for UI: 100% is present, 0% is oldest.
+                                                let mut scrub_percent = if max_scrollback > 0 {
+                                                    100.0 * (1.0 - (scrollback_offset as f64 / max_scrollback as f64))
+                                                } else {
+                                                    100.0
+                                                };
+                                                
+                                                let slider = ui.add(egui::Slider::new(&mut scrub_percent, 0.0..=100.0).text("Time %").show_value(true));
+                                                
+                                                if slider.changed() {
+                                                    if max_scrollback > 0 {
+                                                        let target_offset = ((1.0 - (scrub_percent / 100.0)) * max_scrollback as f64).round() as usize;
+                                                        if let Ok(mut parser) = pty_session_clone.parser.lock() {
+                                                            parser.screen_mut().set_scrollback(target_offset.min(max_scrollback));
+                                                        }
+                                                    }
+                                                }
+
                                                 if ui.button("⏩").clicked() {
-                                                    println!("Scrub forward");
+                                                    if let Ok(mut parser) = pty_session_clone.parser.lock() {
+                                                        let new_val = scrollback_offset.saturating_sub(step);
+                                                        parser.screen_mut().set_scrollback(new_val);
+                                                    }
                                                 }
                                                 if ui.button("Fork to Sandbox").clicked() {
                                                     println!("Forking sandbox...");
                                                 }
                                                 if ui.button("Exit (Ctrl+Shift+T)").clicked() {
                                                     state.is_vcr_mode = false;
+                                                    // Reset scrollback on exit
+                                                    if let Ok(mut parser) = pty_session_clone.parser.lock() {
+                                                        parser.screen_mut().set_scrollback(0);
+                                                    }
                                                 }
                                             });
                                         });
                                 }
-
-                                // If scrolled up into history, display floating Jump to Bottom badge & scrollbar
-                                let (scrollback_offset, max_scrollback) =
-                                    if let Ok(mut parser) = pty_session_clone.parser.lock() {
-                                        let cur = parser.screen().scrollback();
-                                        let max = get_max_scrollback(parser.screen_mut());
-                                        (cur, max)
-                                    } else {
-                                        (0, 0)
-                                    };
 
                                 let screen_w = surface_config.width as f32 / scale_factor;
                                 let screen_h = surface_config.height as f32 / scale_factor;
