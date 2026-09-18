@@ -18,11 +18,8 @@ RESOURCES_DIR="${CONTENTS}/Resources"
 
 echo -e "${INFO} Packaging ${APP_NAME}.app bundle..."
 
-# 1. Ensure release binary exists
-if [ ! -f "target/release/well" ]; then
-    echo -e "${INFO} Compiling release binary with cargo..."
-    cargo build --release
-fi
+echo -e "${INFO} Compiling fresh release binary with cargo..."
+cargo build --release --bin well
 
 # 2. Re-create bundle directory structure
 rm -rf "${APP_BUNDLE}"

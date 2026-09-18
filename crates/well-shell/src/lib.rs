@@ -4,10 +4,11 @@
 //! - MetisHistory: High-performance prefix-trie indexing command history with O(k) queries.
 //! - MetisExecutor: In-process shell parser and execution loop.
 
-pub mod pty;
-pub use pty::PtySession;
 
+pub mod engine;
+pub mod pty;
 pub mod hypershell;
+pub mod keyboard;
 pub use hypershell::{HyperShellEngine, PipelineStage, TaskResult};
 
 use std::collections::HashMap;

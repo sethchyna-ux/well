@@ -10,9 +10,10 @@ use std::thread;
 
 pub struct PtySession {
     pub parser: Arc<Mutex<vt100::Parser>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    pub graphic_events_rx: std::sync::Mutex<std::sync::mpsc::Receiver<well_render::graphics_protocol::GraphicEvent>>,
 }
 
 /// Inspects incoming terminal output stream from the child process and auto-replies
@@ -21,6 +22,10 @@ pub struct PtySession {
 /// Modern shells like Fish 4.x send DA1 (`\x1b[c` or `\x1b[0c`) upon startup and block for up to
 /// 10 seconds if no response is received. Answering immediately makes shell startup instantaneous.
 fn handle_terminal_queries<W: Write + ?Sized>(data: &[u8], parser: &Arc<Mutex<vt100::Parser>>, writer: &mut W) {
+    if !data.contains(&0x1b) {
+        return;
+    }
+
     // 1. Primary Device Attributes (DA1): \x1b[c or \x1b[0c
     // Fish specifically requires a CSI sequence starting with '?' and ending with 'c'.
     // Standard VT220 / xterm response: \x1b[?62;1;2;6;7;8;9c or \x1b[?1;2c
@@ -70,10 +75,23 @@ impl PtySession {
         rows: u16,
         cols: u16,
         custom_shell: Option<&str>,
-        on_output: F,
+        mut on_output: F,
     ) -> Result<Self, Box<dyn std::error::Error>>
     where
-        F: Fn() + Send + 'static,
+        F: FnMut() + Send + 'static,
+    {
+        Self::spawn_with_stream(rows, cols, custom_shell, move |_| on_output())
+    }
+
+    /// Spawns a new interactive shell with a raw stream callback delivering output bytes.
+    pub fn spawn_with_stream<F>(
+        rows: u16,
+        cols: u16,
+        custom_shell: Option<&str>,
+        mut on_stream: F,
+    ) -> Result<Self, Box<dyn std::error::Error>>
+    where
+        F: FnMut(&[u8]) + Send + 'static,
     {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -85,22 +103,32 @@ impl PtySession {
 
         let shell = if let Some(s) = custom_shell {
             s.to_string()
+        } else if cfg!(windows) {
+            std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string())
         } else if std::path::Path::new("/opt/homebrew/bin/fish").exists() {
             "/opt/homebrew/bin/fish".to_string()
+        } else if std::path::Path::new("/usr/bin/fish").exists() {
+            "/usr/bin/fish".to_string()
         } else if std::path::Path::new("/usr/local/bin/fish").exists() {
             "/usr/local/bin/fish".to_string()
+        } else if std::path::Path::new("/system/bin/sh").exists() {
+            "/system/bin/sh".to_string()
         } else {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
         };
+
         let mut cmd = CommandBuilder::new(&shell);
-        cmd.arg("-l");
+        if cfg!(unix) {
+            cmd.arg("-l");
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "Well-Shell");
         cmd.env("WELL_SHELL", "1");
         cmd.env("fish_greeting", "Well-Shell");
 
-        if let Ok(home) = std::env::var("HOME") {
+        let home_dir = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"));
+        if let Ok(home) = home_dir {
             cmd.cwd(home);
         }
 
@@ -115,24 +143,46 @@ impl PtySession {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 10_000)));
         let parser_clone = Arc::clone(&parser);
 
+        let (gfx_tx, gfx_rx) = std::sync::mpsc::channel();
+        
+        // Setup Chronos Journal
+        let mut journal = well_history::journal::Journal::new("/tmp/well-history.log", 10 * 1024 * 1024).ok();
+
         // Background reader thread: captures raw ANSI/VT escape stream, responds to terminal queries,
         // and processes into vt100 screen buffer
         thread::Builder::new()
             .name("well-pty-reader".to_string())
             .spawn(move || {
-                let mut buf = [0u8; 4096];
+                let mut buf = [0u8; 65536];
+                let mut interceptor = well_render::graphics_protocol::Interceptor::new();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break, // EOF
                         Ok(n) => {
                             let slice = &buf[..n];
-                            if let Ok(mut w) = writer_clone.lock() {
-                                handle_terminal_queries(slice, &parser_clone, &mut **w);
+                            
+                            // Log raw output to Chronos Journal
+                            if let Some(j) = journal.as_mut() {
+                                let _ = j.append(&well_history::journal::EventRecord::StdoutEvent(slice.to_vec()));
+                            }
+                            
+                            // 1. Intercept graphic protocols (APC Kitty Images, OSC 7/8)
+                            let sanitized = interceptor.process(slice);
+                            
+                            // Send intercepted events to GUI thread
+                            while let Some(event) = interceptor.events.pop_front() {
+                                let _ = gfx_tx.send(event);
+                            }
+                            
+                            if sanitized.contains(&0x1b) {
+                                if let Ok(mut w) = writer_clone.lock() {
+                                    handle_terminal_queries(&sanitized, &parser_clone, &mut **w);
+                                }
                             }
                             if let Ok(mut p) = parser_clone.lock() {
-                                p.process(slice);
+                                p.process(&sanitized);
                             }
-                            on_output();
+                            on_stream(&sanitized);
                         }
                         Err(_) => break,
                     }
@@ -144,6 +194,7 @@ impl PtySession {
             writer: writer_arc,
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
+            graphic_events_rx: std::sync::Mutex::new(gfx_rx),
         })
     }
 

@@ -5,6 +5,10 @@
 //!   Theia (GUI config) and concurrent worker threads (Metis / Orpheus).
 //! - Caduceus: In-process asynchronous JSON-RPC 2.0 protocol for agent orchestration.
 
+pub mod rpc;
+pub mod mcp;
+pub mod ring_buffer;
+
 use std::cell::UnsafeCell;
 use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,6 +42,58 @@ pub struct TheiaConfigPayload {
     // New fields
     pub profile_name: Option<String>,
     pub shader_preset: u32,
+    #[serde(default = "default_prompt_preset")]
+    pub prompt_preset: String,
+    #[serde(default = "default_font_name")]
+    pub font_name: String,
+    #[serde(default = "default_shell_path")]
+    pub shell_path: String,
+    #[serde(default = "default_pythia_provider")]
+    pub pythia_provider: String,
+    #[serde(default = "default_hf_model")]
+    pub hf_model: String,
+    #[serde(default)]
+    pub hf_token: String,
+    #[serde(default)]
+    pub gemini_api_key: String,
+    #[serde(default = "default_gemini_model")]
+    pub gemini_model: String,
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
+}
+
+fn default_pythia_provider() -> String {
+    "Gemma Abliterated (Hugging Face)".to_string()
+}
+
+fn default_hf_model() -> String {
+    "failspy/gemma-2-9b-it-abliterated".to_string()
+}
+
+fn default_gemini_model() -> String {
+    "gemini-2.0-flash".to_string()
+}
+
+fn default_ollama_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
+fn default_ollama_model() -> String {
+    "qwen2.5-coder".to_string()
+}
+
+fn default_prompt_preset() -> String {
+    "Jetpack".to_string()
+}
+
+fn default_font_name() -> String {
+    "System Monospace".to_string()
+}
+
+fn default_shell_path() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
 }
 
 impl Default for TheiaConfigPayload {
@@ -60,6 +116,16 @@ impl Default for TheiaConfigPayload {
             line_height: 1.2,
             profile_name: None,
             shader_preset: 0,
+            prompt_preset: default_prompt_preset(),
+            font_name: default_font_name(),
+            shell_path: default_shell_path(),
+            pythia_provider: default_pythia_provider(),
+            hf_model: default_hf_model(),
+            hf_token: String::new(),
+            gemini_api_key: String::new(),
+            gemini_model: default_gemini_model(),
+            ollama_url: default_ollama_url(),
+            ollama_model: default_ollama_model(),
         }
     }
 }
@@ -245,6 +311,10 @@ pub enum HermesAppCommand {
     SaveProfile { name: String, payload: TheiaConfigPayload, respond_to: oneshot::Sender<Result<Value, String>> },
     /// Load a configuration profile
     LoadProfile { name: String, respond_to: oneshot::Sender<Result<Value, String>> },
+    /// Apply an incoming editor diff proposal from an MCP agent
+    ProposeEditorDiff { file_uri: String, diff: String, respond_to: oneshot::Sender<Result<Value, String>> },
+    /// Spawn an isolated agent workspace using distrobox/chroot sandboxing
+    SpawnAgentWorkspace { command: String, args: Vec<String>, respond_to: oneshot::Sender<Result<Value, String>> },
 }
 
 /// Core service translating incoming JSON-RPC payloads into strongly typed responses.
@@ -375,5 +445,103 @@ mod tests {
 
         let read2 = channel.read_state();
         assert_eq!(read2.theme_id, 42);
+    }
+}
+
+// =========================================================================
+// 3. NATIVE PATH: KITTY KEYBOARD PROTOCOL & TYPED BLOCKS
+// =========================================================================
+
+/// Kitty Keyboard Protocol Input Event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KittyKeyboardInput {
+    pub key_code: u32,
+    pub modifiers: u32, // Shift, Alt, Ctrl, Super bitmask
+    pub event_type: u8, // Press(1), Release(2), Repeat(3)
+}
+
+/// Structured typed block for output transport over Hermes IPC
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TypedBlock {
+    StdoutChunk(Vec<u8>),
+    StderrChunk(Vec<u8>),
+    ExitStatus(i32),
+}
+
+/// A zero-copy lock-free ring buffer using HermesSeqlock for synchronization.
+/// This acts as the high-throughput transport mechanism for Native Path block output.
+pub struct HermesRingBuffer<const CAPACITY: usize> {
+    seqlock: HermesSeqlock,
+    head: std::sync::atomic::AtomicUsize,
+    tail: std::sync::atomic::AtomicUsize,
+    buffer: UnsafeCell<[Option<TypedBlock>; CAPACITY]>,
+}
+
+unsafe impl<const N: usize> Send for HermesRingBuffer<N> {}
+unsafe impl<const N: usize> Sync for HermesRingBuffer<N> {}
+
+impl<const CAPACITY: usize> HermesRingBuffer<CAPACITY> {
+    pub fn new() -> Self {
+        // Initialize an array of `None`
+        let buffer = std::array::from_fn(|_| None);
+        Self {
+            seqlock: HermesSeqlock::new(),
+            head: std::sync::atomic::AtomicUsize::new(0),
+            tail: std::sync::atomic::AtomicUsize::new(0),
+            buffer: UnsafeCell::new(buffer),
+        }
+    }
+
+    /// Safely push a TypedBlock onto the ring buffer
+    pub fn push(&self, block: TypedBlock) -> Result<(), &'static str> {
+        let seq = self.seqlock.write_begin();
+        
+        let tail = self.tail.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Relaxed);
+        
+        let next_tail = (tail + 1) % CAPACITY;
+        if next_tail == head {
+            self.seqlock.write_end(seq);
+            return Err("Ring buffer full");
+        }
+        
+        unsafe {
+            (*self.buffer.get())[tail] = Some(block);
+        }
+        
+        self.tail.store(next_tail, Ordering::Release);
+        self.seqlock.write_end(seq);
+        Ok(())
+    }
+
+    /// Lock-free pop operation from the ring buffer
+    pub fn pop(&self) -> Option<TypedBlock> {
+        loop {
+            let seq = self.seqlock.read_begin();
+            
+            let head = self.head.load(Ordering::Relaxed);
+            let tail = self.tail.load(Ordering::Acquire);
+            
+            if head == tail {
+                if self.seqlock.read_validate(seq) {
+                    return None; // Buffer empty
+                }
+                continue;
+            }
+            
+            if self.head.compare_exchange(head, (head + 1) % CAPACITY, Ordering::Release, Ordering::Relaxed).is_ok() {
+                let val = unsafe { (*self.buffer.get())[head].take() };
+                if self.seqlock.read_validate(seq) {
+                    return val;
+                }
+                return val;
+            }
+        }
+    }
+}
+
+impl<const N: usize> Default for HermesRingBuffer<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }

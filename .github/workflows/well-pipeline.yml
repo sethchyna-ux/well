@@ -1,0 +1,266 @@
+name: Well Subsystems Pipeline
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Workflow target stage to run or re-run"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - "all"
+          - "check-lint"
+          - "test-workspace"
+          - "zig-archive"
+          - "debug-build"
+          - "package-release"
+          - "benchmarks"
+          - "pipeline-core-metrics"
+          - "pipeline-wasm-runtime"
+          - "pipeline-orpheus-graphics"
+          - "pipeline-mobile-cross"
+          - "pipeline-hermes-cloud"
+          - "pipeline-all-stacks"
+      clean_cache:
+        description: "Bypass cached artifacts and force fresh compile"
+        required: false
+        default: false
+        type: boolean
+      debug_logging:
+        description: "Enable verbose debug tracing (RUST_LOG=trace)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Stage 1: Quality, Syntax & Code Standards Verification
+  # --------------------------------------------------------------------------
+  check-and-lint:
+    name: Check & Lint (${{ matrix.os }})
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'check-lint' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Zig Compiler
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo Dependencies
+        if: ${{ !inputs.clean_cache }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - name: Verify Code Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Compile Zig C-ABI Libghostty Archive
+        run: |
+          mkdir -p target/zig-out
+          zig build-lib vendor/libghostty/src/lib.zig -O ReleaseFast --name ghostty -lc -femit-bin=target/zig-out/libghostty.a
+
+      - name: Run Workspace Cargo Check
+        env:
+          RUST_LOG: ${{ inputs.debug_logging && 'trace' || 'info' }}
+        run: cargo check --workspace --all-targets
+
+      - name: Run Clippy Linter
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # --------------------------------------------------------------------------
+  # Stage 2: Workspace Unit & Subsystem Tests
+  # --------------------------------------------------------------------------
+  test-workspace:
+    name: Subsystem Tests (${{ matrix.os }})
+    needs: [check-and-lint]
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'test-workspace') }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Zig Compiler
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Dependencies
+        if: ${{ !inputs.clean_cache }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev xvfb
+
+      - name: Build Zig Libghostty Native Archive
+        run: |
+          mkdir -p target/zig-out
+          zig build-lib vendor/libghostty/src/lib.zig -O ReleaseFast --name ghostty -lc -femit-bin=target/zig-out/libghostty.a
+
+      - name: Execute Workspace Tests (macOS)
+        if: runner.os == 'macOS'
+        env:
+          RUST_LOG: ${{ inputs.debug_logging && 'trace' || 'debug' }}
+          WELL_MOCK_LLM: "1"
+        run: cargo test --workspace -- --nocapture
+
+      - name: Execute Workspace Tests (Linux with Headless Xvfb)
+        if: runner.os == 'Linux'
+        env:
+          RUST_LOG: ${{ inputs.debug_logging && 'trace' || 'debug' }}
+          WELL_MOCK_LLM: "1"
+        run: xvfb-run --auto-servernum cargo test --workspace -- --nocapture
+
+      - name: Upload Test Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-failure-logs-${{ runner.os }}
+          path: target/tmp/
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Stage 3: Debug & Release Builds
+  # --------------------------------------------------------------------------
+  build-and-package:
+    name: Build & Package (${{ matrix.os }})
+    needs: [test-workspace]
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'debug-build' || inputs.target == 'package-release') }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Zig Compiler
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install System Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
+      - name: Build Zig Libghostty
+        run: |
+          mkdir -p target/zig-out
+          zig build-lib vendor/libghostty/src/lib.zig -O ReleaseFast --name ghostty -lc -femit-bin=target/zig-out/libghostty.a
+
+      - name: Build Debug Binary
+        if: ${{ inputs.target == 'debug-build' }}
+        run: cargo build --bin well
+
+      - name: Build Optimized Release Binary
+        if: ${{ inputs.target != 'debug-build' }}
+        run: cargo build --release --bin well
+
+      - name: Package macOS Application Bundle (.app)
+        if: runner.os == 'macOS' && (inputs.target == 'all' || inputs.target == 'package-release' || github.event_name != 'workflow_dispatch')
+        run: |
+          chmod +x ./package-app.sh
+          # Build release bundle
+          APP_NAME="Well"
+          DIST_DIR="dist"
+          APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
+          CONTENTS="${APP_BUNDLE}/Contents"
+          mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Resources"
+          cp "target/release/well" "${CONTENTS}/MacOS/${APP_NAME}"
+          chmod +x "${CONTENTS}/MacOS/${APP_NAME}"
+          xattr -cr "${APP_BUNDLE}"
+          codesign --force --deep --sign - "${APP_BUNDLE}"
+          tar -czvf "dist/Well-macOS.tar.gz" -C dist Well.app
+
+      - name: Upload macOS Bundle Artifact
+        if: runner.os == 'macOS' && (inputs.target == 'all' || inputs.target == 'package-release' || github.event_name != 'workflow_dispatch')
+        uses: actions/upload-artifact@v4
+        with:
+          name: Well-macOS-Bundle
+          path: dist/Well-macOS.tar.gz
+          retention-days: 14
+
+      - name: Package Linux Binary
+        if: runner.os == 'Linux' && (inputs.target == 'all' || inputs.target == 'package-release' || github.event_name != 'workflow_dispatch')
+        run: |
+          mkdir -p dist
+          tar -czvf "dist/Well-linux-x86_64.tar.gz" -C target/release well
+
+      - name: Upload Linux Binary Artifact
+        if: runner.os == 'Linux' && (inputs.target == 'all' || inputs.target == 'package-release' || github.event_name != 'workflow_dispatch')
+        uses: actions/upload-artifact@v4
+        with:
+          name: Well-linux-x86_64
+          path: dist/Well-linux-x86_64.tar.gz
+          retention-days: 14

@@ -9,3 +9,7 @@ bytemuck = { version = "1.16", features = ["derive"] }
 font8x8 = "0.3.1"
 vt100 = { workspace = true }
 fontdue = "0.9.4"
+
+[dev-dependencies]
+well-ipc = { path = "../well-ipc" }
+tokio = { version = "1", features = ["full"] }

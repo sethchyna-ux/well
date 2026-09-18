@@ -15,3 +15,8 @@ Cargo.lock
 *.o
 *.dylib
 node_modules
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

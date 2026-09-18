@@ -4,7 +4,15 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "cargo test --workspace",
+    "build": "cargo build --bin well",
+    "start": "cargo run --bin well",
+    "pipeline": "./scripts/well-pipeline.sh",
+    "pipeline:check": "./scripts/well-pipeline.sh check",
+    "pipeline:test": "./scripts/well-pipeline.sh test",
+    "pipeline:rerun": "./scripts/well-pipeline.sh rerun",
+    "pipeline:debug": "./scripts/well-pipeline.sh debug --trace",
+    "pipeline:doctor": "./scripts/well-pipeline.sh doctor"
   },
   "keywords": [],
   "author": "",

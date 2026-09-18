@@ -1,0 +1,16 @@
+[package]
+name = "well-ffi"
+version = "0.1.0"
+edition = "2021"
+authors = ["Well Terminal Engineering Group"]
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+well-core = { path = "../well-core" }
+well-shell = { path = "../well-shell" }
+well-prompt = { path = "../well-prompt" }
+well-editor = { path = "../well-editor" }
+well-ipc = { path = "../well-ipc" }

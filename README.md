@@ -31,6 +31,8 @@ Well is architected around a unified pantheon of modular, highly specialized sub
 | **Theia's Prism** | `crates/well-config` | Embedded `egui` Control Center (`Cmd+,`), live theme switching, typography controls, and full-fidelity **Hyprlang** (`.hl`) parser/emitter. |
 | **Astraea** | `crates/well-prompt` | Sub-100µs atomic prompt vector compiler synchronizing git status, execution codes, and cwd without process forks. |
 | **Mneme** | `crates/well-editor` | Inline composition mode backed by an $\mathcal{O}(\log n)$ B-tree rope (`ropey`) and Tree-sitter syntax parser for multi-line scripting. |
+| **Pythia** | `crates/well-core/src/ai.rs` | Asynchronous AI copilot engine integrating Gemini & Gemma for natural language shell synthesis and stderr auto-diagnosis. |
+| **Talos** | `k8s/` | Cloud infrastructure subsystem: containerized Hermes PTY runner pods and in-terminal Kubernetes cluster telemetry inspector. |
 
 For deep cosmological and engineering background, read [MYTHOLOGY.md](file:///Users/yocan/Desktop/well/MYTHOLOGY.md).
 
@@ -41,7 +43,7 @@ For deep cosmological and engineering background, read [MYTHOLOGY.md](file:///Us
 * **⚡ Sub-Millisecond Fish 4.x Startup**: Implements an automated VT220/xterm Primary Device Attribute (DA1/DA2/DSR) responder in the PTY reader, satisfying Fish 4.x compatibility handshakes in `< 0.1ms` and eliminating the 10-second startup delay.
 * **🎮 Single-Pass GPU Rendering**: The Orpheus rendering pipeline uploads live VT100 cell matrices to GPU instance buffers in a single draw call, bypassing raster font overhead.
 * **🪐 Hyprlang Configuration Engine**: Supports declarative, human-readable Hyprland-style block configuration (`well.hl`) with live round-trip parsing, validation, and export.
-* **🪟 Theia Control Center (`Cmd+,`)**: Modern movable, resizable onyx-glass settings panel with 8 segmented tabs, embedded Undo/Redo history, and real-time Hermes sequence telemetry.
+* **🪟 Theia Control Center (`Cmd+,`)**: Modern movable, resizable onyx-glass settings panel with 10 segmented tabs (including Architecture Outline and 12-Week Build Timeline), embedded Undo/Redo history, and real-time Hermes sequence telemetry.
 * **🏎️ HyperShell Pipeline Engine**: Concurrent async task runner (`HyperShellEngine`) capable of streaming shell pipelines (`cmd1 | cmd2 | cmd3`) and scheduling non-blocking background jobs.
 * **📊 Hyperfine Benchmarking**: Integrated automated benchmarking suite (`well-benchmarks.sh`) measuring shell launch latency, prompt compile times, and subsystem throughput.
 * **🎨 Cyber-Neon Aesthetics**: Bespoke high-contrast dark palette with deep midnight slate-navy uppercase contrast (`#112244`), vivid neon accents, and customizable CRT phosphor shaders.
@@ -54,7 +56,13 @@ For deep cosmological and engineering background, read [MYTHOLOGY.md](file:///Us
 | :--- | :--- | :--- |
 | `Cmd + ,` or `Ctrl + ,` | Toggle Theia Control Center | Theia's Prism |
 | `F1` or `F12` | Toggle Theia Control Center (Alternative) | Theia's Prism |
-| `Escape` | Dismiss / Close Control Center | Theia's Prism |
+| `Escape` | Dismiss / Close Control Center or Clear Selection | Theia / Atlas |
+| `Cmd + C` / `Ctrl + Shift + C` | Copy Active Selection to System Clipboard | Atlas Host |
+| `Cmd + V` / `Ctrl + Shift + V` | Paste Clipboard to Terminal (with Bracketed Paste) | Metis Shell |
+| `Cmd + A` / `Ctrl + Shift + A` | Select All Visible Terminal Text | Atlas Host |
+| `Right Click` | Open Terminal Context Menu (Copy / Paste / Select All) | Atlas / Egui |
+| `Mouse Drag` (Terminal) | Highlight & Select Terminal Text | Atlas / Orpheus |
+| `Double Click` (Terminal) | Select Word Under Cursor | Atlas / Orpheus |
 | `Cmd + D` | Split Pane Horizontal | Metis Shell |
 | `Cmd + Shift + D` | Split Pane Vertical | Metis Shell |
 | `Cmd + K` | Clear Active Terminal Buffer | Orpheus Screen |

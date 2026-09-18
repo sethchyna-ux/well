@@ -1,0 +1,22 @@
+[package]
+name = "well-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Well Terminal Engineering Group"]
+license = "MIT"
+
+[[bin]]
+name = "well-cli"
+path = "src/main.rs"
+
+[dependencies]
+well-core = { path = "../well-core" }
+well-shell = { path = "../well-shell" }
+well-prompt = { path = "../well-prompt" }
+well-editor = { path = "../well-editor" }
+well-ipc = { path = "../well-ipc" }
+tokio = { version = "1.38", features = ["full"] }
+portable-pty = { workspace = true }
+vt100 = { workspace = true }
+libc = "0.2"
+well-llm = { path = "../well-llm" }

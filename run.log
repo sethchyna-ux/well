@@ -1,0 +1,13 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.83s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running `target/debug/well`
+Atlas Window created: 2560x1440 (scale factor: 2)
+Surface format: Bgra8UnormSrgb
+Grid matrix: 137 cols x 39 rows (cell: 18.199999x33.600002)
+[2026-09-17T03:37:51Z TRACE egui_extras::loaders] installed FileLoader
+[2026-09-17T03:37:51Z TRACE egui_extras::loaders] installed EhttpLoader
+[2026-09-17T03:37:51Z TRACE egui_extras::loaders] installed ImageCrateLoader
+[2026-09-17T03:37:51Z TRACE egui_extras::loaders] installed GifLoader
+[2026-09-17T03:37:51Z TRACE egui_extras::loaders] installed SvgLoader
+[2026-09-17T03:37:51Z WARN  egui_wgpu::renderer] Detected a linear (sRGBA aware) framebuffer Bgra8UnormSrgb. egui prefers Rgba8Unorm or Bgra8Unorm
