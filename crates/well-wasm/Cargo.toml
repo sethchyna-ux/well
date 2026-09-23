@@ -1,0 +1,18 @@
+[package]
+name = "well-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly host for Well terminal"
+license = "MIT"
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasmi = "0.36"
+# Reuse core Well crates (adjust path as needed)
+
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []

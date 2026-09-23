@@ -1,0 +1,15 @@
+[package]
+name = "well-metrics"
+version = "0.1.0"
+edition = "2021"
+description = "Prometheus metrics integration for Well terminal"
+license = "MIT"
+
+[dependencies]
+prometheus = "0.13"
+lazy_static = "1.4"
+# Use core crate if needed
+well-core = { path = "../well-core", optional = true }
+
+[features]
+default = []

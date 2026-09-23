@@ -1,0 +1,15 @@
+[package]
+name = "well-shell"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+well-ipc = { path = "../well-ipc" }
+portable-pty = { workspace = true }
+vt100 = { workspace = true }
+well-render = { version = "0.1.0", path = "../well-render" }
+well-history = { version = "0.1.0", path = "../well-history" }
+async-trait = "0.1.92"

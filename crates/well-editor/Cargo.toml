@@ -1,0 +1,8 @@
+[package]
+name = "well-editor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ropey = "1.6"
+tree-sitter = "0.22"

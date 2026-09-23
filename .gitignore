@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build and distribution
+/dist/
+/target/zig-out/
+*.a
+*.o
+*.dylib
+*.so
+*.log
+*.mp4
+*.m4a
+Gemini_Generated_Image_*.png
+node_modules/
+app/android/app/src/main/assets/*/well-cli
+app/android/app/src/main/jniLibs/**/*.so
+app/android/release.keystore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

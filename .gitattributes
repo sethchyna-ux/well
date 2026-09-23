@@ -1,0 +1,19 @@
+# Treat binaries, media, and compiled artifacts as binary to prevent diff thrashing and memory spikes
+*.mp4 binary
+*.m4a binary
+*.mov binary
+*.avi binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.exe binary
+*.rlib binary
+*.dylib binary
+*.so binary
+*.a binary
+*.o binary
+*.pyc binary
+*.pyo binary

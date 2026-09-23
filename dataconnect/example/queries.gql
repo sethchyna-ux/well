@@ -1,0 +1,148 @@
+mutation CreateUser @auth(level: USER) {
+  user_insert(data: {id_expr: "auth.uid", email: "user@example.com", username: "new_user"})
+}
+
+mutation UpdateUser($username: String!) @auth(level: USER) {
+  user_update(key: {id_expr: "auth.uid"}, data: {username: $username})
+}
+
+mutation DeleteUser @auth(level: USER) {
+  user_delete(key: {id_expr: "auth.uid"})
+}
+
+query GetCurrentUser @auth(level: USER) {
+  user(key: {id_expr: "auth.uid"}) {
+    username
+    email
+  }
+}
+
+query ListAllUsers @auth(level: PUBLIC, insecureReason: "Listing usernames is intended to be public profile data.") {
+  users {
+    username
+    avatarUrl
+  }
+}
+
+mutation CreateProfile($name: String!, $metadata: String) @auth(level: USER) {
+  profile_insert(data: {name: $name, metadata: $metadata, userId_expr: "auth.uid"})
+}
+
+mutation UpdateProfile($id: UUID!, $name: String) @auth(level: USER) {
+  profile_update(key: {id: $id}, data: {name: $name})
+}
+
+mutation DeleteProfile($id: UUID!) @auth(level: USER) {
+  profile_delete(key: {id: $id})
+}
+
+query GetProfile($id: UUID!) @auth(level: USER) {
+  profile(id: $id) {
+    name
+    metadata
+  }
+}
+
+query ListMyProfiles @auth(level: USER) {
+  profiles(where: {userId: {eq_expr: "auth.uid"}}) {
+    name
+    isDefault
+  }
+}
+
+mutation CreateShellConfig($profileId: UUID!, $prompt: String!, $alias: String!) @auth(level: USER) {
+  shellConfig_insert(data: {profileId: $profileId, promptTemplate: $prompt, aliasMapping: $alias})
+}
+
+mutation UpdateShellConfig($id: UUID!, $prompt: String) @auth(level: USER) {
+  shellConfig_update(key: {id: $id}, data: {promptTemplate: $prompt})
+}
+
+mutation DeleteShellConfig($id: UUID!) @auth(level: USER) {
+  shellConfig_delete(key: {id: $id})
+}
+
+query GetShellConfig($id: UUID!) @auth(level: USER) {
+  shellConfig(id: $id) {
+    promptTemplate
+    aliasMapping
+  }
+}
+
+query ListMyShellConfigs @auth(level: USER) {
+  shellConfigs(where: {profile: {userId: {eq_expr: "auth.uid"}}}) {
+    promptTemplate
+  }
+}
+
+mutation AddCommandHistory($cmd: String!, $tag: String) @auth(level: USER) {
+  commandHistory_insert(data: {userId_expr: "auth.uid", commandString: $cmd, contextTag: $tag, timestamp_time: {now: true}})
+}
+
+mutation DeleteCommandHistory($id: UUID!) @auth(level: USER) {
+  commandHistory_delete(key: {id: $id})
+}
+
+query GetCommandHistory($id: UUID!) @auth(level: USER) {
+  commandHistory(id: $id) {
+    commandString
+    timestamp
+  }
+}
+
+query ListMyCommandHistory @auth(level: USER) {
+  commandHistories(where: {userId: {eq_expr: "auth.uid"}}, orderBy: [{timestamp: DESC}]) {
+    commandString
+  }
+}
+
+mutation CreateTerminalTheme($name: String!, $palette: String!, $profileId: UUID!) @auth(level: USER) {
+  terminalTheme_insert(data: {name: $name, colorPalette: $palette, profileId: $profileId})
+}
+
+mutation UpdateTerminalTheme($id: UUID!, $opacity: Float) @auth(level: USER) {
+  terminalTheme_update(key: {id: $id}, data: {backgroundOpacity: $opacity})
+}
+
+mutation DeleteTerminalTheme($id: UUID!) @auth(level: USER) {
+  terminalTheme_delete(key: {id: $id})
+}
+
+query GetTerminalTheme($id: UUID!) @auth(level: USER) {
+  terminalTheme(id: $id) {
+    name
+    colorPalette
+  }
+}
+
+query ListMyTerminalThemes @auth(level: USER) {
+  terminalThemes(where: {profile: {userId: {eq_expr: "auth.uid"}}}) {
+    name
+  }
+}
+
+mutation SyncDevice($name: String!) @auth(level: USER) {
+  deviceSync_insert(data: {userId_expr: "auth.uid", deviceName: $name, lastSeen_time: {now: true}})
+}
+
+mutation UpdateDeviceSync($id: UUID!, $profileId: UUID) @auth(level: USER) {
+  deviceSync_update(key: {id: $id}, data: {currentProfileId: $profileId, lastSeen_time: {now: true}})
+}
+
+mutation DeleteDeviceSync($id: UUID!) @auth(level: USER) {
+  deviceSync_delete(key: {id: $id})
+}
+
+query GetDeviceSync($id: UUID!) @auth(level: USER) {
+  deviceSync(id: $id) {
+    deviceName
+    lastSeen
+  }
+}
+
+query ListMyDevices @auth(level: USER) {
+  deviceSyncs(where: {userId: {eq_expr: "auth.uid"}}) {
+    deviceName
+    lastSeen
+  }
+}

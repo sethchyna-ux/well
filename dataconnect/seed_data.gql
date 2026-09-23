@@ -1,0 +1,82 @@
+mutation SeedDatabase @transaction {
+  user_insertMany(data: [
+    {
+      id: "77777777-7777-7777-7777-777777777777",
+      email: "alice@example.com",
+      username: "alice_dev"
+    },
+    {
+      id: "88888888-8888-8888-8888-888888888888",
+      email: "bob@example.com",
+      username: "bob_ops"
+    }
+  ])
+  profile_insertMany(data: [
+    {
+      id: "11111111-1111-1111-1111-111111111111",
+      userId: "77777777-7777-7777-7777-777777777777",
+      name: "Alice Default",
+      isDefault: true
+    },
+    {
+      id: "22222222-2222-2222-2222-222222222222",
+      userId: "88888888-8888-8888-8888-888888888888",
+      name: "Bob Work",
+      isDefault: true
+    }
+  ])
+  shellConfig_insertMany(data: [
+    {
+      profileId: "11111111-1111-1111-1111-111111111111",
+      promptTemplate: "PS1='alice@dev > '",
+      aliasMapping: "ls=ls -la"
+    },
+    {
+      profileId: "22222222-2222-2222-2222-222222222222",
+      promptTemplate: "PS1='bob@ops > '",
+      aliasMapping: "k=kubectl"
+    }
+  ])
+  commandHistory_insertMany(data: [
+    {
+      userId: "77777777-7777-7777-7777-777777777777",
+      commandString: "git status",
+      timestamp: "2024-05-20T10:00:00Z"
+    },
+    {
+      userId: "88888888-8888-8888-8888-888888888888",
+      commandString: "docker ps",
+      timestamp: "2024-05-20T11:00:00Z"
+    }
+  ])
+  terminalTheme_insertMany(data: [
+    {
+      name: "Dark Mode",
+      colorPalette: "monokai",
+      profileId: "11111111-1111-1111-1111-111111111111",
+      blurIntensity: 5.5,
+      backgroundOpacity: 0.8
+    },
+    {
+      name: "Solarized",
+      colorPalette: "solarized",
+      profileId: "22222222-2222-2222-2222-222222222222",
+      blurIntensity: 2.0,
+      backgroundOpacity: 0.9
+    }
+  ])
+  deviceSync_insertMany(data: [
+    {
+      userId: "77777777-7777-7777-7777-777777777777",
+      deviceName: "MacBook Pro",
+      lastSeen: "2024-05-20T12:00:00Z",
+      currentProfileId: "11111111-1111-1111-1111-111111111111"
+    },
+    {
+      userId: "88888888-8888-8888-8888-888888888888",
+      deviceName: "ThinkPad X1",
+      lastSeen: "2024-05-20T12:05:00Z",
+      currentProfileId: "22222222-2222-2222-2222-222222222222"
+    }
+  ])
+}

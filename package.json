@@ -1,0 +1,31 @@
+{
+  "name": "well",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "cargo test --workspace",
+    "build": "cargo build --bin well",
+    "start": "cargo run --bin well",
+    "pipeline": "./scripts/well-pipeline.sh",
+    "pipeline:check": "./scripts/well-pipeline.sh check",
+    "pipeline:test": "./scripts/well-pipeline.sh test",
+    "pipeline:rerun": "./scripts/well-pipeline.sh rerun",
+    "pipeline:debug": "./scripts/well-pipeline.sh debug --trace",
+    "pipeline:doctor": "./scripts/well-pipeline.sh doctor"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "deep-extend": "^0.6.0",
+    "dottie": "^2.0.7",
+    "fish": "^0.0.0",
+    "ghostty": "^0.0.0",
+    "hyper-async": "^1.2.0",
+    "lodash": "^4.18.1",
+    "starship": "^0.0.0",
+    "validator": "^13.15.35"
+  }
+}
