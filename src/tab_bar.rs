@@ -126,6 +126,13 @@ impl TabBar {
         ptys
     }
 
+    /// Resizes all active PTY sessions across all tabs and panes.
+    pub fn resize_all(&self, rows: u16, cols: u16) {
+        for (_, pty) in self.all_ptys() {
+            let _ = pty.resize(rows, cols);
+        }
+    }
+
     /// Splits the active pane in the active tab.
     pub fn split_active_pane(
         &mut self,

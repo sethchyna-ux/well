@@ -609,8 +609,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if new_cols != grid_cols || new_rows != grid_rows {
                             grid_cols = new_cols;
                             grid_rows = new_rows;
-                            let _ = pty_session.resize(grid_rows.max(1) as u16, grid_cols.max(1) as u16);
+                            state.tab_bar.resize_all(grid_rows.max(1) as u16, grid_cols.max(1) as u16);
                         }
+
                         renderer.set_offsets(margin, top_bar_h, new_size.width as f32, new_size.height as f32);
                         renderer.set_dimensions(
                             new_size.width as f32,
@@ -651,8 +652,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let usable_h = (new_size.height as f32 - top_bar_h - margin).max(cell_height);
                         grid_cols = (usable_w / cell_width).floor() as u32;
                         grid_rows = (usable_h / cell_height).floor() as u32;
-                        let _ =
-                            pty_session.resize(grid_rows.max(1) as u16, grid_cols.max(1) as u16);
+                        state.tab_bar.resize_all(grid_rows.max(1) as u16, grid_cols.max(1) as u16);
+
                         renderer.set_offsets(margin, top_bar_h, new_size.width as f32, new_size.height as f32);
                         renderer.set_dimensions(
                             new_size.width as f32,
@@ -684,7 +685,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         raw_input.events.push(egui::Event::PointerMoved(pos));
 
                         if is_dragging_scrollbar {
-                            if let Ok(mut parser) = pty_session.parser.lock() {
+                            if let Ok(mut parser) = state.active_pty().parser.lock() {
                                 let max = get_max_scrollback(parser.screen_mut());
                                 if max > 0 {
                                     let ratio = 1.0 - (pos.y / screen_h.max(1.0)).clamp(0.0, 1.0);
@@ -749,7 +750,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let row = ((pos.y - top_bar_h) / cell_h).floor() as u16;
                                 let col = ((pos.x - margin) / cell_w).floor() as usize;
 
-                                if let Ok(parser) = pty_session.parser.lock() {
+                                if let Ok(parser) = state.active_pty().parser.lock() {
                                     let line_text = get_line_text_from_screen(parser.screen(), row);
                                     if let Some((start_col, end_col, url)) = detect_url_in_line(&line_text) {
                                         if col >= start_col && col <= end_col {
@@ -898,7 +899,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
 
                                     if on_scrollbar_track {
-                                        if let Ok(mut parser) = pty_session.parser.lock() {
+                                        if let Ok(mut parser) = state.active_pty().parser.lock() {
                                             let max = get_max_scrollback(parser.screen_mut());
                                             if max > 0 {
                                                 is_dragging_scrollbar = true;
@@ -943,7 +944,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         is_selecting = false;
                                         mouse_dragged = false;
                                         context_menu_pos = None;
-                                        if let Ok(parser) = pty_session.parser.lock() {
+                                        if let Ok(parser) = state.active_pty().parser.lock() {
                                             let text = well_render::extract_text_from_screen(parser.screen(), line_sel);
                                             if !text.is_empty() {
                                                 copy_to_clipboard(&text);
@@ -957,7 +958,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         return;
                                     } else if click_count == 2 {
                                         // Double-click: Select word!
-                                        if let Ok(parser) = pty_session.parser.lock() {
+                                        if let Ok(parser) = state.active_pty().parser.lock() {
                                             if let Some(word_sel) = well_render::find_word_bounds(parser.screen(), col, row) {
                                                 terminal_selection = Some(word_sel);
                                                 is_selecting = false;
@@ -992,7 +993,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     } else if let Some(sel) = terminal_selection {
                                         // Auto-copy on select completion!
-                                        if let Ok(parser) = pty_session.parser.lock() {
+                                        if let Ok(parser) = state.active_pty().parser.lock() {
                                             let text = well_render::extract_text_from_screen(parser.screen(), sel);
                                             if !text.is_empty() {
                                                 copy_to_clipboard(&text);
@@ -1061,7 +1062,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
 
                             if lines != 0 {
-                                if let Ok(mut parser) = pty_session.parser.lock() {
+                                if let Ok(mut parser) = state.active_pty().parser.lock() {
                                     let mouse_mode = parser.screen().mouse_protocol_mode();
                                     let mouse_encoding = parser.screen().mouse_protocol_encoding();
                                     let is_alt_screen = parser.screen().alternate_screen();
@@ -1101,7 +1102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                         drop(parser);
-                                        let _ = pty_session.write_all(&bytes);
+                                        let _ = state.active_pty().write_all(&bytes);
                                         window.request_redraw();
                                     } else if is_alt_screen {
                                         // Alternate scroll mode (less, man, git diff, info)
@@ -1113,7 +1114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             bytes.extend_from_slice(seq);
                                         }
                                         drop(parser);
-                                        let _ = pty_session.write_all(&bytes);
+                                        let _ = state.active_pty().write_all(&bytes);
                                         window.request_redraw();
                                     } else {
                                         // Standard terminal scrollback buffer
@@ -1530,7 +1531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let is_copy = (is_super && is_key_c) || (is_ctrl && is_shift && is_key_c);
                         if is_copy {
                             if let Some(sel) = terminal_selection {
-                                if let Ok(parser) = pty_session.parser.lock() {
+                                if let Ok(parser) = state.active_pty().parser.lock() {
                                     let text = well_render::extract_text_from_screen(parser.screen(), sel);
                                     if !text.is_empty() {
                                         copy_to_clipboard(&text);
@@ -1544,6 +1545,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             window.request_redraw();
                             return;
                         }
+
 
                         // Terminal Paste Shortcut (Cmd+V on macOS, Ctrl+Shift+V on Linux/Windows, or Ctrl+V on Windows/Linux)
                         let is_paste = (is_super && is_key_v)
@@ -2669,9 +2671,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             if let Some(injection) = state.config_panel.pending_pty_injection.take() {
-                                let _ = pty_session.write_all(injection.as_bytes());
+                                let _ = state.active_pty().write_all(injection.as_bytes());
                                 window.request_redraw();
                             }
+
 
                             let repaint_delay = full_output
                                 .viewport_output
