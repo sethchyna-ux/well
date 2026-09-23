@@ -111,13 +111,42 @@ Exit criteria:
 - The same clean-state packaged-app acceptance test runs locally and in CI.
 - Diagnostics do not create user state or expose provider secrets.
 
-## Deferred until core is stable
+## Phase 8: multi-session tabs, tiling panes & Mneme inline composer
 
-- Mobile app productionization.
-- Kubernetes/cloud runner.
-- Remote terminal product.
-- WebAssembly plugin ecosystem.
-- Multi-session tabs/panes.
-- Sandboxed replay/forking from scrollback history.
-- Configurable renderer font families and CRT post-processing controls.
-- Desktop PTY integration for Astraea prompt replacement and Mneme inline composition.
+Status: complete.
+
+- Recursive binary-tree tiling layout engine (`src/pane_manager.rs`) with arbitrary horizontal/vertical splits (`Cmd+D`, `Cmd+Shift+D`).
+- Multi-session tab lifecycle model (`src/tab_bar.rs`) with tab cycling (`Cmd+[` / `Cmd+]`) and active PTY multiplexing.
+- Mneme inline multi-line composition overlay (`Ctrl+E` toggle) integrated into the active PTY event loop with `Ctrl+Enter` execution and `Esc` dismissal.
+- Hermes IPC RPCs (`surface.switch_tab`, `surface.split`) runtime-backed.
+
+## Phase 9: direct GPU Kitty graphics pipeline
+
+Status: complete.
+
+- Dedicated `ImagePipeline` (`crates/well-render/src/pipeline.rs`) on `wgpu`.
+- Escape sequence parser for `\x1b_G...;payload\x1b\` with multi-chunk base64 payload reconstruction.
+- Direct GPU texture bind group allocation, filtering sampler, dynamic instance vertex buffers, and bounded memory limits.
+
+## Phase 10: enterprise AI safety & OS Keychain
+
+Status: complete.
+
+- OS Keychain credential resolution (`crates/well-llm/src/keychain.rs`) via macOS `security-framework` and Secret Service with zero plaintext persistence.
+- Destructive shell command AST validation gate.
+- Sandboxed historical command replay (`crates/well-history/src/sandbox.rs`) with stdin piping.
+- WebAssembly plugin host validation and execution (`crates/well-wasm/src/lib.rs`).
+
+## Phase 11: unified Rust GUI & GPUI architectural evolution
+
+Status: in progress.
+
+- Retiring Flutter/Dart FFI bridge to eliminate cross-language texture copying overhead and double-toolchain friction.
+- Single-binary zero-copy GPU rendering surface (`wgpu` + `egui` + custom shaders).
+- Clear architectural migration path toward GPUI (Zed's declarative GPU framework) for native macOS look-and-feel and sub-millisecond redraws.
+
+## Deferred / opt-in capabilities
+
+- Kubernetes cloud runner deployment automation.
+- Configurable CRT post-processing shaders.
+
