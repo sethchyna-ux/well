@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.well-agent/
+training/.venv/
+training/adapters/
+training/fused_model/
+training/data/*.jsonl
+training/data/export-report.json
+evals/results/
