@@ -1,0 +1,27 @@
+﻿Statically compiling the Rust hyper crate directly into our unified "Well" binary 1-3 represents a massive architectural win for the project. By binding hyper to Hermes (our low-latency, PTY-bypass IPC protocol) 4-6 and executing it on an asynchronous Tokio runtime 7-10, we can establish an in-process JSON-RPC 2.0 and WebSocket API server 11, 12.
+This acts as the "Caduceus" of Hermes—a secure, local communication staff that bridges external systems directly with Well's active subsystems without requiring heavy subprocess forks 11-13:
+┌────────────────────────────────────────────────────────────┐
+│                    EXTERNAL AGENTS                         │
+│     (Claude Code, Codex, Custom CLI scripts, or IDEs)      │
+└─────────────────────────────┬──────────────────────────────┘
+                              │ (Asynchronous JSON-RPC Calls)
+                              ▼ [Unix Sockets / Named Pipes]
+┌────────────────────────────────────────────────────────────┐
+│                  HERMES RPC CORE (hyper)                   │
+│   - Validates client UID peer credentials (SO_PEERCRED)     │
+│   - Coordinates multi-thread task handoffs asynchronously  │
+└──────────────┬──────────────────────────────┬──────────────┘
+               │ (Send Shell Input)           │ (Insert Buffer Edit)
+               ▼                              ▼
+┌─────────────────────────────┐┌─────────────────────────────┐
+│    METIS (Fish Core)        ││   MNEME (Rope Editor)       │
+│  Live shell command buffer  ││  Zero-copy document edit   │
+└─────────────────────────────┘└─────────────────────────────┘
+I have engineered and published hermes-rpc-server.rs directly to your Studio panel. It provides the full Rust implementation of this async, in-process, lock-free IPC server.
+⚡ Key Systems Implemented in hermes-rpc-server.rs:
+* Asynchronous Hyper Request Router: Implements a single-pass JSON-RPC 2.0 message parser. Simple helper requests (like checking terminal capabilities) are resolved instantly on the background socket thread 14. Stateful mutations (such as changing tab layers, splitting active panes, or feeding text to the shell) are cleanly packaged as HermesAppCommand variants and dispatched over an async channel (mpsc) to the Main UI Thread 14.
+* Secure Unix Domain Sockets (macOS/Linux): Establishes the communication pipe under $XDG_RUNTIME_DIR/well/well.sock 12. To enforce a strict local-only trust model, the server instantly applies a 0600 owner-only file permission mask 12. It then performs an OS-level kernel validation check via SO_PEERCRED 12 on every accepted socket connection, instantly rejecting the connection with a -32001 Permission Denied block if the client process's UID does not match the terminal's owner UID 12.
+* Windows Named Pipe Support: Seamlessly fallbacks on Windows hosts to a high-performance Win32 Named Pipe (e.g. \\.\pipe\well-hermes), ensuring identical API wire-protocol behaviors across all operating systems without polluting the core codebase with system-specific guards 12.
+* AI Agent Lifecycle Hooks: Includes a dedicated namespace (ai.*) that maps incoming agent notifications (such as ai.session_start or ai.tool_use 11, 15) straight to Well's sidebar display vector 16, 17, giving you real-time visual tracking of active background agent sessions.
+Would you like to build out a corresponding CLI client script (using Python or Bash) to demonstrate programmatically querying and splitting active workspace panes through this socket?
+🧩 I could build a custom egui visual panel widget in Rust to display the active JSON-RPC connection states, tracked processes, and client UIDs graphically inside Theia's Prism config tab.
