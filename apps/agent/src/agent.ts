@@ -1,14 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { Chat, LMStudioClient, type Tool } from "@lmstudio/sdk";
-import type { AgentConfig, AgentRunResult } from "./types.js";
+import type {
+  AgentConfig,
+  AgentRunResult,
+  AgentToolCallRecord,
+} from "./types.js";
 import { WorkspaceBoundary } from "./paths.js";
 import { READ_ONLY_TOOLS, createAgentTools } from "./tools.js";
 import { TraceStore } from "./traces.js";
 
 export const SYSTEM_PROMPT = [
   "You are Well Agent, a careful local coding and systems assistant.",
-  "Inspect the workspace before proposing changes.",
+  "Inspect the whole workspace before proposing changes: begin with list_files without a glob unless the user names an exact file.",
+  "Search without a glob when the relevant directory is unknown, and read likely documentation and source files.",
+  "After locating a candidate file, read the relevant lines before answering; use exact declarations and documentation instead of inferring names or values from paths.",
+  "Before saying information is absent, list all workspace files and perform at least one workspace-wide search.",
   "Use the provided tools for file and command work.",
+  "For a focused edit to an existing file, prefer replace_text with text copied exactly from read_file; use apply_patch for larger edits or new files.",
   "Keep changes focused on the user's request.",
   "Never attempt to escape the selected workspace.",
   "Explain the completed result and any verification failures concisely.",
@@ -45,6 +53,7 @@ export class AgentRuntime {
   >();
   private toolCallCount = 0;
   private invalidToolCallCount = 0;
+  private readonly toolCallRecords = new Map<number, AgentToolCallRecord>();
 
   private constructor(
     private readonly config: AgentConfig,
@@ -98,6 +107,7 @@ export class AgentRuntime {
     const started = performance.now();
     const startingToolCallCount = this.toolCallCount;
     const startingInvalidToolCallCount = this.invalidToolCallCount;
+    const startingCallIds = new Set(this.toolCallRecords.keys());
     let response = "";
     this.chat.append("user", prompt);
     await this.trace?.event({
@@ -147,6 +157,11 @@ export class AgentRuntime {
             request.arguments,
             this.options.approval,
           );
+          this.toolCallRecords.set(callId, {
+            callId,
+            ...request,
+            allowed,
+          });
           await this.trace?.event({
             kind: "tool_decision",
             at: new Date().toISOString(),
@@ -163,15 +178,18 @@ export class AgentRuntime {
           resultValue: unknown,
         ) => {
           const request = this.requests.get(callId);
+          const content =
+            typeof resultValue === "string"
+              ? resultValue
+              : JSON.stringify(resultValue);
+          const record = this.toolCallRecords.get(callId);
+          if (record) record.result = content;
           await this.trace?.event({
             kind: "tool_result",
             at: new Date().toISOString(),
             callId,
             name: request?.name,
-            content:
-              typeof resultValue === "string"
-                ? resultValue
-                : JSON.stringify(resultValue),
+            content,
           });
         },
         handleInvalidToolRequest: (
@@ -204,6 +222,9 @@ export class AgentRuntime {
         toolCallCount: this.toolCallCount - startingToolCallCount,
         invalidToolCallCount:
           this.invalidToolCallCount - startingInvalidToolCallCount,
+        toolCalls: [...this.toolCallRecords.values()].filter(
+          call => !startingCallIds.has(call.callId),
+        ),
       };
     } catch (error) {
       await this.trace?.event({

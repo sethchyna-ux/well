@@ -7,7 +7,7 @@ import { loadConfig } from "./config.js";
 import { runEvaluation } from "./eval.js";
 import { exportTrainingData } from "./exporter.js";
 import { rateSession } from "./traces.js";
-import type { Rating } from "./types.js";
+import type { EvalTask, Rating } from "./types.js";
 
 interface ParsedArguments {
   positionals: string[];
@@ -49,7 +49,7 @@ function usage(): string {
   return [
     "Usage:",
     "  well-agent chat --workspace PATH [--model ID] [--config PATH]",
-    "  well-agent eval --suite FILE [--model ID] [--output FILE]",
+    "  well-agent eval --suite FILE [--task ID] [--category navigation|diagnosis|patch] [--model ID] [--output FILE]",
     "  well-agent export-data --output DIR [--min-sessions NUMBER]",
     "  well-agent rate SESSION_ID good|bad",
   ].join("\n");
@@ -145,12 +145,29 @@ async function main(): Promise<void> {
 
   if (command === "eval") {
     const suitePath = resolve(requiredOption(args, "suite"));
+    const category = args.options.get("category");
+    if (
+      category !== undefined &&
+      category !== "navigation" &&
+      category !== "diagnosis" &&
+      category !== "patch"
+    ) {
+      throw new Error("--category must be navigation, diagnosis, or patch.");
+    }
     const summary = await runEvaluation({
       suitePath,
       config: { ...config, recordSessions: false },
+      taskId: args.options.get("task"),
+      category: category as EvalTask["category"] | undefined,
       outputPath: args.options.get("output")
         ? resolve(args.options.get("output")!)
         : undefined,
+      onTaskComplete: (result, completed, total) => {
+        const status = result.passed ? "pass" : "fail";
+        console.error(
+          `[${completed}/${total}] ${status} ${result.id} (${result.durationMs}ms)`,
+        );
+      },
     });
     stdout.write(JSON.stringify(summary, null, 2) + "\n");
     process.exitCode = summary.successRate >= 0.7 ? 0 : 1;

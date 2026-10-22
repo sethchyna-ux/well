@@ -5,7 +5,12 @@ import { z } from "zod";
 import { AgentRuntime } from "./agent.js";
 import { validateRelativePath } from "./paths.js";
 import { runProcess } from "./process.js";
-import type { AgentConfig, EvalAssertion, EvalTask } from "./types.js";
+import type {
+  AgentConfig,
+  AgentRunResult,
+  EvalAssertion,
+  EvalTask,
+} from "./types.js";
 
 const assertionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("response_contains"), value: z.string() }),
@@ -79,6 +84,21 @@ async function assertionPasses(
     : !content.includes(assertion.value);
 }
 
+function describeAssertion(assertion: EvalAssertion): string {
+  if (assertion.kind === "response_contains") {
+    return `response contains ${JSON.stringify(assertion.value)}`;
+  }
+  if (assertion.kind === "path_exists") {
+    return `${assertion.path} exists`;
+  }
+  if (assertion.kind === "path_missing") {
+    return `${assertion.path} is missing`;
+  }
+  const relation =
+    assertion.kind === "file_contains" ? "contains" : "does not contain";
+  return `${assertion.path} ${relation} ${JSON.stringify(assertion.value)}`;
+}
+
 export interface EvalSummary {
   model: string;
   startedAt: string;
@@ -95,6 +115,9 @@ export interface EvalSummary {
     durationMs: number;
     toolCallCount: number;
     invalidToolCallCount: number;
+    response?: string;
+    failedAssertions?: string[];
+    toolCalls?: AgentRunResult["toolCalls"];
     error?: string;
   }>;
 }
@@ -103,9 +126,25 @@ export async function runEvaluation(options: {
   suitePath: string;
   config: AgentConfig;
   outputPath?: string;
+  taskId?: string;
+  category?: EvalTask["category"];
+  onTaskComplete?: (
+    result: EvalSummary["results"][number],
+    completed: number,
+    total: number,
+  ) => void;
 }): Promise<EvalSummary> {
   const suitePath = resolve(options.suitePath);
-  const tasks = await loadEvalTasks(suitePath);
+  const loadedTasks = await loadEvalTasks(suitePath);
+  const tasks = loadedTasks.filter(
+    task =>
+      (!options.taskId || task.id === options.taskId) &&
+      (!options.category || task.category === options.category),
+  );
+  if (tasks.length === 0) {
+    const selection = options.taskId ?? options.category ?? "suite";
+    throw new Error(`No evaluation tasks matched: ${selection}`);
+  }
   const fixtures = join(dirname(suitePath), "fixtures");
   const startedAt = new Date().toISOString();
   const results: EvalSummary["results"] = [];
@@ -135,16 +174,24 @@ export async function runEvaluation(options: {
           assertionPasses(assertion, workspace, run.response),
         ),
       );
-      results.push({
+      const failedAssertions = task.assertions
+        .filter((_assertion, index) => !checks[index])
+        .map(describeAssertion);
+      const result = {
         id: task.id,
         category: task.category,
         passed: checks.every(Boolean),
         durationMs: run.durationMs,
         toolCallCount: run.toolCallCount,
         invalidToolCallCount: run.invalidToolCallCount,
-      });
+        response: run.response,
+        toolCalls: run.toolCalls,
+        ...(failedAssertions.length ? { failedAssertions } : {}),
+      };
+      results.push(result);
+      options.onTaskComplete?.(result, results.length, tasks.length);
     } catch (error) {
-      results.push({
+      const result = {
         id: task.id,
         category: task.category,
         passed: false,
@@ -152,7 +199,9 @@ export async function runEvaluation(options: {
         toolCallCount: 0,
         invalidToolCallCount: 1,
         error: error instanceof Error ? error.message : String(error),
-      });
+      };
+      results.push(result);
+      options.onTaskComplete?.(result, results.length, tasks.length);
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }

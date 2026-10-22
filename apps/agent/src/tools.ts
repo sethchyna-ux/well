@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { tool, type Tool } from "@lmstudio/sdk";
 import { z } from "zod";
 import { WorkspaceBoundary, validateRelativePath } from "./paths.js";
@@ -29,7 +29,8 @@ export const TOOL_DEFINITIONS = [
     type: "function",
     function: {
       name: "list_files",
-      description: "List workspace files, optionally filtered by a ripgrep glob.",
+      description:
+        "List workspace files, optionally filtered by a ripgrep glob. A listing alone is never enough to conclude that requested code is absent; search or read plausible files next.",
       parameters: {
         type: "object",
         properties: { glob: { type: "string" } },
@@ -76,6 +77,24 @@ export const TOOL_DEFINITIONS = [
       name: "git_status",
       description: "Return the concise Git status for the selected workspace.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "replace_text",
+      description:
+        "Replace one exact, unique text fragment in an existing UTF-8 workspace file. Prefer this for focused edits.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          oldText: { type: "string" },
+          newText: { type: "string" },
+        },
+        required: ["path", "oldText", "newText"],
+        additionalProperties: false,
+      },
     },
   },
   {
@@ -152,7 +171,8 @@ export async function createAgentTools(
   return [
     tool({
       name: "list_files",
-      description: "List workspace files, optionally filtered by a ripgrep glob.",
+      description:
+        "List workspace files, optionally filtered by a ripgrep glob. A listing alone is never enough to conclude that requested code is absent; search or read plausible files next.",
       parameters: { glob: z.string().optional() },
       implementation: async ({ glob }) => {
         const args = ["--files"];
@@ -161,7 +181,11 @@ export async function createAgentTools(
         if (result.exitCode !== 0 && result.exitCode !== 1) {
           return describeProcess(result, config.maxToolOutputBytes);
         }
-        return sanitize(result.stdout, config.maxToolOutputBytes);
+        const files = sanitize(result.stdout, config.maxToolOutputBytes);
+        return (
+          files +
+          "\nA file listing is discovery only. Before concluding requested code is absent, call search_text without a glob or read a plausible file."
+        );
       },
     }),
     tool({
@@ -179,7 +203,38 @@ export async function createAgentTools(
         if (result.exitCode !== 0 && result.exitCode !== 1) {
           return describeProcess(result, config.maxToolOutputBytes);
         }
-        return sanitize(result.stdout, config.maxToolOutputBytes);
+        if (glob && result.exitCode === 1 && !result.stdout) {
+          const fallback = await runProcess(
+            "rg",
+            ["--line-number", "--no-heading", "--color", "never", "--", query, "."],
+            processOptions,
+          );
+          if (fallback.exitCode !== 0 && fallback.exitCode !== 1) {
+            return describeProcess(fallback, config.maxToolOutputBytes);
+          }
+          if (fallback.stdout) {
+            return sanitize(
+              `No matches under glob ${JSON.stringify(glob)}. Workspace-wide matches:\n${fallback.stdout}\nSearch results identify locations only. Call read_file around the match before answering so nearby declarations and the complete expression are included.`,
+              config.maxToolOutputBytes,
+            );
+          }
+        }
+        if (result.stdout) {
+          return sanitize(
+            result.stdout +
+              "\nSearch results identify locations only. Call read_file around the match before answering so nearby declarations and the complete expression are included.",
+            config.maxToolOutputBytes,
+          );
+        }
+        const candidates = await runProcess("rg", ["--files"], processOptions);
+        const candidateText =
+          candidates.exitCode === 0 ? candidates.stdout : "";
+        return sanitize(
+          "No text matches were found. Do not conclude the requested code is absent or repeat phrase searches. Read the most plausible source file from this workspace list:\n" +
+            candidateText +
+            "\nFor application behavior, terminal behavior, or top-level functions, read src/main.rs first when it exists.",
+          config.maxToolOutputBytes,
+        );
       },
     }),
     tool({
@@ -218,20 +273,61 @@ export async function createAgentTools(
         ),
     }),
     tool({
+      name: "replace_text",
+      description:
+        "Replace one exact, unique text fragment in an existing UTF-8 workspace file. Prefer this for focused edits.",
+      parameters: {
+        path: z.string().min(1),
+        oldText: z.string().min(1).max(512 * 1024),
+        newText: z.string().max(512 * 1024),
+      },
+      implementation: async ({ path, oldText, newText }) => {
+        validateRelativePath(path);
+        let absolute: string;
+        try {
+          absolute = await boundary.existing(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            return (
+              "Replacement not applied: file does not exist: " +
+              path +
+              ". Use apply_patch to create a new file."
+            );
+          }
+          throw error;
+        }
+        const content = await readFile(absolute, "utf8");
+        const occurrences = content.split(oldText).length - 1;
+        if (occurrences !== 1) {
+          return (
+            "Replacement not applied: expected exactly one occurrence of oldText, found " +
+            String(occurrences) +
+            "."
+          );
+        }
+        await writeFile(absolute, content.replace(oldText, newText), "utf8");
+        return "Replaced one occurrence in " + path + ".";
+      },
+    }),
+    tool({
       name: "apply_patch",
       description: "Apply a unified diff inside the selected workspace.",
       parameters: { patch: z.string().min(1).max(512 * 1024) },
       implementation: async ({ patch }) => {
         const paths = validatePatchPaths(patch);
         for (const path of paths) await boundary.prospective(path);
-        const check = await runProcess("git", ["apply", "--check", "-"], {
-          ...processOptions,
-          input: patch,
-        });
+        const check = await runProcess(
+          "git",
+          ["apply", "--recount", "--check", "-"],
+          {
+            ...processOptions,
+            input: patch,
+          },
+        );
         if (check.exitCode !== 0) {
           return describeProcess(check, config.maxToolOutputBytes);
         }
-        const applied = await runProcess("git", ["apply", "-"], {
+        const applied = await runProcess("git", ["apply", "--recount", "-"], {
           ...processOptions,
           input: patch,
         });

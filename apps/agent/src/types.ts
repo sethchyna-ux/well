@@ -74,4 +74,13 @@ export interface AgentRunResult {
   sessionId: string;
   toolCallCount: number;
   invalidToolCallCount: number;
+  toolCalls: AgentToolCallRecord[];
+}
+
+export interface AgentToolCallRecord {
+  callId: number;
+  name: string;
+  arguments: Record<string, unknown>;
+  allowed: boolean;
+  result?: string;
 }

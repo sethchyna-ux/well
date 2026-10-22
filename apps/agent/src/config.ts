@@ -24,7 +24,7 @@ export function defaultDataDirectory(): string {
 
 export const DEFAULT_CONFIG: AgentConfig = {
   model: "qwen/qwen3-4b-2507",
-  maxPredictionRounds: 8,
+  maxPredictionRounds: 12,
   commandTimeoutMs: 30_000,
   maxToolOutputBytes: 64 * 1024,
   recordSessions: true,
