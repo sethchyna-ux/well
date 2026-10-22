@@ -1,73 +1,20 @@
-use std::cell::UnsafeCell;
-use std::mem::MaybeUninit;
-use std::sync::atomic::{fence, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
-/// An atomic sequence lock for zero-copy synchronization.
-pub struct Seqlock {
-    seq: AtomicUsize,
-}
-
-impl Default for Seqlock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Seqlock {
-    pub fn new() -> Self {
-        Self {
-            seq: AtomicUsize::new(0),
-        }
-    }
-
-    /// Mark the beginning of a write.
-    pub fn begin_write(&self) -> usize {
-        let seq = self.seq.load(Ordering::Relaxed);
-        self.seq.store(seq + 1, Ordering::Release);
-        seq + 1
-    }
-
-    /// Mark the end of a write.
-    pub fn end_write(&self) -> usize {
-        let seq = self.seq.load(Ordering::Relaxed);
-        self.seq.store(seq + 1, Ordering::Release);
-        seq + 1
-    }
-
-    /// Read the sequence number before accessing data.
-    pub fn begin_read(&self) -> usize {
-        self.seq.load(Ordering::Acquire)
-    }
-
-    /// Validate the sequence number after reading data.
-    /// Returns true if the data was not modified concurrently.
-    pub fn end_read(&self, start_seq: usize) -> bool {
-        fence(Ordering::Acquire);
-        let end_seq = self.seq.load(Ordering::Relaxed);
-        start_seq == end_seq && (start_seq & 1) == 0
-    }
-}
-
-/// A generic, lock-free ring buffer backed by Seqlocks and atomic pointers.
+/// A bounded queue shared by a producer and consumer.
+///
+/// Access is synchronized so producers may safely call `try_push` concurrently.
 pub struct RingBuffer<T, const N: usize> {
-    buffer: UnsafeCell<[MaybeUninit<T>; N]>,
-    seqlocks: [Seqlock; N],
-    head: AtomicUsize,
-    tail: AtomicUsize,
+    buffer: Mutex<VecDeque<T>>,
+    not_full: Notify,
 }
-
-unsafe impl<T: Send, const N: usize> Send for RingBuffer<T, N> {}
-unsafe impl<T: Sync, const N: usize> Sync for RingBuffer<T, N> {}
 
 impl<T, const N: usize> RingBuffer<T, N> {
     pub fn new() -> Arc<Self> {
-        let seqlocks = std::array::from_fn(|_| Seqlock::new());
         Arc::new(Self {
-            buffer: UnsafeCell::new(unsafe { MaybeUninit::uninit().assume_init() }),
-            seqlocks,
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
+            buffer: Mutex::new(VecDeque::new()),
+            not_full: Notify::new(),
         })
     }
 
@@ -78,7 +25,6 @@ impl<T, const N: usize> RingBuffer<T, N> {
             },
             Consumer {
                 inner: Arc::clone(self),
-                local_tail: 0,
             },
         )
     }
@@ -89,72 +35,137 @@ pub struct Producer<T, const N: usize> {
 }
 
 impl<T, const N: usize> Producer<T, N> {
-    /// Attempt to push an item into the buffer.
-    /// Returns Err(item) if the buffer is full.
+    /// Attempt to enqueue an item. Returns the item unchanged when the queue is full.
     pub fn try_push(&self, item: T) -> Result<(), T> {
-        let head = self.inner.head.load(Ordering::Relaxed);
-        let tail = self.inner.tail.load(Ordering::Acquire);
-
-        if head.wrapping_sub(tail) >= N {
+        let mut buffer = self.inner.buffer.lock().expect("ring buffer lock poisoned");
+        if buffer.len() >= N {
             return Err(item);
         }
-
-        let idx = head % N;
-        let seqlock = &self.inner.seqlocks[idx];
-
-        seqlock.begin_write();
-        unsafe {
-            (*self.inner.buffer.get())[idx] = MaybeUninit::new(item);
-        }
-        seqlock.end_write();
-
-        self.inner.head.store(head.wrapping_add(1), Ordering::Release);
+        buffer.push_back(item);
         Ok(())
+    }
+
+    /// Enqueue an item, waiting asynchronously until the consumer frees capacity.
+    pub async fn push(&self, mut item: T) -> Result<(), T> {
+        if N == 0 {
+            return Err(item);
+        }
+        loop {
+            let notified = self.inner.not_full.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            match self.try_push(item) {
+                Ok(()) => return Ok(()),
+                Err(returned) => item = returned,
+            }
+            notified.await;
+        }
     }
 }
 
 pub struct Consumer<T, const N: usize> {
     inner: Arc<RingBuffer<T, N>>,
-    local_tail: usize,
 }
 
-impl<T: Clone, const N: usize> Consumer<T, N> {
-    /// Attempt to pop an item from the buffer.
+impl<T, const N: usize> Consumer<T, N> {
+    /// Remove and return the oldest queued item, if any.
     pub fn try_pop(&mut self) -> Option<T> {
-        let head = self.inner.head.load(Ordering::Acquire);
+        let item = self
+            .inner
+            .buffer
+            .lock()
+            .expect("ring buffer lock poisoned")
+            .pop_front();
+        if item.is_some() {
+            self.inner.not_full.notify_one();
+        }
+        item
+    }
+}
 
-        if self.local_tail == head {
-            return None;
+#[cfg(test)]
+mod tests {
+    use super::RingBuffer;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn preserves_fifo_and_returns_item_when_full() {
+        let queue = RingBuffer::<_, 2>::new();
+        let (producer, mut consumer) = queue.split();
+
+        assert_eq!(producer.try_push("first"), Ok(()));
+        assert_eq!(producer.try_push("second"), Ok(()));
+        assert_eq!(producer.try_push("overflow"), Err("overflow"));
+        assert_eq!(consumer.try_pop(), Some("first"));
+        assert_eq!(consumer.try_pop(), Some("second"));
+        assert_eq!(consumer.try_pop(), None);
+    }
+
+    #[test]
+    fn supports_non_clone_items_and_zero_capacity() {
+        let queue = RingBuffer::<_, 1>::new();
+        let (producer, mut consumer) = queue.split();
+        assert_eq!(producer.try_push(Box::new(7)), Ok(()));
+        assert_eq!(*consumer.try_pop().unwrap(), 7);
+
+        let empty = RingBuffer::<u8, 0>::new();
+        let (producer, mut consumer) = empty.split();
+        assert_eq!(producer.try_push(1), Err(1));
+        assert_eq!(consumer.try_pop(), None);
+    }
+
+    #[test]
+    fn concurrent_producers_do_not_lose_accepted_items() {
+        const PRODUCERS: usize = 4;
+        const ITEMS_PER_PRODUCER: usize = 100;
+        const CAPACITY: usize = PRODUCERS * ITEMS_PER_PRODUCER;
+
+        let queue = RingBuffer::<usize, CAPACITY>::new();
+        let (producer, mut consumer) = queue.split();
+        let producer = Arc::new(producer);
+        let threads: Vec<_> = (0..PRODUCERS)
+            .map(|producer_id| {
+                let producer = Arc::clone(&producer);
+                thread::spawn(move || {
+                    for item in 0..ITEMS_PER_PRODUCER {
+                        producer
+                            .try_push(producer_id * ITEMS_PER_PRODUCER + item)
+                            .expect("queue has sufficient capacity");
+                    }
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().unwrap();
         }
 
-        let idx = self.local_tail % N;
-        let seqlock = &self.inner.seqlocks[idx];
+        let mut received = Vec::new();
+        while let Some(item) = consumer.try_pop() {
+            received.push(item);
+        }
+        received.sort_unstable();
+        assert_eq!(
+            received,
+            (0..CAPACITY).collect::<Vec<_>>(),
+            "every accepted item should be delivered exactly once"
+        );
+    }
 
-        let mut retries = 0;
-        let item = loop {
-            let seq = seqlock.begin_read();
+    #[tokio::test]
+    async fn async_push_waits_for_capacity_without_losing_wakeup() {
+        let queue = RingBuffer::<_, 1>::new();
+        let (producer, mut consumer) = queue.split();
+        producer.try_push("first").unwrap();
 
-            // If seq is odd, a writer is currently modifying this slot.
-            if seq & 1 != 0 {
-                std::hint::spin_loop();
-                continue;
-            }
-
-            let item = unsafe { (*self.inner.buffer.get())[idx].assume_init_ref().clone() };
-
-            if seqlock.end_read(seq) {
-                break item;
-            }
-
-            retries += 1;
-            if retries > 1000 {
-                std::hint::spin_loop();
-            }
-        };
-
-        self.local_tail = self.local_tail.wrapping_add(1);
-        self.inner.tail.store(self.local_tail, Ordering::Release);
-
-        Some(item)
+        let blocked = tokio::spawn(async move {
+            producer.push("second").await.unwrap();
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(consumer.try_pop(), Some("first"));
+        blocked.await.unwrap();
+        assert_eq!(consumer.try_pop(), Some("second"));
     }
 }

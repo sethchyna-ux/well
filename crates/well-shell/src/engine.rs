@@ -2,7 +2,7 @@
 //!
 //! Subsystems:
 //! - ExecutionRouter: Intelligently routes commands between interactive PTY shims (for vim, htop, ssh)
-//!   and lock-free Native IPC streaming pipelines (for high-throughput batch commands).
+//!   and bounded IPC streaming pipelines (for high-throughput batch commands).
 
 use crate::keyboard::KeyEncoder;
 use crate::pty::PtySession;
@@ -48,7 +48,17 @@ impl<const N: usize> ExecutionRouter<N> {
         let program = parts[0];
         matches!(
             program,
-            "htop" | "top" | "less" | "more" | "ssh" | "vim" | "vi" | "nvim" | "nano" | "tmux" | "screen"
+            "htop"
+                | "top"
+                | "less"
+                | "more"
+                | "ssh"
+                | "vim"
+                | "vi"
+                | "nvim"
+                | "nano"
+                | "tmux"
+                | "screen"
         )
     }
 
@@ -72,8 +82,9 @@ impl<const N: usize> ExecutionRouter<N> {
                 return Ok(false);
             }
 
-            let mut child = Command::new(parts[0])
-                .args(&parts[1..])
+            let mut child = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(cmd)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()?;
@@ -90,32 +101,34 @@ impl<const N: usize> ExecutionRouter<N> {
             let producer_out = Arc::clone(&self.producer);
             let producer_err = Arc::clone(&self.producer);
 
-            tokio::spawn(async move {
+            let stdout_task = tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 loop {
                     match stdout.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
                             let block = TypedBlock::StdoutChunk(buf[..n].to_vec());
-                            while producer_out.try_push(block.clone()).is_err() {
-                                std::hint::spin_loop();
-                            }
+                            producer_out
+                                .push(block)
+                                .await
+                                .expect("shell output queue must have capacity");
                         }
                         Err(_) => break,
                     }
                 }
             });
 
-            tokio::spawn(async move {
+            let stderr_task = tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 loop {
                     match stderr.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
                             let block = TypedBlock::StderrChunk(buf[..n].to_vec());
-                            while producer_err.try_push(block.clone()).is_err() {
-                                std::hint::spin_loop();
-                            }
+                            producer_err
+                                .push(block)
+                                .await
+                                .expect("shell output queue must have capacity");
                         }
                         Err(_) => break,
                     }
@@ -125,14 +138,16 @@ impl<const N: usize> ExecutionRouter<N> {
             let producer_exit = Arc::clone(&self.producer);
             tokio::spawn(async move {
                 let status = child.wait().await;
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
                 let exit_code = match status {
                     Ok(s) => s.code().unwrap_or(-1),
                     Err(_) => -1,
                 };
-                let block = TypedBlock::ExitStatus(exit_code);
-                while producer_exit.try_push(block.clone()).is_err() {
-                    std::hint::spin_loop();
-                }
+                producer_exit
+                    .push(TypedBlock::ExitStatus(exit_code))
+                    .await
+                    .expect("shell output queue must have capacity");
             });
 
             Ok(false)
@@ -173,32 +188,34 @@ impl<const N: usize> ExecutionRouter<N> {
         let producer_out = Arc::clone(&self.producer);
         let producer_err = Arc::clone(&self.producer);
 
-        tokio::spawn(async move {
+        let stdout_task = tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
                 match stdout.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
                         let block = TypedBlock::StdoutChunk(buf[..n].to_vec());
-                        while producer_out.try_push(block.clone()).is_err() {
-                            std::hint::spin_loop();
-                        }
+                        producer_out
+                            .push(block)
+                            .await
+                            .expect("shell output queue must have capacity");
                     }
                     Err(_) => break,
                 }
             }
         });
 
-        tokio::spawn(async move {
+        let stderr_task = tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
                 match stderr.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
                         let block = TypedBlock::StderrChunk(buf[..n].to_vec());
-                        while producer_err.try_push(block.clone()).is_err() {
-                            std::hint::spin_loop();
-                        }
+                        producer_err
+                            .push(block)
+                            .await
+                            .expect("shell output queue must have capacity");
                     }
                     Err(_) => break,
                 }
@@ -208,14 +225,16 @@ impl<const N: usize> ExecutionRouter<N> {
         let producer_exit = Arc::clone(&self.producer);
         tokio::spawn(async move {
             let status = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
             let exit_code = match status {
                 Ok(s) => s.code().unwrap_or(-1),
                 Err(_) => -1,
             };
-            let block = TypedBlock::ExitStatus(exit_code);
-            while producer_exit.try_push(block.clone()).is_err() {
-                std::hint::spin_loop();
-            }
+            producer_exit
+                .push(TypedBlock::ExitStatus(exit_code))
+                .await
+                .expect("shell output queue must have capacity");
         });
 
         Ok(())
@@ -260,6 +279,36 @@ mod tests {
 
         assert!(got_stdout, "Failed to receive typed stdout block");
         assert!(got_exit, "Failed to receive typed exit status block");
+    }
+
+    #[tokio::test]
+    async fn native_path_preserves_shell_syntax_and_sends_exit_after_output() {
+        let ring_buffer = RingBuffer::<TypedBlock, 8>::new();
+        let (producer, mut consumer) = ring_buffer.split();
+        let router = ExecutionRouter::new(producer);
+
+        assert!(!router
+            .execute("printf 'hello world'; exit 7", 24, 80)
+            .await
+            .unwrap());
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut stdout = Vec::new();
+        let mut exit_code = None;
+        while tokio::time::Instant::now() < deadline {
+            match consumer.try_pop() {
+                Some(TypedBlock::StdoutChunk(data)) => stdout.extend(data),
+                Some(TypedBlock::ExitStatus(code)) => {
+                    exit_code = Some(code);
+                    break;
+                }
+                Some(TypedBlock::StderrChunk(_)) => {}
+                None => tokio::task::yield_now().await,
+            }
+        }
+
+        assert_eq!(stdout, b"hello world");
+        assert_eq!(exit_code, Some(7));
     }
 
     #[test]

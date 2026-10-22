@@ -1,15 +1,15 @@
-//! well-ipc: Hermes Zero-Copy IPC & Seqlock Data Structures
+//! well-ipc: typed terminal messages and synchronized state primitives.
 //!
 //! Subsystems:
-//! - Hermes: Atomic lock-free Sequence Lock (Seqlock) coordinating state sync.
-//! - RingBuffer: Lock-free SPSC / MPMC ring buffer backed by Seqlocks and atomic pointers.
+//! - Hermes: sequence tracking for synchronized state updates.
+//! - RingBuffer: bounded queue with synchronized producer and consumer access.
 //! - KittyKeyboardInput & TypedBlock: Strongly typed protocol formats for terminal I/O.
 
 pub mod ring_buffer;
 
 use serde::{Deserialize, Serialize};
-use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 
 // =========================================================================
 // 1. KITTY KEYBOARD PROTOCOL & TYPED BLOCKS
@@ -35,7 +35,7 @@ pub enum TypedBlock {
 // 2. HERMES SEQLOCK & ZERO-COPY STATE SYNC
 // =========================================================================
 
-/// HermesSeqlock: Lock-free atomic synchronization guard for zero-copy state reads.
+/// Sequence counter for state updates.
 pub struct HermesSeqlock {
     counter: AtomicU64,
 }
@@ -53,72 +53,77 @@ impl HermesSeqlock {
         }
     }
 
-    /// Executed by the writer before modifying state.
+    /// Acquires the write sequence, waiting for other writers to finish.
     pub fn write_begin(&self) -> u64 {
-        self.counter.fetch_add(1, Ordering::SeqCst)
+        loop {
+            let sequence = self.counter.load(Ordering::Acquire);
+            if sequence % 2 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            if self
+                .counter
+                .compare_exchange(sequence, sequence + 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return sequence;
+            }
+        }
     }
 
-    /// Executed by the writer after modifying state.
+    /// Releases the write sequence.
     pub fn write_end(&self, seq: u64) {
-        self.counter.store(seq + 2, Ordering::SeqCst);
+        self.counter.store(seq + 2, Ordering::Release);
     }
 
-    /// Executed by the reader.
+    /// Reads the sequence before accessing state.
     pub fn read_begin(&self) -> u64 {
-        self.counter.load(Ordering::SeqCst)
+        self.counter.load(Ordering::Acquire)
     }
 
     /// Returns true if the state remained unmodified during the read transaction.
     pub fn read_validate(&self, seq: u64) -> bool {
-        let current = self.counter.load(Ordering::SeqCst);
+        let current = self.counter.load(Ordering::Acquire);
         seq == current && seq % 2 == 0
     }
 
     /// Returns current atomic sequence counter (even = idle, odd = writing).
     pub fn sequence(&self) -> u64 {
-        self.counter.load(Ordering::SeqCst)
+        self.counter.load(Ordering::Acquire)
     }
 }
 
-/// HermesChannel: Dual-slot shared-memory synchronization context.
+/// Synchronized state channel with an atomic update generation.
 pub struct HermesChannel<T> {
     seqlock: HermesSeqlock,
-    payload: UnsafeCell<T>,
+    payload: RwLock<T>,
 }
-
-unsafe impl<T: Send> Send for HermesChannel<T> {}
-unsafe impl<T: Sync> Sync for HermesChannel<T> {}
 
 impl<T: Clone> HermesChannel<T> {
     pub fn new(initial: T) -> Self {
         Self {
             seqlock: HermesSeqlock::new(),
-            payload: UnsafeCell::new(initial),
+            payload: RwLock::new(initial),
         }
     }
 
-    /// Safely synchronizes/writes a new configuration state vector.
+    /// Replaces the state and advances the generation.
     pub fn sync_state(&self, new_state: T) {
+        let mut payload = self.payload.write().expect("Hermes state lock poisoned");
         let seq = self.seqlock.write_begin();
-        unsafe {
-            *self.payload.get() = new_state;
-        }
+        *payload = new_state;
         self.seqlock.write_end(seq);
     }
 
-    /// Safely reads current configuration state vector with lock-free seqlock validation.
+    /// Returns a consistent snapshot of the current state.
     pub fn read_state(&self) -> T {
-        loop {
-            let seq = self.seqlock.read_begin();
-            let val = unsafe { (*self.payload.get()).clone() };
-            if self.seqlock.read_validate(seq) {
-                return val;
-            }
-            std::hint::spin_loop();
-        }
+        self.payload
+            .read()
+            .expect("Hermes state lock poisoned")
+            .clone()
     }
 
-    /// Returns current atomic sequence counter for IPC telemetry.
+    /// Returns the current state generation for telemetry.
     pub fn sequence(&self) -> u64 {
         self.seqlock.sequence()
     }
@@ -140,5 +145,30 @@ mod tests {
 
         channel.sync_state(100);
         assert_eq!(channel.read_state(), 100);
+    }
+
+    #[test]
+    fn concurrent_state_updates_are_serialized() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let channel = Arc::new(HermesChannel::new(0u64));
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let channel = Arc::clone(&channel);
+                thread::spawn(move || {
+                    for value in 0..1_000 {
+                        channel.sync_state(value);
+                    }
+                })
+            })
+            .collect();
+
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        assert_eq!(channel.sequence(), 8_000);
+        assert!(channel.read_state() < 1_000);
     }
 }

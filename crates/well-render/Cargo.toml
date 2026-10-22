@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wgpu = { version = "0.20", default-features = false, features = ["hal"] }
-bytemuck = "1.14"
+wgpu = { version = "0.20", default-features = false, features = ["hal", "wgsl"] }
+bytemuck = { version = "1.14", features = ["derive"] }
 # Placeholder for Orpheus GPU renderer
