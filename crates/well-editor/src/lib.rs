@@ -116,6 +116,7 @@ pub fn init_editor() -> InlineEditor {
 #[cfg(test)]
 mod tests {
     use super::InlineEditor;
+    use std::ops::Range;
 
     #[test]
     fn edits_unicode_text_by_character_position() {
@@ -134,7 +135,7 @@ mod tests {
     #[test]
     fn replaces_selected_range_and_normalizes_reversed_selection() {
         let mut editor = InlineEditor::from_text("hello world");
-        editor.set_selection(9..6);
+        editor.set_selection(Range { start: 9, end: 6 });
         assert_eq!(editor.selection(), Some(6..9));
         assert_eq!(editor.selected_text().as_deref(), Some("wor"));
 

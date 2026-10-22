@@ -11,3 +11,4 @@ well-ipc = { path = "../well-ipc" }
 portable-pty = "0.8"
 vt100 = "0.16"
 async-trait = "0.1"
+shell-words = "1.1"

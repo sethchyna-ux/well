@@ -5,16 +5,16 @@
 //! - PipelineStage: Composable command pipeline node with stdin/stdout streaming.
 //! - TaskResult: Structured telemetry output including microsecond latency profiling.
 
+use crate::MetisHistory;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use crate::MetisHistory;
 
 /// Microsecond-precision result of a HyperShell execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,16 +36,13 @@ pub struct PipelineStage {
 }
 
 impl PipelineStage {
-    pub fn new(cmd: &str) -> Self {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let program = parts.first().unwrap_or(&"").to_string();
-        let args = if parts.len() > 1 {
-            parts[1..].iter().map(|s| s.to_string()).collect()
-        } else {
-            Vec::new()
-        };
-
-        Self { program, args }
+    /// Parse one executable and its arguments using shell-style quoting.
+    /// Variable expansion, redirection, and other shell operators are not applied.
+    pub fn new(cmd: &str) -> Result<Self, shell_words::ParseError> {
+        let mut parts = shell_words::split(cmd)?.into_iter();
+        let program = parts.next().unwrap_or_default();
+        let args = parts.collect();
+        Ok(Self { program, args })
     }
 }
 
@@ -263,6 +260,14 @@ impl HyperShellEngine {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pipeline_stage_parses_quoted_arguments_and_rejects_unclosed_quotes() {
+        let stage = PipelineStage::new(r#"printf '%s\n' "hello world""#).unwrap();
+        assert_eq!(stage.program, "printf");
+        assert_eq!(stage.args, ["%s\\n", "hello world"]);
+        assert!(PipelineStage::new("echo 'unfinished").is_err());
+    }
+
     #[tokio::test]
     async fn test_hypershell_single_cmd() {
         let engine = HyperShellEngine::default();
@@ -288,7 +293,9 @@ mod tests {
     #[tokio::test]
     async fn test_hypershell_background_job() {
         let engine = HyperShellEngine::default();
-        let task_id = engine.spawn_background_task("echo 'Background Complete'").await;
+        let task_id = engine
+            .spawn_background_task("echo 'Background Complete'")
+            .await;
 
         for _ in 0..50 {
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
