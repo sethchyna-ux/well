@@ -2501,6 +2501,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "system clipboard is unavailable in headless Linux CI"
+    )]
     fn test_clipboard() {
         copy_to_clipboard("well_test_123");
         let val = get_from_clipboard();
@@ -2641,6 +2645,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "system clipboard is unavailable in headless Linux CI"
+    )]
     fn test_selection_and_copy_workflow() {
         let mut parser = vt100::Parser::new(24, 80, 100);
         parser.process(b"hello world from well-shell\r\nsecond line here\r\n");
