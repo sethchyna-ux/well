@@ -20,6 +20,12 @@ The Cargo workspace is organized into focused crates:
 
 The desktop application now starts a local PTY shell, renders its visible screen and cursor in the native window, forwards keyboard and IME text input, and resizes the PTY with the window. The display is currently monochrome and does not yet support mouse selection, clipboard integration, or all terminal protocols, so it is an early interactive terminal rather than a complete terminal emulator or agent interface. Other crates remain standalone and are not yet fully integrated.
 
+### UI concept
+
+The image below is a visual mockup for the intended interface, not a screenshot of the current application.
+
+![Well terminal UI concept mockup](assets/well-ui-concept.png)
+
 The application uses egui for the current text UI. Its WGPU renderer dependency must stay compatible with the workspace's WGPU version.
 
 The prompt crate currently compiles deterministic templates with `{cwd}`, `{exit_code}`, `{duration_ms}`, `{jobs}`, `{vim_mode}`, and `{character}` placeholders. It does not invoke shell commands, load Starship configuration, or use a memory-mapped state vector.

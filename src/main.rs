@@ -107,7 +107,12 @@ impl ApplicationHandler for WellApp {
         }
 
         let window = match event_loop
-            .create_window(Window::default_attributes().with_title("Well Terminal"))
+            .create_window(
+                Window::default_attributes()
+                    .with_title("Well Terminal")
+                    .with_inner_size(winit::dpi::LogicalSize::new(1200.0, 800.0))
+                    .with_min_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+            )
         {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -116,6 +121,7 @@ impl ApplicationHandler for WellApp {
                 return;
             }
         };
+        let _ = window.request_inner_size(winit::dpi::LogicalSize::new(1200.0, 800.0));
 
         let state = match create_render_state(window.clone()) {
             Ok(state) => state,

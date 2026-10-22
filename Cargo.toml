@@ -24,7 +24,7 @@ strip = true
 
 [dependencies]
 winit = "0.30.13"
-wgpu = { version = "0.20", default-features = false, features = ["hal"] }
+wgpu = { version = "0.20", default-features = false, features = ["hal", "metal"] }
 pollster = "0.3"
 egui = "0.28.1"
 egui-wgpu = "0.28.1"
