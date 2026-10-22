@@ -70,17 +70,7 @@ pub fn filter_and_respond_queries<W: Write + ?Sized>(
                 }
             }
 
-            // 2. Alternate Screen Buffer switches during probe handshakes
-            if rem.starts_with(b"\x1b[?1049h") || rem.starts_with(b"\x1b[?1049l") {
-                i += 8;
-                continue;
-            }
-            if rem.starts_with(b"\x1b[?47h") || rem.starts_with(b"\x1b[?47l") {
-                i += 6;
-                continue;
-            }
-
-            // 3. Primary Device Attributes (DA1): \x1b[c or \x1b[0c
+            // 2. Primary Device Attributes (DA1): \x1b[c or \x1b[0c
             if rem.starts_with(b"\x1b[c") {
                 let _ = writer.write_all(b"\x1b[?62;1;2;6;7;8;9c");
                 let _ = writer.flush();
@@ -513,24 +503,38 @@ impl PtySession {
         Ok(())
     }
 
+    /// Return the current screen grid as text, including a visible block cursor.
+    pub fn screen_contents(&self) -> std::io::Result<String> {
+        let parser = self
+            .parser
+            .lock()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(format_screen(parser.screen()))
+    }
+
     /// Resizes both the kernel PTY driver and the vt100 virtual grid
     pub fn resize(
         &self,
         rows: u16,
         cols: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Ok(master) = self.master.lock() {
-            master.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })?;
-        }
+        let master = self
+            .master
+            .lock()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        drop(master);
 
-        if let Ok(mut parser) = self.parser.lock() {
-            parser.screen_mut().set_size(rows, cols);
-        }
+        let mut parser = self
+            .parser
+            .lock()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        parser.screen_mut().set_size(rows, cols);
 
         Ok(())
     }
@@ -546,6 +550,55 @@ impl PtySession {
             false
         }
     }
+
+    /// Stop the shell process associated with this PTY.
+    pub fn terminate(&self) -> std::io::Result<()> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) | Err(_) => child.kill(),
+        }
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        if let Err(error) = self.terminate() {
+            eprintln!("Failed to stop PTY child process: {error}");
+        }
+    }
+}
+
+fn format_screen(screen: &vt100::Screen) -> String {
+    let (rows, cols) = screen.size();
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let mut contents = String::with_capacity(usize::from(rows) * (usize::from(cols) + 1));
+
+    for row in 0..rows {
+        for col in 0..cols {
+            if !screen.hide_cursor() && (row, col) == (cursor_row, cursor_col) {
+                contents.push('█');
+                continue;
+            }
+            if let Some(cell) = screen.cell(row, col) {
+                if !cell.is_wide_continuation() {
+                    if cell.has_contents() {
+                        contents.push_str(cell.contents());
+                    } else {
+                        contents.push(' ');
+                    }
+                }
+            }
+        }
+        if row + 1 < rows {
+            contents.push('\n');
+        }
+    }
+
+    contents
 }
 
 #[cfg(test)]
@@ -578,6 +631,51 @@ mod tests {
         let sanitized = filter_and_respond_queries(b"\x1b[>c", &parser, &mut response);
         assert_eq!(response, b"\x1b[>0;10;1c");
         assert!(sanitized.is_empty());
+    }
+
+    #[test]
+    fn preserves_alternate_screen_switches_for_full_screen_terminal_apps() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 1000)));
+        let mut response = Vec::new();
+        let bytes = b"\x1b[?1049hfull-screen\x1b[?1049l";
+
+        assert_eq!(
+            filter_and_respond_queries(bytes, &parser, &mut response),
+            bytes
+        );
+        assert!(response.is_empty());
+
+        let mut parser = parser.lock().unwrap();
+        parser.process(b"before\x1b[?1049hfull-screen");
+        assert!(parser.screen().contents().contains("full-screen"));
+        parser.process(b"\x1b[?1049l");
+        assert!(parser.screen().contents().contains("before"));
+    }
+
+    #[test]
+    fn screen_text_contains_a_cursor_and_keeps_the_full_grid() {
+        let mut parser = vt100::Parser::new(2, 5, 100);
+        parser.process(b"abc");
+        assert_eq!(format_screen(parser.screen()), "abc█ \n     ");
+
+        parser.process(b"\x1b[?25l");
+        assert_eq!(format_screen(parser.screen()), "abc  \n     ");
+    }
+
+    #[test]
+    fn terminating_a_pty_stops_its_shell() {
+        let session = PtySession::spawn(24, 80, || {}).expect("Failed to spawn PTY");
+        assert!(session.is_alive());
+        session.terminate().expect("Failed to stop PTY shell");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while session.is_alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            !session.is_alive(),
+            "PTY shell should exit after termination"
+        );
     }
 
     #[test]
