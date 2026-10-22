@@ -33,10 +33,11 @@ pub struct MetisTrieNode {
     pub children: HashMap<char, MetisTrieNode>,
     pub is_terminal: bool,
     pub frequency: u64,
+    pub max_frequency: u64,
 }
 
 /// MetisHistory: In-memory prefix-trie search engine.
-/// Provides O(k) predictive suggestions on raw keystroke streams inside the shell thread.
+/// Indexes command frequencies for predictive suggestions on raw keystroke streams.
 #[derive(Debug, Clone)]
 pub struct MetisHistory {
     root: MetisTrieNode,
@@ -70,10 +71,17 @@ impl MetisHistory {
         }
         current.is_terminal = true;
         current.frequency += 1;
+        let frequency = current.frequency;
+        let mut current = &mut self.root;
+        current.max_frequency = current.max_frequency.max(frequency);
+        for ch in trimmed.chars() {
+            current = current.children.get_mut(&ch).expect("command path exists");
+            current.max_frequency = current.max_frequency.max(frequency);
+        }
         self.total_commands += 1;
     }
 
-    /// O(k) retrieval of the most frequent historical auto-suggestion matching prefix.
+    /// Retrieve the most frequently executed complete command matching a prefix.
     pub fn get_autosuggestion(&self, prefix: &str) -> Option<String> {
         if prefix.is_empty() {
             return None;
@@ -88,12 +96,7 @@ impl MetisHistory {
             }
         }
 
-        let mut suffix = String::new();
-        if Self::find_dominant_path(current, &mut suffix) {
-            Some(format!("{}{}", prefix, suffix))
-        } else {
-            None
-        }
+        Self::find_best(current, prefix.to_string())
     }
 
     /// Collect up to `limit` suggestions matching a given prefix.
@@ -111,57 +114,44 @@ impl MetisHistory {
             }
         }
 
-        let mut results = Vec::new();
-        Self::collect_all(current, prefix.to_string(), &mut results, limit);
-        results
+        let mut ranked = Vec::new();
+        Self::collect_ranked(current, prefix.to_string(), &mut ranked);
+        ranked.sort_by(|(left_command, left_count), (right_command, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_command.cmp(right_command))
+        });
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(command, _)| command)
+            .collect()
     }
 
-    fn collect_all(node: &MetisTrieNode, current: String, out: &mut Vec<String>, limit: usize) {
-        if out.len() >= limit {
-            return;
-        }
+    fn collect_ranked(node: &MetisTrieNode, current: String, out: &mut Vec<(String, u64)>) {
         if node.is_terminal {
-            out.push(current.clone());
+            out.push((current.clone(), node.frequency));
         }
         for (ch, child) in &node.children {
             let mut next = current.clone();
             next.push(*ch);
-            Self::collect_all(child, next, out, limit);
-            if out.len() >= limit {
-                break;
-            }
+            Self::collect_ranked(child, next, out);
         }
     }
 
-    fn find_dominant_path(node: &MetisTrieNode, path: &mut String) -> bool {
-        if node.children.is_empty() {
-            return node.is_terminal;
+    fn find_best(node: &MetisTrieNode, current: String) -> Option<String> {
+        if node.is_terminal && node.frequency == node.max_frequency {
+            return Some(current);
         }
 
-        let mut best_char = None;
-        let mut max_freq = 0;
-        let mut best_node = None;
-
-        for (ch, child) in &node.children {
-            let child_freq = if child.is_terminal {
-                child.frequency
-            } else {
-                1
-            };
-            if child_freq > max_freq {
-                max_freq = child_freq;
-                best_char = Some(*ch);
-                best_node = Some(child);
-            }
-        }
-
-        if let (Some(ch), Some(next)) = (best_char, best_node) {
-            path.push(ch);
-            Self::find_dominant_path(next, path);
-            true
-        } else {
-            node.is_terminal
-        }
+        let (&character, child) = node
+            .children
+            .iter()
+            .filter(|(_, child)| child.max_frequency == node.max_frequency)
+            .min_by_key(|(character, _)| **character)?;
+        let mut command = current;
+        command.push(character);
+        Self::find_best(child, command)
     }
 
     pub fn total_commands(&self) -> u64 {
@@ -394,6 +384,39 @@ mod tests {
             Some("cargo test".to_string())
         );
         assert_eq!(history.get_autosuggestion("unknown"), None);
+    }
+
+    #[test]
+    fn suggestions_rank_complete_commands_by_frequency_with_stable_ties() {
+        let mut history = MetisHistory::new();
+        for _ in 0..3 {
+            history.learn_command("git status");
+            history.learn_command("git stash");
+            history.learn_command("git add");
+        }
+        history.learn_command("git stash");
+        history.learn_command("git add");
+        history.learn_command("git");
+
+        assert_eq!(history.get_autosuggestion("git "), Some("git add".into()));
+        assert_eq!(
+            history.get_autosuggestion("git s"),
+            Some("git stash".into())
+        );
+        assert_eq!(
+            history.suggestions("git", 4),
+            vec!["git add", "git stash", "git status", "git"]
+        );
+        assert_eq!(history.suggestions("git", 0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn history_ignores_blank_commands() {
+        let mut history = MetisHistory::new();
+        history.learn_command(" \t ");
+
+        assert_eq!(history.total_commands(), 0);
+        assert_eq!(history.suggestions(" ", 5), Vec::<String>::new());
     }
 
     #[test]
