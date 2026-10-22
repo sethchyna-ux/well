@@ -2,8 +2,6 @@
 
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
-use std::sync::Arc;
-use wgpu::util::DeviceExt;
 
 /// Layout for a single character cell sent to the GPU instance buffer.
 /// Packed tightly to fit in a minimal memory footprint per glyph.
@@ -16,6 +14,35 @@ pub struct GlyphInstance {
     pub uv_max: [f32; 2],   // bottom‑right in glyph atlas
     pub fg_color: [f32; 4], // RGBA text colour
     pub bg_color: [f32; 4], // RGBA background colour
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceCountError {
+    pub capacity: usize,
+    pub requested: usize,
+}
+
+impl std::fmt::Display for InstanceCountError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "render batch contains {} glyphs; buffer capacity is {}",
+            self.requested, self.capacity
+        )
+    }
+}
+
+impl std::error::Error for InstanceCountError {}
+
+fn check_instance_count(requested: usize, capacity: usize) -> Result<(), InstanceCountError> {
+    if requested > capacity {
+        Err(InstanceCountError {
+            capacity,
+            requested,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 impl GlyphInstance {
@@ -198,9 +225,10 @@ impl TerminalRenderer {
         view: &wgpu::TextureView,
         queue: &wgpu::Queue,
         instances: &[GlyphInstance],
-    ) {
+    ) -> Result<(), InstanceCountError> {
+        check_instance_count(instances.len(), self.max_instances)?;
         if instances.is_empty() {
-            return;
+            return Ok(());
         }
         // Upload glyph instance data.
         queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
@@ -225,10 +253,18 @@ impl TerminalRenderer {
         render_pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         // Four vertices per glyph quad.
         render_pass.draw(0..4, 0..instances.len() as u32);
+        Ok(())
     }
 }
 
-// Re‑export useful types for users of the ``well-render`` crate.
-pub mod prelude {
-    pub use super::{GlyphInstance, TerminalRenderer};
+#[cfg(test)]
+mod tests {
+    use super::check_instance_count;
+
+    #[test]
+    fn instance_batches_must_fit_the_upload_buffer() {
+        assert_eq!(check_instance_count(10_000, 10_000), Ok(()));
+        assert_eq!(check_instance_count(0, 10_000), Ok(()));
+        assert!(check_instance_count(10_001, 10_000).is_err());
+    }
 }

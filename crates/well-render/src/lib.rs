@@ -2,10 +2,10 @@
 
 mod renderer;
 
-pub use renderer::{GlyphInstance, TerminalRenderer};
+pub use renderer::{GlyphInstance, InstanceCountError, TerminalRenderer};
 
 pub mod prelude {
-    pub use super::{GlyphInstance, TerminalRenderer};
+    pub use super::{GlyphInstance, InstanceCountError, TerminalRenderer};
 }
 
 /// Convenience wrapper to create a `TerminalRenderer`.
