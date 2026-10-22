@@ -7,7 +7,6 @@
 
 use crate::graphics::{GraphicEvent, Interceptor};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
@@ -428,13 +427,6 @@ impl PtySession {
 
         let (gfx_tx, gfx_rx) = channel();
 
-        // Optional history file logging
-        let mut log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/well-history.log")
-            .ok();
-
         // Background reader thread: captures raw ANSI/VT escape stream, responds to terminal queries,
         // strips query sequences from the output stream, and processes into vt100 screen buffer
         thread::Builder::new()
@@ -468,10 +460,6 @@ impl PtySession {
                         }
                         Ok(n) => {
                             let slice = &buf[..n];
-
-                            if let Some(f) = log_file.as_mut() {
-                                let _ = f.write_all(slice);
-                            }
 
                             // 1. Intercept graphic protocols (APC Kitty Images, OSC 7/8)
                             let sanitized_gfx = interceptor.process(slice);

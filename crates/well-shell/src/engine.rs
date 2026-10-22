@@ -8,6 +8,7 @@ use crate::keyboard::KeyEncoder;
 use crate::pty::PtySession;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use well_ipc::ring_buffer::Producer;
@@ -15,13 +16,26 @@ use well_ipc::{KittyKeyboardInput, TypedBlock};
 
 pub struct ExecutionRouter<const N: usize> {
     pub producer: Arc<Producer<TypedBlock, N>>,
+    interactive_sessions: Mutex<Vec<PtySession>>,
 }
 
 impl<const N: usize> ExecutionRouter<N> {
     pub fn new(producer: Producer<TypedBlock, N>) -> Self {
         Self {
             producer: Arc::new(producer),
+            interactive_sessions: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Transfer ownership of PTY sessions started by this router to the UI.
+    ///
+    /// Sessions remain alive inside the router until taken or until the router is dropped.
+    pub fn take_interactive_sessions(&self) -> std::io::Result<Vec<PtySession>> {
+        let mut sessions = self
+            .interactive_sessions
+            .lock()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(std::mem::take(&mut *sessions))
     }
 
     /// Handles incoming Kitty Keyboard Input events.
@@ -45,7 +59,8 @@ impl<const N: usize> ExecutionRouter<N> {
             return false;
         }
 
-        let program = parts[0];
+        let basename = parts[0].rsplit(['/', '\\']).next().unwrap_or(parts[0]);
+        let program = basename.strip_suffix(".exe").unwrap_or(basename);
         matches!(
             program,
             "htop"
@@ -70,15 +85,25 @@ impl<const N: usize> ExecutionRouter<N> {
         rows: u16,
         cols: u16,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        if N == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "shell output queue must have nonzero capacity",
+            )
+            .into());
+        }
         if Self::is_interactive(cmd) {
             // Legacy Compatibility Shim (PTY)
             let session = PtySession::spawn_with_stream(rows, cols, None, |_| {})?;
             session.write_all(format!("{}\n", cmd).as_bytes())?;
+            self.interactive_sessions
+                .lock()
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .push(session);
             Ok(true)
         } else {
             // Native Path (Hermes IPC Ring Buffer)
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if parts.is_empty() {
+            if cmd.trim().is_empty() {
                 return Ok(false);
             }
 
@@ -160,6 +185,13 @@ impl<const N: usize> ExecutionRouter<N> {
         cmd: &str,
         args: &[String],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if N == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "shell output queue must have nonzero capacity",
+            )
+            .into());
+        }
         let mut command = if cfg!(target_os = "macos") {
             let mut c = Command::new("sandbox-exec");
             c.arg("-n").arg("no-network").arg(cmd);
@@ -315,7 +347,37 @@ mod tests {
     fn test_is_interactive() {
         assert!(ExecutionRouter::<128>::is_interactive("htop"));
         assert!(ExecutionRouter::<128>::is_interactive("ssh user@host"));
+        assert!(ExecutionRouter::<128>::is_interactive(
+            "/usr/bin/vim file.txt"
+        ));
+        assert!(ExecutionRouter::<128>::is_interactive(r"C:\Tools\nvim.exe"));
         assert!(!ExecutionRouter::<128>::is_interactive("ls -la"));
         assert!(!ExecutionRouter::<128>::is_interactive("cargo build"));
+    }
+
+    #[tokio::test]
+    async fn interactive_sessions_are_retained_until_transferred_to_the_ui() {
+        let ring_buffer = RingBuffer::<TypedBlock, 8>::new();
+        let (producer, _consumer) = ring_buffer.split();
+        let router = ExecutionRouter::new(producer);
+
+        assert!(router.execute("htop", 24, 80).await.unwrap());
+        let sessions = router.take_interactive_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].is_alive());
+        sessions[0].write_all(b"exit\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_commands_when_output_queue_has_no_capacity() {
+        let ring_buffer = RingBuffer::<TypedBlock, 0>::new();
+        let (producer, _consumer) = ring_buffer.split();
+        let router = ExecutionRouter::new(producer);
+
+        assert!(router.execute("echo hello", 24, 80).await.is_err());
+        assert!(router
+            .execute_sandboxed("echo", &["hello".into()])
+            .await
+            .is_err());
     }
 }
