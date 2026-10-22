@@ -19,12 +19,9 @@ clipboard handling, scrollback search, a command palette, and the Pythia
 translation/diagnostics interface. See the source and tests for the exact
 current behavior; keyboard shortcuts are listed below.
 
-### UI concept
+### Screenshot
 
-The image is a design reference for the intended interface, not a screenshot
-of the current application.
-
-![Well UI concept mockup](assets/well-ui-concept.png)
+![Well terminal application](assets/well-ui-screenshot.png)
 
 ## Workspace
 
