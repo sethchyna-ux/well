@@ -14,13 +14,15 @@ The Cargo workspace is organized into focused crates:
 | `well-prompt` | Prompt generation |
 | `well-editor` | Inline text editing |
 | `well-render` | GPU-backed terminal rendering |
-| `well-config` | Application configuration |
+| `well-config` | Application settings model and egui configuration panel |
 | `well-ipc` | Typed terminal messages and state/queue primitives |
 | `well` | Native window and application entry point |
 
 These crates are at different stages of implementation and are not all connected to the desktop application yet. In particular, the current application entry point opens a window and clears it; it does not yet provide a complete interactive terminal or agent interface. The subsystems and AgentOS capabilities described above are project goals, not claims of finished functionality.
 
 The prompt crate currently compiles deterministic templates with `{cwd}`, `{exit_code}`, `{duration_ms}`, `{jobs}`, `{vim_mode}`, and `{character}` placeholders. It does not invoke shell commands, load Starship configuration, or use a memory-mapped state vector.
+
+The configuration crate exposes an egui panel that edits in-memory terminal preferences. Saving and loading those preferences, and connecting the panel to the main application window, are not implemented yet.
 
 ## Build
 
