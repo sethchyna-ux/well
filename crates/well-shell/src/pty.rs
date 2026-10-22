@@ -205,7 +205,8 @@ pub fn filter_and_respond_queries<W: Write + ?Sized>(
                     let _ = writer.flush();
                     i += 7;
                     continue;
-                } else if rem.starts_with(b"\x1b]10;?\x1b\\") || rem.starts_with(b"\x1b]11;?\x1b\\") {
+                } else if rem.starts_with(b"\x1b]10;?\x1b\\") || rem.starts_with(b"\x1b]11;?\x1b\\")
+                {
                     if is_10 {
                         let _ = writer.write_all(b"\x1b]10;rgb:d0d0/d0d0/d0d0\x1b\\");
                     } else {
@@ -234,6 +235,102 @@ pub fn filter_and_respond_queries<W: Write + ?Sized>(
     sanitized
 }
 
+/// Buffers incomplete escape sequences between PTY reads before filtering them.
+pub struct TerminalQueryFilter {
+    pending: Vec<u8>,
+}
+
+impl Default for TerminalQueryFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TerminalQueryFilter {
+    const MAX_PENDING_ESCAPE: usize = 64 * 1024;
+
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn process<W: Write + ?Sized>(
+        &mut self,
+        data: &[u8],
+        parser: &Arc<Mutex<vt100::Parser>>,
+        writer: &mut W,
+    ) -> Vec<u8> {
+        self.pending.extend_from_slice(data);
+        let complete_len = incomplete_escape_start(&self.pending).unwrap_or(self.pending.len());
+        let complete_len = if self.pending.len() > Self::MAX_PENDING_ESCAPE {
+            self.pending.len()
+        } else {
+            complete_len
+        };
+        let incomplete = self.pending.split_off(complete_len);
+        let complete = std::mem::replace(&mut self.pending, incomplete);
+        filter_and_respond_queries(&complete, parser, writer)
+    }
+
+    pub fn finish<W: Write + ?Sized>(
+        &mut self,
+        parser: &Arc<Mutex<vt100::Parser>>,
+        writer: &mut W,
+    ) -> Vec<u8> {
+        let pending = std::mem::take(&mut self.pending);
+        filter_and_respond_queries(&pending, parser, writer)
+    }
+}
+
+fn incomplete_escape_start(data: &[u8]) -> Option<usize> {
+    let mut index = 0;
+    while index < data.len() {
+        if data[index] != 0x1b {
+            index += 1;
+            continue;
+        }
+
+        let Some(&kind) = data.get(index + 1) else {
+            return Some(index);
+        };
+        match kind {
+            b'[' => {
+                let mut cursor = index + 2;
+                while cursor < data.len() {
+                    if (0x40..=0x7e).contains(&data[cursor]) {
+                        break;
+                    }
+                    cursor += 1;
+                }
+                if cursor == data.len() {
+                    return Some(index);
+                }
+                index = cursor + 1;
+            }
+            b']' | b'P' | b'_' | b'^' | b'X' => {
+                let mut cursor = index + 2;
+                let mut terminated = false;
+                while cursor < data.len() {
+                    if data[cursor] == 0x07
+                        || (data[cursor] == 0x1b && data.get(cursor + 1) == Some(&b'\\'))
+                    {
+                        index = cursor + if data[cursor] == 0x07 { 1 } else { 2 };
+                        terminated = true;
+                        break;
+                    }
+                    cursor += 1;
+                }
+                if !terminated {
+                    return Some(index);
+                }
+            }
+            _ => index += 2,
+        }
+    }
+    None
+}
+
 pub fn handle_terminal_queries<W: Write + ?Sized>(
     data: &[u8],
     parser: &Arc<Mutex<vt100::Parser>>,
@@ -245,7 +342,11 @@ pub fn handle_terminal_queries<W: Write + ?Sized>(
 impl PtySession {
     /// Spawns a new interactive login shell (defaulting to /opt/homebrew/bin/fish, $SHELL, or /bin/zsh)
     /// connected to a virtual terminal screen buffer of dimensions (rows, cols).
-    pub fn spawn<F>(rows: u16, cols: u16, on_output: F) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
+    pub fn spawn<F>(
+        rows: u16,
+        cols: u16,
+        on_output: F,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
     where
         F: Fn() + Send + 'static,
     {
@@ -341,9 +442,30 @@ impl PtySession {
             .spawn(move || {
                 let mut buf = [0u8; 65536];
                 let mut interceptor = Interceptor::new();
+                let mut query_filter = TerminalQueryFilter::new();
                 loop {
                     match reader.read(&mut buf) {
-                        Ok(0) => break, // EOF
+                        Ok(0) => {
+                            let tail = interceptor.finish();
+                            let mut sink = std::io::sink();
+                            let filtered = match writer_clone.lock() {
+                                Ok(mut writer) => {
+                                    query_filter.process(&tail, &parser_clone, &mut **writer)
+                                }
+                                Err(_) => query_filter.process(&tail, &parser_clone, &mut sink),
+                            };
+                            let mut pending = match writer_clone.lock() {
+                                Ok(mut writer) => query_filter.finish(&parser_clone, &mut **writer),
+                                Err(_) => query_filter.finish(&parser_clone, &mut sink),
+                            };
+                            let mut output = filtered;
+                            output.append(&mut pending);
+                            if let Ok(mut parser) = parser_clone.lock() {
+                                parser.process(&output);
+                            }
+                            on_stream(&output);
+                            break;
+                        }
                         Ok(n) => {
                             let slice = &buf[..n];
 
@@ -360,14 +482,17 @@ impl PtySession {
                             }
 
                             // 2. Filter queries and respond into child PTY stdin
-                            let sanitized = if sanitized_gfx.contains(&0x1b) {
-                                if let Ok(mut w) = writer_clone.lock() {
-                                    filter_and_respond_queries(&sanitized_gfx, &parser_clone, &mut **w)
-                                } else {
-                                    sanitized_gfx
-                                }
-                            } else {
-                                sanitized_gfx
+                            let sanitized = match writer_clone.lock() {
+                                Ok(mut writer) => query_filter.process(
+                                    &sanitized_gfx,
+                                    &parser_clone,
+                                    &mut **writer,
+                                ),
+                                Err(_) => query_filter.process(
+                                    &sanitized_gfx,
+                                    &parser_clone,
+                                    &mut std::io::sink(),
+                                ),
                             };
 
                             if let Ok(mut p) = parser_clone.lock() {
@@ -401,7 +526,11 @@ impl PtySession {
     }
 
     /// Resizes both the kernel PTY driver and the vt100 virtual grid
-    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Ok(master) = self.master.lock() {
             master.resize(PtySize {
                 rows,
@@ -467,9 +596,42 @@ mod tests {
     fn test_filter_and_respond_queries_kitty_and_osc() {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 1000)));
         let mut response = Vec::new();
-        let sanitized = filter_and_respond_queries(b"\x1b[?u\x1b]11;?\x07data", &parser, &mut response);
+        let sanitized =
+            filter_and_respond_queries(b"\x1b[?u\x1b]11;?\x07data", &parser, &mut response);
         assert_eq!(sanitized, b"data");
         assert!(response.windows(4).any(|w| w == b"\x1b[?0"));
         assert!(response.windows(5).any(|w| w == b"\x1b]11;"));
+    }
+
+    #[test]
+    fn streaming_filter_handles_queries_split_at_every_byte_boundary() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 1000)));
+        let sequence = b"before\x1b[?u\x1b]11;?\x07after";
+
+        for split in 0..=sequence.len() {
+            let mut filter = TerminalQueryFilter::new();
+            let mut response = Vec::new();
+            let mut output = filter.process(&sequence[..split], &parser, &mut response);
+            output.extend(filter.process(&sequence[split..], &parser, &mut response));
+            output.extend(filter.finish(&parser, &mut response));
+
+            assert_eq!(output, b"beforeafter", "split at byte {split}");
+            assert!(response.windows(5).any(|window| window == b"\x1b[?0u"));
+            assert!(response.windows(5).any(|window| window == b"\x1b]11;"));
+        }
+    }
+
+    #[test]
+    fn streaming_filter_releases_incomplete_escape_on_eof() {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 1000)));
+        let mut filter = TerminalQueryFilter::new();
+        let mut response = Vec::new();
+
+        assert_eq!(
+            filter.process(b"visible\x1b[?", &parser, &mut response),
+            b"visible"
+        );
+        assert_eq!(filter.finish(&parser, &mut response), b"\x1b[?");
+        assert!(response.is_empty());
     }
 }

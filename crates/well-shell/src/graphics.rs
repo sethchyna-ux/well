@@ -54,8 +54,10 @@ impl Interceptor {
                 // Find ST (String Terminator) ESC \ or BEL (\x07)
                 if let Some(end_idx) = self.find_terminator(i + 2) {
                     let payload = self.buffer[i + 2..end_idx].to_vec();
-                    self.parse_apc(&payload);
                     let term_len = if self.buffer[end_idx] == 0x1b { 2 } else { 1 };
+                    if !self.parse_apc(&payload) {
+                        sanitized.extend_from_slice(&self.buffer[i..end_idx + term_len]);
+                    }
                     i = end_idx + term_len;
                     continue;
                 } else {
@@ -67,8 +69,10 @@ impl Interceptor {
             if i + 1 < self.buffer.len() && self.buffer[i] == 0x1b && self.buffer[i + 1] == b']' {
                 if let Some(end_idx) = self.find_terminator(i + 2) {
                     let payload = self.buffer[i + 2..end_idx].to_vec();
-                    self.parse_osc(&payload);
                     let term_len = if self.buffer[end_idx] == 0x1b { 2 } else { 1 };
+                    if !self.parse_osc(&payload) {
+                        sanitized.extend_from_slice(&self.buffer[i..end_idx + term_len]);
+                    }
                     i = end_idx + term_len;
                     continue;
                 } else {
@@ -82,6 +86,11 @@ impl Interceptor {
 
         self.buffer.drain(0..i);
         sanitized
+    }
+
+    /// Return any unterminated sequence bytes when the input stream closes.
+    pub fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buffer)
     }
 
     fn find_terminator(&self, start: usize) -> Option<usize> {
@@ -98,7 +107,7 @@ impl Interceptor {
         None
     }
 
-    fn parse_apc(&mut self, payload: &[u8]) {
+    fn parse_apc(&mut self, payload: &[u8]) -> bool {
         if payload.starts_with(b"G") {
             let payload_str = String::from_utf8_lossy(&payload[1..]);
             if let Some((keys, b64)) = payload_str.split_once(';') {
@@ -133,15 +142,19 @@ impl Interceptor {
                     payload_base64: b64.to_string(),
                     is_complete,
                 });
+                return true;
             }
         }
+        false
     }
 
-    fn parse_osc(&mut self, payload: &[u8]) {
+    fn parse_osc(&mut self, payload: &[u8]) -> bool {
         let payload_str = String::from_utf8_lossy(payload);
         if payload_str.starts_with("7;") {
             let uri = &payload_str[2..];
-            self.events.push_back(GraphicEvent::WorkingDirUpdate(uri.to_string()));
+            self.events
+                .push_back(GraphicEvent::WorkingDirUpdate(uri.to_string()));
+            true
         } else if payload_str.starts_with("8;") {
             let mut parts = payload_str.splitn(3, ';');
             parts.next();
@@ -151,8 +164,37 @@ impl Interceptor {
             if uri.is_empty() {
                 self.events.push_back(GraphicEvent::Hyperlink(None));
             } else {
-                self.events.push_back(GraphicEvent::Hyperlink(Some(uri.to_string())));
+                self.events
+                    .push_back(GraphicEvent::Hyperlink(Some(uri.to_string())));
             }
+            true
+        } else {
+            false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GraphicEvent, Interceptor};
+
+    #[test]
+    fn preserves_unhandled_osc_sequences_for_the_terminal_query_filter() {
+        let mut interceptor = Interceptor::new();
+        let sequence = b"\x1b]11;?\x07";
+
+        assert_eq!(interceptor.process(sequence), sequence);
+        assert!(interceptor.events.is_empty());
+    }
+
+    #[test]
+    fn intercepts_graphic_sequences_split_across_input_chunks() {
+        let mut interceptor = Interceptor::new();
+        assert_eq!(interceptor.process(b"before\x1b]8;;https://"), b"before");
+        assert_eq!(interceptor.process(b"example.test\x1b\\after"), b"after");
+        assert!(matches!(
+            interceptor.events.pop_front(),
+            Some(GraphicEvent::Hyperlink(Some(uri))) if uri == "https://example.test"
+        ));
     }
 }
