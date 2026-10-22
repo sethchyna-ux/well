@@ -1,7 +1,8 @@
 [package]
 name = "well"
 version = "0.1.0"
-authors = ["Your Name <your.email@example.com>"]
+description = "A native GPU-rendered terminal workspace with shell, editor, and local automation services"
+readme = "README.md"
 edition = "2021"
 
 [workspace]
@@ -24,8 +25,21 @@ strip = true
 
 [dependencies]
 winit = "0.30.13"
-wgpu = { version = "0.20", default-features = false, features = ["hal"] }
+wgpu = { version = "0.20", default-features = false, features = ["hal", "wgsl", "metal"] }
 pollster = "0.3"
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
+egui = "0.28.1"
+egui-wgpu = { version = "0.28.1", default-features = false }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+tempfile = "3"
+
+well-shell = { path = "crates/well-shell" }
+well-prompt = { path = "crates/well-prompt" }
+well-editor = { path = "crates/well-editor" }
+well-render = { path = "crates/well-render" }
+well-config = { path = "crates/well-config" }
+well-ipc = { path = "crates/well-ipc" }
 
 
 

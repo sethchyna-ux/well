@@ -1,6 +1,8 @@
 // Orpheus – WebGPU dynamic glyph‑atlas pipeline
 
 mod renderer;
+mod text;
+pub use text::{CellMetrics, TextRenderer};
 
 pub use renderer::{GlyphInstance, TerminalRenderer};
 
@@ -17,3 +19,6 @@ pub fn init_renderer(
 ) -> TerminalRenderer {
     TerminalRenderer::new(device, config, atlas_texture_view, atlas_sampler)
 }
+mod fonts;
+pub mod orpheus;
+pub use fonts::FontCatalog;

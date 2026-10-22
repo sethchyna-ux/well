@@ -2,8 +2,6 @@
 
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
-use std::sync::Arc;
-use wgpu::util::DeviceExt;
 
 /// Layout for a single character cell sent to the GPU instance buffer.
 /// Packed tightly to fit in a minimal memory footprint per glyph.
@@ -193,7 +191,8 @@ impl TerminalRenderer {
 
     /// Draw a batch of glyph instances.
     pub fn draw(
-        &self,
+        &mut self,
+        device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         queue: &wgpu::Queue,
@@ -201,6 +200,15 @@ impl TerminalRenderer {
     ) {
         if instances.is_empty() {
             return;
+        }
+        if instances.len() > self.max_instances {
+            self.max_instances = instances.len().next_power_of_two();
+            self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Glyph Instance Buffer"),
+                size: (self.max_instances * std::mem::size_of::<GlyphInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
         }
         // Upload glyph instance data.
         queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
@@ -226,9 +234,4 @@ impl TerminalRenderer {
         // Four vertices per glyph quad.
         render_pass.draw(0..4, 0..instances.len() as u32);
     }
-}
-
-// Re‑export useful types for users of the ``well-render`` crate.
-pub mod prelude {
-    pub use super::{GlyphInstance, TerminalRenderer};
 }

@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-egui = { version = "0.24", default-features = false }
-# Placeholder for Theia's Prism visual dashboard
+egui = { version = "0.28.1", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+tempfile = "3"

@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Placeholder for Astraea prompt compiler
+well-ipc = { version = "0.1.0", path = "../well-ipc" }

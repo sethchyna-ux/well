@@ -11,3 +11,10 @@ well-ipc = { path = "../well-ipc" }
 portable-pty = "0.8"
 vt100 = "0.16"
 async-trait = "0.1"
+ropey = { version = "1.6.1", default-features = false, features = ["simd"] }
+well-editor = { path = "../well-editor" }
+shell-words = "1.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

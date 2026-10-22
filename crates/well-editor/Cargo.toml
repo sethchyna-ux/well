@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ropey = "1.6"
-# Placeholder for Mneme rope editor
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
+tree-sitter = "0.27.1"
+tree-sitter-bash = "0.25"

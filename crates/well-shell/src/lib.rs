@@ -9,10 +9,14 @@
 //! - KeyEncoder: Kitty Keyboard Protocol legacy transcoder.
 
 pub mod engine;
+pub mod history;
+pub use history::{MetisHistory, MetisTrieNode};
 pub mod graphics;
 pub mod hypershell;
 pub mod keyboard;
 pub mod pty;
+pub mod service;
+pub use service::{init_shell, ShellHandle};
 
 pub use engine::ExecutionRouter;
 pub use graphics::{GraphicEvent, Interceptor};
@@ -20,150 +24,9 @@ pub use hypershell::{HyperShellEngine, PipelineStage, TaskResult};
 pub use keyboard::KeyEncoder;
 pub use pty::{handle_terminal_queries, PtySession};
 
-use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::sync::Mutex;
-
-#[derive(Default, Debug, Clone)]
-pub struct MetisTrieNode {
-    pub children: HashMap<char, MetisTrieNode>,
-    pub is_terminal: bool,
-    pub frequency: u64,
-}
-
-/// MetisHistory: In-memory prefix-trie search engine.
-/// Provides O(k) predictive suggestions on raw keystroke streams inside the shell thread.
-#[derive(Debug, Clone)]
-pub struct MetisHistory {
-    root: MetisTrieNode,
-    total_commands: u64,
-}
-
-impl Default for MetisHistory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MetisHistory {
-    pub fn new() -> Self {
-        Self {
-            root: MetisTrieNode::default(),
-            total_commands: 0,
-        }
-    }
-
-    /// Inserts a historically executed command into the trie.
-    pub fn learn_command(&mut self, command: &str) {
-        let trimmed = command.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-
-        let mut current = &mut self.root;
-        for ch in trimmed.chars() {
-            current = current.children.entry(ch).or_default();
-        }
-        current.is_terminal = true;
-        current.frequency += 1;
-        self.total_commands += 1;
-    }
-
-    /// O(k) retrieval of the most frequent historical auto-suggestion matching prefix.
-    pub fn get_autosuggestion(&self, prefix: &str) -> Option<String> {
-        if prefix.is_empty() {
-            return None;
-        }
-
-        let mut current = &self.root;
-        for ch in prefix.chars() {
-            if let Some(next) = current.children.get(&ch) {
-                current = next;
-            } else {
-                return None;
-            }
-        }
-
-        let mut suffix = String::new();
-        if Self::find_dominant_path(current, &mut suffix) {
-            Some(format!("{}{}", prefix, suffix))
-        } else {
-            None
-        }
-    }
-
-    /// Collect up to `limit` suggestions matching a given prefix.
-    pub fn suggestions(&self, prefix: &str, limit: usize) -> Vec<String> {
-        if prefix.is_empty() {
-            return Vec::new();
-        }
-
-        let mut current = &self.root;
-        for ch in prefix.chars() {
-            if let Some(next) = current.children.get(&ch) {
-                current = next;
-            } else {
-                return Vec::new();
-            }
-        }
-
-        let mut results = Vec::new();
-        Self::collect_all(current, prefix.to_string(), &mut results, limit);
-        results
-    }
-
-    fn collect_all(node: &MetisTrieNode, current: String, out: &mut Vec<String>, limit: usize) {
-        if out.len() >= limit {
-            return;
-        }
-        if node.is_terminal {
-            out.push(current.clone());
-        }
-        for (ch, child) in &node.children {
-            let mut next = current.clone();
-            next.push(*ch);
-            Self::collect_all(child, next, out, limit);
-            if out.len() >= limit {
-                break;
-            }
-        }
-    }
-
-    fn find_dominant_path(node: &MetisTrieNode, path: &mut String) -> bool {
-        if node.children.is_empty() {
-            return node.is_terminal;
-        }
-
-        let mut best_char = None;
-        let mut max_freq = 0;
-        let mut best_node = None;
-
-        for (ch, child) in &node.children {
-            let child_freq = if child.is_terminal { child.frequency } else { 1 };
-            if child_freq > max_freq {
-                max_freq = child_freq;
-                best_char = Some(*ch);
-                best_node = Some(child);
-            }
-        }
-
-        if let (Some(ch), Some(next)) = (best_char, best_node) {
-            path.push(ch);
-            Self::find_dominant_path(next, path);
-            true
-        } else {
-            node.is_terminal
-        }
-    }
-
-    pub fn total_commands(&self) -> u64 {
-        self.total_commands
-    }
-}
 
 /// Execution outcome returned by MetisExecutor
 #[derive(Debug, Clone)]
@@ -188,12 +51,7 @@ impl Default for MetisExecutor {
 impl MetisExecutor {
     pub fn new() -> Self {
         let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        let mut history = MetisHistory::new();
-        history.learn_command("git status");
-        history.learn_command("cargo build");
-        history.learn_command("cargo check");
-        history.learn_command("cargo test");
-        history.learn_command("ls -la");
+        let history = MetisHistory::new();
 
         Self {
             history,
@@ -284,49 +142,6 @@ fn dirs_fallback() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/"))
 }
 
-/// Public handle for asynchronous interactions with the shell subsystem.
-#[derive(Debug)]
-pub struct ShellHandle {
-    pub history: Arc<Mutex<MetisHistory>>,
-    pub tx: Sender<String>,
-    pub rx: Receiver<String>,
-}
-
-impl ShellHandle {
-    pub async fn send_command(&self, cmd: String) -> Result<(), String> {
-        self.tx.send(cmd).await.map_err(|e| e.to_string())
-    }
-
-    pub async fn suggest(&self, prefix: &str) -> Vec<String> {
-        let hist = self.history.lock().await;
-        hist.suggestions(prefix, 5)
-    }
-}
-
-/// Initialise the shell subsystem handle
-pub fn init_shell() -> ShellHandle {
-    let (tx, mut rx_cmd) = channel::<String>(32);
-    let (tx_out, rx) = channel::<String>(32);
-    let history = Arc::new(Mutex::new(MetisHistory::new()));
-    let history_clone = Arc::clone(&history);
-
-    tokio::spawn(async move {
-        while let Some(cmd) = rx_cmd.recv().await {
-            {
-                let mut hist = history_clone.lock().await;
-                hist.learn_command(&cmd);
-            }
-            let _ = tx_out.send(format!("Executed: {}", cmd)).await;
-        }
-    });
-
-    ShellHandle {
-        history,
-        tx,
-        rx,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,3 +175,4 @@ mod tests {
         assert!(!pwd_res.stdout.is_empty());
     }
 }
+pub mod subsystems_core;

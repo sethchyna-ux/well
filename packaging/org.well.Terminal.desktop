@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Well
+Comment=Native terminal workspace
+Exec=well
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;terminal;
+StartupNotify=true
+StartupWMClass=well
