@@ -9,10 +9,9 @@ pub struct KeyEncoder;
 
 impl KeyEncoder {
     /// Encodes a KittyKeyboardInput into traditional VT100/Xterm byte sequences
-    /// for legacy PTY compatibility. Returns None if it shouldn't generate output (e.g. key release).
+    /// for legacy PTY compatibility. Returns None for releases and unknown event types.
     pub fn encode_legacy(input: &KittyKeyboardInput) -> Option<Vec<u8>> {
-        // Only process Press (1) and Repeat (3), ignore Release (2)
-        if input.event_type == 2 {
+        if !matches!(input.event_type, 1 | 3) {
             return None;
         }
 
@@ -31,16 +30,11 @@ impl KeyEncoder {
 
         // Basic character encoding (e.g. A-Z with Ctrl)
         if (32..=126).contains(&key) {
-            let mut c = key as u8;
-
-            if ctrl {
-                // Ctrl+A = 1, Ctrl+Z = 26
-                if (65..=90).contains(&c) {
-                    c -= 64;
-                } else if (97..=122).contains(&c) {
-                    c -= 96;
-                }
-            }
+            let c = if ctrl {
+                control_byte(key as u8)
+            } else {
+                key as u8
+            };
 
             let mut seq = Vec::new();
             if alt {
@@ -48,6 +42,16 @@ impl KeyEncoder {
             }
             seq.push(c);
             return Some(seq);
+        }
+
+        fn control_byte(key: u8) -> u8 {
+            match key {
+                b'a'..=b'z' => key - b'a' + 1,
+                b'A'..=b'Z' => key - b'A' + 1,
+                b'@'..=b'_' => key & 0x1f,
+                b'?' => 0x7f,
+                _ => key,
+            }
         }
 
         // Special keys (Arrows, Enter, Esc, etc.)
@@ -60,8 +64,8 @@ impl KeyEncoder {
                     Some(vec![13])
                 }
             }
-            256 => Some(vec![27]),  // Esc
-            258 => Some(vec![127]), // Backspace
+            256 => Some(vec![27]),                // Esc
+            258 => Some(vec![127]),               // Backspace
             259 => Some(Self::csi(vt_mod, b'A')), // Up
             260 => Some(Self::csi(vt_mod, b'B')), // Down
             261 => Some(Self::csi(vt_mod, b'C')), // Right
@@ -119,7 +123,7 @@ mod tests {
     #[test]
     fn test_encode_legacy_alt_enter() {
         let input = KittyKeyboardInput {
-            key_code: 257, // Enter
+            key_code: 257,     // Enter
             modifiers: 0b0010, // Alt
             event_type: 1,
         };
@@ -129,7 +133,7 @@ mod tests {
     #[test]
     fn test_encode_legacy_shift_up() {
         let input = KittyKeyboardInput {
-            key_code: 259, // Up Arrow
+            key_code: 259,     // Up Arrow
             modifiers: 0b0001, // Shift
             event_type: 1,
         };
@@ -148,5 +152,41 @@ mod tests {
             event_type: 2, // Release
         };
         assert_eq!(KeyEncoder::encode_legacy(&input), None);
+    }
+
+    #[test]
+    fn ctrl_maps_ascii_control_punctuation() {
+        for (key, expected) in [
+            (b'@', 0),
+            (b'[', 27),
+            (b'\\', 28),
+            (b']', 29),
+            (b'^', 30),
+            (b'_', 31),
+            (b'?', 127),
+        ] {
+            let input = KittyKeyboardInput {
+                key_code: u32::from(key),
+                modifiers: 0b0100,
+                event_type: 1,
+            };
+            assert_eq!(KeyEncoder::encode_legacy(&input), Some(vec![expected]));
+        }
+    }
+
+    #[test]
+    fn ignores_unknown_event_types_and_accepts_repeats() {
+        let input = KittyKeyboardInput {
+            key_code: u32::from(b'a'),
+            modifiers: 0,
+            event_type: 0,
+        };
+        assert_eq!(KeyEncoder::encode_legacy(&input), None);
+
+        let repeat = KittyKeyboardInput {
+            event_type: 3,
+            ..input
+        };
+        assert_eq!(KeyEncoder::encode_legacy(&repeat), Some(vec![b'a']));
     }
 }
