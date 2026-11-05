@@ -94,6 +94,7 @@ pub struct TerminalSettings {
     pub modal_open: bool,
     pub settings_open: bool,
     pub requested_hub_switch: Option<&'static str>,
+    pub requested_snippet_insert: Option<String>,
 }
 
 pub fn extract_printable_char(keystroke: &gpui::Keystroke) -> Option<String> {
@@ -212,6 +213,7 @@ impl TerminalSettings {
                     modal_open: false,
                     settings_open: false,
                     requested_hub_switch: None,
+                    requested_snippet_insert: None,
                 };
             }
         }
@@ -271,6 +273,7 @@ impl TerminalSettings {
             modal_open: false,
             settings_open: false,
             requested_hub_switch: None,
+            requested_snippet_insert: None,
         }
     }
 
@@ -575,7 +578,7 @@ impl Render for SettingsView {
                 div()
                     .id(("settings-nav", idx))
                     .px_2p5()
-                    .py_1p5()
+                    .py_1()
                     .rounded_lg()
                     .cursor(gpui::CursorStyle::PointingHand)
                     .bg(if is_active {
@@ -623,16 +626,20 @@ impl Render for SettingsView {
         }
 
         let sidebar = div()
+            .id("settings-left-sidebar")
             .w(px(238.0))
             .h_full()
+            .min_h_0()
             .flex_shrink_0()
             .bg(theme.tab_inactive_bg)
             .border_r_1()
             .border_color(theme.border_inactive)
-            .p_3()
+            .p_2p5()
             .flex()
             .flex_col()
             .justify_between()
+            .gap_2()
+            .overflow_y_scroll()
             .child(nav_items)
             .child(
                 div()
@@ -1935,26 +1942,58 @@ impl Render for SettingsView {
                 let tpl_in = self.new_snippet_template.clone();
                 let active_in = self.active_input;
 
-                let mut list = div().w_full().flex().flex_col().gap_1p5().overflow_hidden();
+                let mut list = div().w_full().flex().flex_col().gap_1p5();
 
-                for (idx, snip) in snippets.iter().take(5).enumerate() {
+                for (idx, snip) in snippets.iter().enumerate() {
                     let trigger = snip.trigger.clone();
+                    let trigger_for_edit = snip.trigger.clone();
+                    let label_for_edit = snip.label.clone();
+                    let template_for_edit = snip.template.clone();
+                    let trigger_for_row = snip.trigger.clone();
+                    let label_for_row = snip.label.clone();
+                    let template_for_row = snip.template.clone();
+                    let trigger_for_run = snip.trigger.clone();
+                    let template_for_copy = snip.template.clone();
                     let sm_del = settings_entity.clone();
+                    let sm_run = settings_entity.clone();
+                    let is_editing_this = trig_in == snip.trigger;
+
                     list = list.child(
                         div()
+                            .id(("snippet-card-row", idx))
                             .w_full()
                             .overflow_hidden()
                             .px_3()
-                            .py_1p5()
+                            .py_2()
                             .rounded_lg()
-                            .bg(theme.bg)
+                            .bg(if is_editing_this {
+                                theme.tab_active_bg
+                            } else {
+                                theme.bg
+                            })
                             .border_1()
-                            .border_color(theme.border_inactive)
+                            .border_color(if is_editing_this {
+                                theme.border_active
+                            } else {
+                                theme.border_inactive
+                            })
                             .flex()
                             .flex_row()
                             .justify_between()
                             .items_center()
                             .gap_3()
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.new_snippet_trigger = trigger_for_row.clone();
+                                view.new_snippet_label = label_for_row.clone();
+                                view.new_snippet_template = template_for_row.clone();
+                                view.active_input = ActiveFormInput::SnippetTemplate;
+                                window.focus(&view.focus_handle);
+                                view.status_msg = Some(format!(
+                                    "✎ Loaded snippet ':{trigger_for_row}' into editor above — edit & click 💾 Save Snippet"
+                                ));
+                                cx.notify();
+                            }))
                             .child(
                                 div()
                                     .flex_1()
@@ -1978,10 +2017,12 @@ impl Render for SettingsView {
                                                     .py_0p5()
                                                     .rounded_sm()
                                                     .bg(theme.tab_active_bg)
+                                                    .border_1()
+                                                    .border_color(theme.border_active)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(theme.border_active)
-                                                    .child(snip.trigger.clone()),
+                                                    .child(format!(":{}", snip.trigger)),
                                             )
                                             .child(
                                                 div()
@@ -2004,40 +2045,127 @@ impl Render for SettingsView {
                                     )
                                     .child(
                                         div()
+                                            .font_family("Menlo")
                                             .text_xs()
                                             .overflow_hidden()
-                                            .text_color(rgb(0xa89984))
+                                            .text_color(rgb(0x8ec07c))
                                             .child(snip.template.clone()),
                                     ),
                             )
                             .child(
                                 div()
-                                    .id(("del-snippet", idx))
                                     .flex_shrink_0()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(rgb(0x3c1f1e))
-                                    .text_xs()
-                                    .text_color(rgb(0xfb4934))
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        let trig = trigger.clone();
-                                        sm_del.update(cx, |s, cx| {
-                                            s.snippets.retain(|item| item.trigger != trig);
-                                            let _ = s.save_to_disk();
-                                            cx.notify();
-                                        });
-                                        view.status_msg =
-                                            Some(format!("✓ Removed snippet '{trigger}' & saved"));
-                                        cx.notify();
-                                    }))
-                                    .child("✕"),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .id(("insert-snippet-term-btn", idx))
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x8ec07c))
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(0x1d2021))
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                let trig = trigger_for_run.clone();
+                                                sm_run.update(cx, |s, cx| {
+                                                    s.requested_snippet_insert = Some(trig);
+                                                    s.settings_open = false;
+                                                    s.modal_open = false;
+                                                    s.requested_hub_switch = Some("close");
+                                                    cx.notify();
+                                                });
+                                            }))
+                                            .child("▶ Insert in Terminal"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("edit-snippet-btn", idx))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_active)
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme.border_active)
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.new_snippet_trigger = trigger_for_edit.clone();
+                                                view.new_snippet_label = label_for_edit.clone();
+                                                view.new_snippet_template = template_for_edit.clone();
+                                                view.active_input = ActiveFormInput::SnippetTemplate;
+                                                window.focus(&view.focus_handle);
+                                                view.status_msg = Some(format!(
+                                                    "✎ Editing snippet ':{trigger_for_edit}' — modify fields above & click 💾 Save Snippet"
+                                                ));
+                                                cx.notify();
+                                            }))
+                                            .child("✎ Edit"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("copy-snippet-btn", idx))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_xs()
+                                            .text_color(theme.fg)
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(
+                                                        template_for_copy.clone(),
+                                                    ),
+                                                );
+                                                view.status_msg = Some(
+                                                    "📋 Copied snippet template to clipboard".into(),
+                                                );
+                                                cx.notify();
+                                            }))
+                                            .child("📋"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("del-snippet", idx))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x3c1f1e))
+                                            .text_xs()
+                                            .text_color(rgb(0xfb4934))
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                let trig = trigger.clone();
+                                                sm_del.update(cx, |s, cx| {
+                                                    s.snippets.retain(|item| item.trigger != trig);
+                                                    let _ = s.save_to_disk();
+                                                    cx.notify();
+                                                });
+                                                view.status_msg = Some(format!(
+                                                    "✓ Removed snippet ':{trigger}' & saved"
+                                                ));
+                                                cx.notify();
+                                            }))
+                                            .child("✕"),
+                                    ),
                             ),
                     );
                 }
 
                 let sm_add = settings_entity.clone();
+                let is_trig_sel = active_in == ActiveFormInput::SnippetTrigger;
+                let is_lbl_sel = active_in == ActiveFormInput::SnippetLabel;
+                let is_tpl_sel = active_in == ActiveFormInput::SnippetTemplate;
+
                 div()
                     .flex()
                     .flex_col()
@@ -2049,7 +2177,7 @@ impl Render for SettingsView {
                             .rounded_lg()
                             .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(theme.border_inactive)
+                            .border_color(theme.border_active)
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -2064,49 +2192,100 @@ impl Render for SettingsView {
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(theme.border_active)
-                                            .child("➕ Create & Save Custom Parameterized Snippet (Click field to edit)"),
+                                            .child("➕ Create or Edit Parameterized Snippet (Click any field to type · Tab to switch field)"),
                                     )
                                     .child(
                                         div()
-                                            .id("save-new-snippet-btn")
-                                            .px_3()
-                                            .py_1()
-                                            .rounded_md()
-                                            .bg(rgb(0x8ec07c))
-                                            .text_color(rgb(0x1d2021))
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .cursor(gpui::CursorStyle::PointingHand)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                let trig = view.new_snippet_trigger.trim().to_string();
-                                                let lbl = view.new_snippet_label.trim().to_string();
-                                                let tpl = view.new_snippet_template.trim().to_string();
-                                                if !trig.is_empty() && !tpl.is_empty() {
-                                                    sm_add.update(cx, |s, cx| {
-                                                        s.snippets.retain(|x| x.trigger != trig);
-                                                        s.snippets.insert(
-                                                            0,
-                                                            WellSnippet {
-                                                                trigger: trig.clone(),
-                                                                label: if lbl.is_empty() {
-                                                                    trig.clone()
-                                                                } else {
-                                                                    lbl
-                                                                },
-                                                                template: tpl,
-                                                                scope: SnippetScope::Global,
-                                                            },
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .id("clear-snippet-draft-btn")
+                                                    .px_2p5()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(theme.bg)
+                                                    .border_1()
+                                                    .border_color(theme.border_inactive)
+                                                    .text_xs()
+                                                    .text_color(theme.fg)
+                                                    .cursor(gpui::CursorStyle::PointingHand)
+                                                    .on_click(cx.listener(|view, _, window, cx| {
+                                                        view.new_snippet_trigger.clear();
+                                                        view.new_snippet_label.clear();
+                                                        view.new_snippet_template.clear();
+                                                        view.active_input =
+                                                            ActiveFormInput::SnippetTrigger;
+                                                        window.focus(&view.focus_handle);
+                                                        view.status_msg = Some(
+                                                            "✨ Cleared fields — type a new Trigger, Label & Template"
+                                                                .into(),
                                                         );
-                                                        let _ = s.save_to_disk();
                                                         cx.notify();
-                                                    });
-                                                    view.status_msg = Some(format!(
-                                                        "✓ Saved snippet '{trig}' to operator_settings.json"
-                                                    ));
-                                                    cx.notify();
-                                                }
-                                            }))
-                                            .child("💾 Save New Snippet"),
+                                                    }))
+                                                    .child("🧹 Clear / New"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("save-new-snippet-btn")
+                                                    .px_3()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(rgb(0x8ec07c))
+                                                    .text_color(rgb(0x1d2021))
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .cursor(gpui::CursorStyle::PointingHand)
+                                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                                        let trig = view
+                                                            .new_snippet_trigger
+                                                            .trim()
+                                                            .trim_start_matches(':')
+                                                            .to_string();
+                                                        let lbl = view
+                                                            .new_snippet_label
+                                                            .trim()
+                                                            .to_string();
+                                                        let tpl = view
+                                                            .new_snippet_template
+                                                            .trim()
+                                                            .to_string();
+                                                        if !trig.is_empty() && !tpl.is_empty() {
+                                                            sm_add.update(cx, |s, cx| {
+                                                                s.snippets
+                                                                    .retain(|x| x.trigger != trig);
+                                                                s.snippets.insert(
+                                                                    0,
+                                                                    WellSnippet {
+                                                                        trigger: trig.clone(),
+                                                                        label: if lbl.is_empty() {
+                                                                            trig.clone()
+                                                                        } else {
+                                                                            lbl
+                                                                        },
+                                                                        template: tpl,
+                                                                        scope: SnippetScope::Global,
+                                                                    },
+                                                                );
+                                                                let _ = s.save_to_disk();
+                                                                cx.notify();
+                                                            });
+                                                            view.status_msg = Some(format!(
+                                                                "✓ Saved snippet ':{trig}' to operator_settings.json"
+                                                            ));
+                                                            cx.notify();
+                                                        } else {
+                                                            view.status_msg = Some(
+                                                                "⚠ Trigger and Template cannot be empty"
+                                                                    .into(),
+                                                            );
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child("💾 Save Snippet (↵)"),
+                                            ),
                                     ),
                             )
                             .child(
@@ -2117,71 +2296,112 @@ impl Render for SettingsView {
                                     .child(
                                         div()
                                             .id("snip-trig-field")
-                                            .w(px(120.0))
-                                            .px_2()
+                                            .w(px(170.0))
+                                            .px_2p5()
                                             .py_1()
                                             .rounded_md()
                                             .bg(theme.bg)
                                             .border_1()
-                                            .border_color(if active_in == ActiveFormInput::SnippetTrigger {
+                                            .border_color(if is_trig_sel {
                                                 theme.border_active
                                             } else {
                                                 theme.border_inactive
                                             })
                                             .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(theme.border_active)
-                                            .cursor(gpui::CursorStyle::PointingHand)
-                                            .on_click(cx.listener(|view, _, _, cx| {
+                                            .cursor(gpui::CursorStyle::IBeam)
+                                            .on_click(cx.listener(|view, _, window, cx| {
                                                 view.active_input = ActiveFormInput::SnippetTrigger;
+                                                window.focus(&view.focus_handle);
                                                 cx.notify();
                                             }))
-                                            .child(format!("Trigger: {trig_in}")),
+                                            .child(if is_trig_sel {
+                                                format!("Trigger: :{trig_in}▏")
+                                            } else if trig_in.is_empty() {
+                                                "Trigger: (e.g. klogs)".to_string()
+                                            } else {
+                                                format!("Trigger: :{trig_in}")
+                                            }),
                                     )
                                     .child(
                                         div()
                                             .id("snip-lbl-field")
                                             .flex_grow()
-                                            .px_2()
+                                            .px_2p5()
                                             .py_1()
                                             .rounded_md()
                                             .bg(theme.bg)
                                             .border_1()
-                                            .border_color(if active_in == ActiveFormInput::SnippetLabel {
+                                            .border_color(if is_lbl_sel {
                                                 theme.border_active
                                             } else {
                                                 theme.border_inactive
                                             })
                                             .text_xs()
                                             .text_color(theme.fg)
-                                            .cursor(gpui::CursorStyle::PointingHand)
-                                            .on_click(cx.listener(|view, _, _, cx| {
+                                            .cursor(gpui::CursorStyle::IBeam)
+                                            .on_click(cx.listener(|view, _, window, cx| {
                                                 view.active_input = ActiveFormInput::SnippetLabel;
+                                                window.focus(&view.focus_handle);
                                                 cx.notify();
                                             }))
-                                            .child(format!("Label: {lbl_in}")),
+                                            .child(if is_lbl_sel {
+                                                format!("Label: {lbl_in}▏")
+                                            } else if lbl_in.is_empty() {
+                                                "Label: (description)".to_string()
+                                            } else {
+                                                format!("Label: {lbl_in}")
+                                            }),
                                     ),
                             )
                             .child(
                                 div()
                                     .id("snip-tpl-field")
-                                    .px_2()
-                                    .py_1()
+                                    .px_2p5()
+                                    .py_1p5()
                                     .rounded_md()
                                     .bg(theme.bg)
                                     .border_1()
-                                    .border_color(if active_in == ActiveFormInput::SnippetTemplate {
+                                    .border_color(if is_tpl_sel {
                                         theme.border_active
                                     } else {
                                         theme.border_inactive
                                     })
+                                    .font_family("Menlo")
                                     .text_xs()
                                     .text_color(rgb(0x8ec07c))
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, _, cx| {
+                                    .cursor(gpui::CursorStyle::IBeam)
+                                    .on_click(cx.listener(|view, _, window, cx| {
                                         view.active_input = ActiveFormInput::SnippetTemplate;
+                                        window.focus(&view.focus_handle);
                                         cx.notify();
                                     }))
-                                    .child(format!("Template: {tpl_in}")),
+                                    .child(if is_tpl_sel {
+                                        format!("Template: {tpl_in}▏")
+                                    } else if tpl_in.is_empty() {
+                                        "Template: (e.g. kubectl logs -f ${1:pod} -n ${2:default})"
+                                            .to_string()
+                                    } else {
+                                        format!("Template: {tpl_in}")
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.border_active)
+                                    .child(format!(
+                                        "📚 Saved Parameterized Snippets ({} total — Click any card to edit or ▶ Insert in Terminal)",
+                                        snippets.len()
+                                    )),
                             ),
                     )
                     .child(list)
@@ -3207,6 +3427,8 @@ impl Render for SettingsView {
                     target_input
                 } else if view.active_section == SettingsSection::KeyboardShortcuts {
                     ActiveFormInput::ShortcutsFilter
+                } else if view.active_section == SettingsSection::SnippetsWorkflows {
+                    ActiveFormInput::SnippetTemplate
                 } else {
                     ActiveFormInput::None
                 };
@@ -3214,6 +3436,21 @@ impl Render for SettingsView {
                 if target_input != ActiveFormInput::None {
                     let key = event.keystroke.key.as_str();
                     match key {
+                        "tab" => {
+                            view.active_input = match target_input {
+                                ActiveFormInput::SnippetTrigger => ActiveFormInput::SnippetLabel,
+                                ActiveFormInput::SnippetLabel => ActiveFormInput::SnippetTemplate,
+                                ActiveFormInput::SnippetTemplate => ActiveFormInput::SnippetTrigger,
+                                ActiveFormInput::SshName => ActiveFormInput::SshHostname,
+                                ActiveFormInput::SshHostname => ActiveFormInput::SshUser,
+                                ActiveFormInput::SshUser => ActiveFormInput::SshPort,
+                                ActiveFormInput::SshPort => ActiveFormInput::SshIdentityFile,
+                                ActiveFormInput::SshIdentityFile => ActiveFormInput::SshProxyJump,
+                                ActiveFormInput::SshProxyJump => ActiveFormInput::SshName,
+                                other => other,
+                            };
+                            cx.notify();
+                        }
                         "escape" => {
                             if target_input == ActiveFormInput::ShortcutsFilter {
                                 view.shortcuts_filter.clear();
@@ -3268,6 +3505,43 @@ impl Render for SettingsView {
                                 view.apply_custom_theme_if_valid(slot, cx);
                                 view.active_input = ActiveFormInput::None;
                                 cx.notify();
+                            } else if matches!(
+                                target_input,
+                                ActiveFormInput::SnippetTrigger
+                                    | ActiveFormInput::SnippetLabel
+                                    | ActiveFormInput::SnippetTemplate
+                            ) {
+                                let trig = view
+                                    .new_snippet_trigger
+                                    .trim()
+                                    .trim_start_matches(':')
+                                    .to_string();
+                                let lbl = view.new_snippet_label.trim().to_string();
+                                let tpl = view.new_snippet_template.trim().to_string();
+                                if !trig.is_empty() && !tpl.is_empty() {
+                                    view.settings.update(cx, |s, cx| {
+                                        s.snippets.retain(|x| x.trigger != trig);
+                                        s.snippets.insert(
+                                            0,
+                                            WellSnippet {
+                                                trigger: trig.clone(),
+                                                label: if lbl.is_empty() {
+                                                    trig.clone()
+                                                } else {
+                                                    lbl
+                                                },
+                                                template: tpl,
+                                                scope: SnippetScope::Global,
+                                            },
+                                        );
+                                        let _ = s.save_to_disk();
+                                        cx.notify();
+                                    });
+                                    view.status_msg = Some(format!(
+                                        "✓ Saved snippet ':{trig}' to operator_settings.json"
+                                    ));
+                                    cx.notify();
+                                }
                             }
                         }
                         _ => {
@@ -3464,18 +3738,21 @@ impl Render for SettingsView {
             .child(
                 // Split Two-Pane Body
                 div()
-                    .flex_grow()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .flex_row()
                     .overflow_hidden()
                     .child(sidebar)
                     .child(
                         div()
+                            .id("settings-right-scroll-pane")
                             .flex_1()
                             .min_w_0()
+                            .min_h_0()
                             .h_full()
-                            .overflow_hidden()
-                            .p_4()
+                            .overflow_y_scroll()
+                            .p_3()
                             .child(right_pane),
                     ),
             )

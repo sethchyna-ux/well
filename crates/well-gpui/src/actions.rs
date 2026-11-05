@@ -344,4 +344,32 @@ mod tests {
         let conflicts = detect_keybind_conflicts(&colliding);
         assert!(!conflicts.is_empty());
     }
+
+    #[test]
+    fn test_terminal_settings_initial_state_and_snippet_insert() {
+        use crate::settings_view::TerminalSettings;
+        let ts = TerminalSettings::default();
+        assert!(!ts.modal_open);
+        assert!(!ts.settings_open);
+        assert!(ts.requested_hub_switch.is_none());
+        assert!(ts.requested_snippet_insert.is_none());
+    }
+
+    #[test]
+    fn test_snippet_persistence_roundtrip() {
+        use crate::settings_view::TerminalSettings;
+        use well_editor::{SnippetScope, WellSnippet};
+        let mut ts = TerminalSettings::default();
+        ts.snippets.push(WellSnippet {
+            trigger: "deploy".into(),
+            label: "Deploy Service".into(),
+            template: "systemctl restart ${1:service}".into(),
+            scope: SnippetScope::Global,
+        });
+        assert_eq!(ts.snippets.last().unwrap().trigger, "deploy");
+        assert_eq!(
+            ts.snippets.last().unwrap().template,
+            "systemctl restart ${1:service}"
+        );
+    }
 }

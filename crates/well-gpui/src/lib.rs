@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod diagnostics;
 pub mod plugins;
+pub mod settings_view;
 pub mod ssh_console;
 pub mod terminal;
 pub mod theme;
