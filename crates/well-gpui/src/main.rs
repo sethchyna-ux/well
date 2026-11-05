@@ -36,7 +36,8 @@ actions!(
         Quit,
         FocusNextPane,
         OpenSshManager,
-        OpenSnippetPicker
+        OpenSnippetPicker,
+        ToggleLineNumbers
     ]
 );
 
@@ -1030,6 +1031,7 @@ impl Render for TerminalView {
             cursor_blink,
             cursor_blink_ms,
             cursor_use_accent,
+            show_line_numbers,
         ) = {
             let settings = self.settings.read(cx);
             (
@@ -1041,6 +1043,7 @@ impl Render for TerminalView {
                 settings.cursor_blink,
                 settings.cursor_blink_ms,
                 settings.cursor_use_accent,
+                settings.show_line_numbers,
             )
         };
 
@@ -1070,6 +1073,30 @@ impl Render for TerminalView {
         let mut row_elements = Vec::new();
         for row in 0..size.0 {
             let mut col_elements = Vec::new();
+            if show_line_numbers {
+                let line_no = row + 1;
+                let is_current_line = show_vt_cursor && row == cursor_row;
+                let gutter_color = if is_current_line {
+                    if is_focused {
+                        theme.border_active
+                    } else {
+                        theme.fg
+                    }
+                } else {
+                    theme.border_inactive
+                };
+                col_elements.push(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(gutter_color)
+                        .font_weight(if is_current_line {
+                            gpui::FontWeight::BOLD
+                        } else {
+                            gpui::FontWeight::NORMAL
+                        })
+                        .child(format!("{:>3} │ ", line_no)),
+                );
+            }
             for col in 0..size.1 {
                 let is_cursor_cell = show_vt_cursor && row == cursor_row && col == cursor_col;
                 if let Some(cell) = screen.cell(row, col) {
@@ -1324,10 +1351,18 @@ impl Render for TerminalView {
                 let pty = self.pty.clone();
                 let last_size = self.last_size.clone();
                 let font_size = self.settings.read(cx).font_size;
+                let show_line_numbers = self.settings.read(cx).show_line_numbers;
                 canvas(
                     move |bounds, _window, _cx| {
+                        let total_width = f32::from(bounds.size.width);
+                        let char_width = (font_size * 0.6).max(1.0);
+                        let effective_width = if show_line_numbers {
+                            (total_width - (char_width * 6.0)).max(char_width)
+                        } else {
+                            total_width
+                        };
                         let (cols, rows) = terminal::calculate_grid_dimensions(
-                            f32::from(bounds.size.width),
+                            effective_width,
                             f32::from(bounds.size.height),
                             font_size,
                         );
@@ -1348,9 +1383,10 @@ impl Render for TerminalView {
                 self.kitty_images.iter().map(|img_overlay| {
                     let char_width = self.settings.read(cx).font_size * 0.6;
                     let line_height = self.settings.read(cx).font_size * 1.25;
+                    let gutter_offset = if show_line_numbers { char_width * 6.0 } else { 0.0 };
 
                     let top = img_overlay.cursor_row as f32 * line_height;
-                    let left = img_overlay.cursor_col as f32 * char_width;
+                    let left = img_overlay.cursor_col as f32 * char_width + gutter_offset;
                     let mut el = gpui::img(img_overlay.image.clone());
                     
                     // Set width and height if available, otherwise just use natural size
@@ -1455,12 +1491,36 @@ impl Render for TerminalView {
                                 .font_family(font_family.clone())
                                 .text_size(px(font_size))
                                 .children(lines.iter().enumerate().map(|(i, line)| {
+                                    let line_no = i + 1;
+                                    let is_current_line = i == cursor_line;
+                                    let gutter_color = if is_current_line {
+                                        theme.border_active
+                                    } else {
+                                        theme.border_inactive
+                                    };
+                                    let gutter_el = if show_line_numbers {
+                                        Some(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_color(gutter_color)
+                                                .font_weight(if is_current_line {
+                                                    gpui::FontWeight::BOLD
+                                                } else {
+                                                    gpui::FontWeight::NORMAL
+                                                })
+                                                .child(format!("{:>3} │ ", line_no)),
+                                        )
+                                    } else {
+                                        None
+                                    };
+
                                     if i == cursor_line {
                                         let mut char_indices = line.char_indices();
                                         if let Some((byte_idx, c)) = char_indices.nth(cursor_char_idx_in_line) {
                                             let before = &line[..byte_idx];
                                             let after = &line[byte_idx + c.len_utf8()..];
                                             div().flex().flex_row().text_color(theme.fg)
+                                                .children(gutter_el)
                                                 .child(if before.is_empty() { gpui::SharedString::from("") } else { gpui::SharedString::from(before.to_string()) })
                                                 .child(
                                                     div()
@@ -1471,6 +1531,7 @@ impl Render for TerminalView {
                                                 .child(if after.is_empty() { gpui::SharedString::from("") } else { gpui::SharedString::from(after.to_string()) })
                                         } else {
                                             div().flex().flex_row().text_color(theme.fg)
+                                                .children(gutter_el)
                                                 .child(if line.is_empty() { gpui::SharedString::from("") } else { gpui::SharedString::from(line.to_string()) })
                                                 .child(
                                                     div()
@@ -1480,7 +1541,12 @@ impl Render for TerminalView {
                                                 )
                                         }
                                     } else {
-                                        div().text_color(theme.fg).child(if line.is_empty() { gpui::SharedString::from(" ") } else { gpui::SharedString::from(line.to_string()) })
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .text_color(theme.fg)
+                                            .children(gutter_el)
+                                            .child(if line.is_empty() { gpui::SharedString::from(" ") } else { gpui::SharedString::from(line.to_string()) })
                                     }
                                 }))
                         })
@@ -2012,6 +2078,15 @@ impl WorkspaceView {
                 window.focus(&active_term.read(cx).focus_handle);
             }
             "mneme::ForceExecuteUnsafeCommand" | "mneme::ForceExecuteUnsafe" => {
+                let active_term = self.tabs[self.active_tab].active_terminal.clone();
+                window.focus(&active_term.read(cx).focus_handle);
+            }
+            "terminal::ToggleLineNumbers" | "well::ToggleLineNumbers" => {
+                self.settings.update(cx, |s, cx| {
+                    s.show_line_numbers = !s.show_line_numbers;
+                    let _ = s.save_to_disk();
+                    cx.notify();
+                });
                 let active_term = self.tabs[self.active_tab].active_terminal.clone();
                 window.focus(&active_term.read(cx).focus_handle);
             }
@@ -7570,13 +7645,14 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (theme, font_family, geometric_border, settings_open) = {
+        let (theme, font_family, geometric_border, settings_open, show_line_numbers) = {
             let settings = self.settings.read(cx);
             (
                 settings.theme.clone(),
                 settings.font_family.clone(),
                 settings.geometric_border,
                 settings.settings_open,
+                settings.show_line_numbers,
             )
         };
         if self.palette_open && !self.palette_focus_handle.is_focused(window) {
@@ -7920,6 +7996,11 @@ impl Render for WorkspaceView {
                     view.toggle_settings_modal(window, cx);
                 },
             ))
+            .on_action(cx.listener(
+                |view: &mut WorkspaceView, _: &ToggleLineNumbers, window, cx| {
+                    view.execute_palette_action("terminal::ToggleLineNumbers", window, cx);
+                },
+            ))
             // Tier 1 Header Bar
             .child(
                 div()
@@ -8197,6 +8278,39 @@ impl Render for WorkspaceView {
                             )
                             .child(
                                 div()
+                                    .id("footer-ln-toggle")
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .bg(if show_line_numbers {
+                                        theme.tab_active_bg
+                                    } else {
+                                        theme.bg
+                                    })
+                                    .border_1()
+                                    .border_color(if show_line_numbers {
+                                        theme.border_active
+                                    } else {
+                                        theme.border_inactive
+                                    })
+                                    .text_color(if show_line_numbers {
+                                        rgb(0x8ec07c)
+                                    } else {
+                                        rgb(0xa89984)
+                                    })
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(if show_line_numbers {
+                                        "1│ln ON"
+                                    } else {
+                                        "1│ln"
+                                    })
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.execute_palette_action("terminal::ToggleLineNumbers", window, cx);
+                                    }))
+                            )
+                            .child(
+                                div()
                                     .id("status-prism-btn")
                                     .flex()
                                     .flex_row()
@@ -8267,6 +8381,7 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-]", FocusNextPane, None),
             KeyBinding::new("cmd-shift-s", OpenSshManager, None),
+            KeyBinding::new("alt-l", ToggleLineNumbers, None),
             KeyBinding::new("f12", OpenSettings, None),
         ]);
 
@@ -8275,6 +8390,7 @@ fn main() {
                 name: "Well".into(),
                 items: vec![
                     gpui::MenuItem::action("Theia's Prism Control Center...", OpenSettings),
+                    gpui::MenuItem::action("Toggle Line Numbers Gutter", ToggleLineNumbers),
                     gpui::MenuItem::separator(),
                     gpui::MenuItem::action("Quit", Quit),
                 ],

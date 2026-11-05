@@ -57,6 +57,8 @@ pub struct PersistedOperatorSettings {
     pub cursor_blink_ms: u64,
     #[serde(default = "default_true")]
     pub cursor_use_accent: bool,
+    #[serde(default)]
+    pub show_line_numbers: bool,
     pub snippets: Vec<WellSnippet>,
     pub ssh_profiles: Vec<TheiaSshProfile>,
     #[serde(default)]
@@ -81,6 +83,7 @@ pub struct TerminalSettings {
     pub cursor_blink: bool,
     pub cursor_blink_ms: u64,
     pub cursor_use_accent: bool,
+    pub show_line_numbers: bool,
     pub snippets: Vec<WellSnippet>,
     pub ssh_profiles: Vec<TheiaSshProfile>,
     pub ssh_tunnels: Vec<SshTunnelEntry>,
@@ -188,6 +191,7 @@ impl TerminalSettings {
                     cursor_blink: persisted.cursor_blink,
                     cursor_blink_ms: persisted.cursor_blink_ms.clamp(200, 1200),
                     cursor_use_accent: persisted.cursor_use_accent,
+                    show_line_numbers: persisted.show_line_numbers,
                     snippets: if persisted.snippets.is_empty() {
                         WellSnippet::builtin_catalog()
                     } else {
@@ -260,6 +264,7 @@ impl TerminalSettings {
             cursor_blink: true,
             cursor_blink_ms: 500,
             cursor_use_accent: true,
+            show_line_numbers: false,
             snippets: WellSnippet::builtin_catalog(),
             ssh_profiles,
             ssh_tunnels: SshTunnelEntry::default_catalog(),
@@ -306,6 +311,7 @@ impl TerminalSettings {
             cursor_blink: self.cursor_blink,
             cursor_blink_ms: self.cursor_blink_ms,
             cursor_use_accent: self.cursor_use_accent,
+            show_line_numbers: self.show_line_numbers,
             snippets: self.snippets.clone(),
             ssh_profiles: self.ssh_profiles.clone(),
             ssh_tunnels: self.ssh_tunnels.clone(),
@@ -699,6 +705,7 @@ impl Render for SettingsView {
                 let cursor_blink = s.cursor_blink;
                 let cursor_blink_ms = s.cursor_blink_ms;
                 let cursor_use_accent = s.cursor_use_accent;
+                let show_line_numbers = s.show_line_numbers;
                 let active_in = self.active_input;
                 let hex_inputs = self.theme_hex_inputs.clone();
 
@@ -978,6 +985,7 @@ impl Render for SettingsView {
                 let sm_geom = settings_entity.clone();
                 let sm_cursor_blink = settings_entity.clone();
                 let sm_cursor_color = settings_entity.clone();
+                let sm_line_numbers = settings_entity.clone();
 
                 let font_families = ["Menlo", "SF Mono", "JetBrains Mono", "Monaco"];
                 let mut font_pills = div().flex().flex_row().items_center().gap_1p5();
@@ -1179,6 +1187,18 @@ impl Render for SettingsView {
                                             .text_color(theme.border_active)
                                             .child(format!("◈ PRISM LIVE: {}", theme.name)),
                                     )
+                                    .children(if show_line_numbers {
+                                        Some(
+                                            div()
+                                                .font_family(font_family.clone())
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .text_color(theme.border_active)
+                                                .child("  1 │ "),
+                                        )
+                                    } else {
+                                        None
+                                    })
                                     .child(
                                         div()
                                             .font_family(font_family.clone())
@@ -1208,13 +1228,14 @@ impl Render for SettingsView {
                                     .text_size(px(10.0))
                                     .text_color(rgb(0x928374))
                                     .child(format!(
-                                        "{font_family} · {font_size:.0}px · {} {}",
+                                        "{font_family} · {font_size:.0}px · {} {}{}",
                                         cursor_shape.label(),
                                         if cursor_blink {
                                             format!("({cursor_blink_ms}ms blink)")
                                         } else {
                                             "(steady)".into()
-                                        }
+                                        },
+                                        if show_line_numbers { " · 1│ln" } else { "" }
                                     )),
                             ),
                     );
@@ -1595,7 +1616,47 @@ impl Render for SettingsView {
                                                 div()
                                                     .text_size(px(11.0))
                                                     .text_color(theme.fg)
-                                                    .child("ATLAS Geometric Lattice Border (Cyan / Violet Frame)"),
+                                                    .child("ATLAS Geometric Frame"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("toggle-line-numbers")
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                sm_line_numbers.update(cx, |s, cx| {
+                                                    s.show_line_numbers = !s.show_line_numbers;
+                                                    let _ = s.save_to_disk();
+                                                    cx.notify();
+                                                });
+                                                view.status_msg = Some(
+                                                    "✓ Saved Line Numbers gutter preference"
+                                                        .into(),
+                                                );
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_color(if show_line_numbers {
+                                                        rgb(0x8ec07c)
+                                                    } else {
+                                                        rgb(0x928374)
+                                                    })
+                                                    .child(if show_line_numbers {
+                                                        "☑"
+                                                    } else {
+                                                        "☐"
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.0))
+                                                    .text_color(theme.fg)
+                                                    .child("Line Numbers (1 │ ln)"),
                                             ),
                                     ),
                             ),
