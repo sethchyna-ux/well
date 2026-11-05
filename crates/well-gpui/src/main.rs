@@ -1772,6 +1772,26 @@ struct WorkspaceView {
 impl WorkspaceView {
     fn new(cx: &mut Context<Self>, settings: Entity<TerminalSettings>) -> Self {
         cx.observe(&settings, |view: &mut Self, settings_ent, cx| {
+            let req_snip = settings_ent.read(cx).requested_snippet_insert.clone();
+            if let Some(trigger) = req_snip {
+                settings_ent.update(cx, |s, _| {
+                    s.requested_snippet_insert = None;
+                    s.settings_open = false;
+                    s.modal_open = false;
+                });
+                view.ssh_state.open = false;
+                view.palette_open = false;
+                view.sync_modal_open_flag(cx);
+                let active_term = view.tabs[view.active_tab].active_terminal.clone();
+                active_term.update(cx, |term, cx| {
+                    term.mneme_active = true;
+                    term.mneme_editor.set_text(&format!(":{trigger}"));
+                    let snippets = term.settings.read(cx).snippets.clone();
+                    let is_ssh = term.ssh_profile.is_some();
+                    let _ = term.mneme_editor.expand_or_advance_snippet(&snippets, is_ssh);
+                    cx.notify();
+                });
+            }
             let req = settings_ent.read(cx).requested_hub_switch;
             if let Some(target) = req {
                 settings_ent.update(cx, |s, _| {
@@ -6008,6 +6028,8 @@ impl WorkspaceView {
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
                                             .px_3()
                                             .py_1()
                                             .rounded_md()
@@ -6022,6 +6044,7 @@ impl WorkspaceView {
                                     .child(
                                         div()
                                             .id(("smb-open-finder", sidx))
+                                            .flex_shrink_0()
                                             .px_2p5()
                                             .py_1()
                                             .rounded_md()
@@ -6045,6 +6068,7 @@ impl WorkspaceView {
                                     .child(
                                         div()
                                             .id(("smb-mount-cli", sidx))
+                                            .flex_shrink_0()
                                             .px_2p5()
                                             .py_1()
                                             .rounded_md()
@@ -6067,6 +6091,7 @@ impl WorkspaceView {
                                     .child(
                                         div()
                                             .id(("smb-copy-url", sidx))
+                                            .flex_shrink_0()
                                             .px_2p5()
                                             .py_1()
                                             .rounded_md()
@@ -6727,6 +6752,7 @@ impl WorkspaceView {
                     .h_full()
                     .max_w(px(1360.0))
                     .max_h(px(750.0))
+                    .min_h_0()
                     .overflow_hidden()
                     .bg(theme.bg)
                     .border_2()
@@ -6848,14 +6874,16 @@ impl WorkspaceView {
                             })
                             .child(
                                 div()
+                                    .id("ssh-right-scroll-pane")
                                     .flex_1()
                                     .min_w_0()
+                                    .min_h_0()
                                     .h_full()
                                     .p_4()
                                     .flex()
                                     .flex_col()
                                     .gap_3()
-                                    .overflow_hidden()
+                                    .overflow_y_scroll()
                                     .children(status_message.map(|msg| {
                                         div()
                                             .px_3()
@@ -6901,6 +6929,9 @@ impl WorkspaceView {
                     .h_full()
                     .max_w(px(1360.0))
                     .max_h(px(750.0))
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
                     .overflow_hidden()
                     .bg(theme.bg)
                     .border_2()
@@ -7556,6 +7587,19 @@ impl Render for WorkspaceView {
             let sf = self.settings_view.read(cx).focus_handle.clone();
             if !sf.is_focused(window) {
                 window.focus(&sf);
+            }
+        } else {
+            let active_term_handle = self.tabs[self.active_tab]
+                .active_terminal
+                .read(cx)
+                .focus_handle
+                .clone();
+            if !active_term_handle.is_focused(window)
+                && !self.palette_focus_handle.is_focused(window)
+                && !self.ssh_focus_handle.is_focused(window)
+                && !self.settings_view.read(cx).focus_handle.is_focused(window)
+            {
+                window.focus(&active_term_handle);
             }
         }
 
