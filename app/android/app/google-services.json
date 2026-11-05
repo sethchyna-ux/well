@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "824249630334",
+    "project_id": "well-shell",
+    "storage_bucket": "well-shell.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:824249630334:android:ac7c6426f48967ae8f222f",
+        "android_client_info": {
+          "package_name": "com.example.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCFiybtTz1GdtscQL9yGp6l2eRe03pCdEk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

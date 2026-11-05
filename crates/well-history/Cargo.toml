@@ -1,0 +1,13 @@
+[package]
+name = "well-history"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bincode = "1.3.3"
+memmap2 = "0.9.11"
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = "1.53.1"
+zstd = "0.14.0"

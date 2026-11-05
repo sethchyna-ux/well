@@ -1,0 +1,7 @@
+{
+  "toolName": "cargo_run",
+  "description": "Run the Well Rust project using `cargo run`.",
+  "command": "cargo run --quiet",
+  "workingDirectory": "./",
+  "environment": {}
+}

@@ -1,0 +1,20 @@
+cask "well" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/@REPOSITORY@/releases/download/@TAG@/@ARCHIVE@"
+  name "Well"
+  desc "GPU-accelerated terminal with AI-powered tools"
+  homepage "https://github.com/@REPOSITORY@"
+
+  depends_on arch: :arm64
+  depends_on macos: :monterey
+
+  app "Well.app"
+  binary "#{appdir}/Well.app/Contents/MacOS/Well", target: "well"
+
+  zap trash: [
+    "~/.config/well",
+    "~/.well",
+  ]
+end

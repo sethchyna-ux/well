@@ -1,0 +1,18 @@
+{
+  "configurations": [
+    {
+      "name": "macos-msvc-arm64",
+      "includePath": [
+        "${workspaceFolder}/**"
+      ],
+      "compilerPath": "cl.exe",
+      "cStandard": "c11",
+      "cppStandard": "${default}",
+      "intelliSenseMode": "macos-msvc-arm64",
+      "compilerArgs": [
+        ""
+      ]
+    }
+  ],
+  "version": 4
+}

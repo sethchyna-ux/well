@@ -10649,6 +10649,7 @@ dependencies = [
  "well-prompt",
  "well-render",
  "well-shell",
+ "well-wasm",
 ]
 
 [[package]]

@@ -1,0 +1,42 @@
+# Multi-stage build for headless Hermes RPC Server & PTY Runner Pod
+# Stage 1: Build Rust Hermes Binary
+FROM rust:1.80-alpine AS builder
+
+RUN apk add --no-cache musl-dev gcc make
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY src ./src
+
+RUN cargo build --release -p well-ipc
+
+# Stage 2: Minimal Runtime Container
+FROM alpine:3.20
+
+RUN apk add --no-cache \
+    fish \
+    starship \
+    bash \
+    curl \
+    git \
+    openssh-client \
+    ca-certificates
+
+# Create non-root developer user
+RUN adduser -D -s /usr/bin/fish well && \
+    mkdir -p /home/well/.config/fish && \
+    chown -R well:well /home/well
+
+WORKDIR /home/well
+USER well
+
+# Copy compiled hermes library
+COPY --from=builder /build/target/release/libwell_ipc.a /usr/local/lib/libwell_ipc.a
+
+EXPOSE 9090
+
+ENV SHELL=/usr/bin/fish
+ENV TERM=xterm-256color
+
+CMD ["fish"]

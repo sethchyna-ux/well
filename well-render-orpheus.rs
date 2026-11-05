@@ -1,0 +1,656 @@
+// well-render-orpheus.rs
+//
+// ORPHEUS: The high-performance WebGPU-backed text-shaping and glyph-atlas rendering engine
+// for "Well" (Phrear) terminal. Renders the entire terminal grid in a single instanced draw call.
+//
+// Naming Theme: Orpheus, the master of harmonious visual composition.
+// Mechanism: Dynamic 2D Texture Atlas, instanced VBOs, and branchless WGSL pipelines.
+
+use std::collections::HashMap;
+use std::num::NonZeroU32;
+
+// packed vertex attribute for quad corners
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pub position: [f32; 2],
+    pub tex_coord: [f32; 2],
+}
+
+// Packed per-cell instance data (64 bits / 8 bytes)
+// Packs Glyph ID (16 bits) and 24-bit RGB colors for foreground and background.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CellInstance {
+    pub grid_position: [u32; 2], // grid_x, grid_y
+    pub glyph_id_and_effects: u32, // Bits 0-12: Slot ID, Bit 13: Underline, Bit 14: Strikethrough, Bit 15: Emoji
+    pub packed_colors: u32, // Bits 0-11: FG (12-bit color or full 24-bit packed split), Bits 12-23: BG
+}
+
+// Glyph Atlas slot categories based on "Well" specification
+pub const SLOT_ASCII_NORMAL_START: u32 = 0;
+pub const SLOT_ASCII_NORMAL_END: u32 = 94; // 95 pre-allocated standard ASCII slots
+pub const SLOT_ASCII_STYLIZED_START: u32 = 95;
+pub const SLOT_ASCII_STYLIZED_END: u32 = 2047; // 1953 LRU-managed stylized slots (Bold, Italic, BoldItalic)
+pub const SLOT_DOUBLE_WIDE_START: u32 = 2048;
+pub const SLOT_DOUBLE_WIDE_END: u32 = 6143; // 4096 slots for CJK and wide scripts
+pub const SLOT_EMOJI_START: u32 = 6144;
+pub const SLOT_EMOJI_END: u32 = 8191; // 2048 high-resolution multi-colored emoji slots
+
+// Cache entry representing mapped glyph coordinates in the 2D texture array
+#[derive(Copy, Clone, Debug)]
+pub struct AtlasCoordinates {
+    pub layer: u32,
+    pub col: u32, // x position in the 1x32 horizontal grid
+    pub row: u32, // y position in the layer
+}
+
+// LRU Node for tracking active glyph slots
+struct LruNode {
+    key: (u32, u32), // (Unicode codepoint, Style bits)
+    slot_id: u32,
+}
+
+pub struct OrpheusRenderer {
+    // WebGPU Context Handles
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub render_pipeline: wgpu::RenderPipeline,
+    
+    // Buffers
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub instance_buffer: wgpu::Buffer,
+    pub uniform_buffer: wgpu::Buffer,
+    
+    // Bind Groups
+    pub bind_group: wgpu::BindGroup,
+    
+    // Texture Atlas
+    pub atlas_texture: wgpu::Texture,
+    pub atlas_view: wgpu::TextureView,
+    pub atlas_sampler: wgpu::Sampler,
+    
+    // Layout and Sizing
+    pub grid_rows: u32,
+    pub grid_cols: u32,
+    pub cell_width: f32,
+    pub cell_height: f32,
+    
+    // Cache management
+    pub glyph_cache: HashMap<(u32, u32), AtlasCoordinates>, // (Codepoint, Style) -> Coordinates
+    pub lru_cache: Vec<LruNode>, // Tracks active dynamic slots for eviction
+    pub next_stylized_slot: u32,
+    pub next_double_wide_slot: u32,
+    pub next_emoji_slot: u32,
+}
+
+impl OrpheusRenderer {
+    pub async fn new(
+        instance: &wgpu::Instance,
+        surface: &wgpu::Surface<'_>,
+        grid_rows: u32,
+        grid_cols: u32,
+        cell_width: f32,
+        cell_height: f32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(surface),
+            force_fallback_adapter: false,
+        }).await.ok_or("Failed to find WebGPU adapter")?;
+
+        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("WellOrpheusDevice"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+        }, None).await?;
+
+        // 1. Create a 2D Texture Array for the Glyph Atlas (layer-based texture format)
+        // Array layers contain 1x32 grids of glyphs for cache-coherent GPU texture lookups.
+        let atlas_width = cell_width as u32 * 32;
+        let atlas_height = cell_height as u32 * 32;
+        let atlas_layers = 256; // 256 layers to hold all categories (ASCII, CJK, Emojis)
+        
+        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("OrpheusAtlasTextureArray"),
+            size: wgpu::Extent3d {
+                width: atlas_width,
+                height: atlas_height,
+                depth_or_array_layers: atlas_layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            use_aspect: wgpu::TextureAspect::All,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("OrpheusAtlasTextureView"),
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(atlas_layers),
+        });
+
+        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("OrpheusAtlasSampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest, // Keep text boundaries crisp
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // 2. Uniform buffers for projection matrix and viewport sizes
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("OrpheusUniformBuffer"),
+            size: 64 + 16, // Mat4x4 + Viewport sizes
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // 3. Compile WGSL Shader Core
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("OrpheusShadingWGSL"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(WGSL_SHADER_SOURCE)),
+        });
+
+        // 4. Create Pipeline Layouts
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("OrpheusBindGroupLayout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("OrpheusBindGroup"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("OrpheusPipelineLayout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("OrpheusRenderPipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[
+                    // Quad Vertex Attributes
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 8,
+                                location: 1,
+                            },
+                        ],
+                    },
+                    // Instanced Cell Attributes
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<CellInstance>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32x2,
+                                offset: 0,
+                                location: 2, // grid_position
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 8,
+                                location: 3, // glyph_id_and_effects
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 12,
+                                location: 4, // packed_colors
+                            },
+                        ],
+                    },
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Static quad vertices
+        let vertices = [
+            Vertex { position: [0.0, 0.0], tex_coord: [0.0, 1.0] },
+            Vertex { position: [1.0, 0.0], tex_coord: [1.0, 1.0] },
+            Vertex { position: [1.0, 1.0], tex_coord: [1.0, 0.0] },
+            Vertex { position: [0.0, 1.0], tex_coord: [0.0, 0.0] },
+        ];
+        
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("OrpheusQuadVertexBuffer"),
+            size: std::mem::size_of_val(&vertices) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+
+        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("OrpheusQuadIndexBuffer"),
+            size: std::mem::size_of_val(&indices) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(&indices));
+
+        // Flat cell buffer allocation
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("OrpheusInstanceBuffer"),
+            size: (grid_rows * grid_cols * std::mem::size_of::<CellInstance>() as u32) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Ok(Self {
+            device,
+            queue,
+            render_pipeline,
+            vertex_buffer,
+            index_buffer,
+            instance_buffer,
+            uniform_buffer,
+            bind_group,
+            atlas_texture,
+            atlas_view,
+            atlas_sampler,
+            grid_rows,
+            grid_cols,
+            cell_width,
+            cell_height,
+            glyph_cache: HashMap::new(),
+            lru_cache: Vec::new(),
+            next_stylized_slot: SLOT_ASCII_STYLIZED_START,
+            next_double_wide_slot: SLOT_DOUBLE_WIDE_START,
+            next_emoji_slot: SLOT_EMOJI_START,
+        })
+    }
+
+    // Resolves coordinates from the Flat Atlas Cache, or registers/evicts on demand
+    pub fn resolve_or_allocate_glyph(&mut self, codepoint: u32, style: u32, is_emoji: bool) -> AtlasCoordinates {
+        let key = (codepoint, style);
+        
+        if let Some(&coords) = self.glyph_cache.get(&key) {
+            self.refresh_lru(key);
+            return coords;
+        }
+
+        // Slot allocation with category boundary protections
+        let slot_id = if is_emoji {
+            let slot = self.next_emoji_slot;
+            self.next_emoji_slot += 1;
+            if self.next_emoji_slot > SLOT_EMOJI_END {
+                self.next_emoji_slot = SLOT_EMOJI_START; // Ring buffer eviction fallback
+            }
+            slot
+        } else if codepoint <= 127 && style == 0 {
+            // Pre-allocated fixed fast-path ASCII normal slots
+            codepoint
+        } else if codepoint <= 127 {
+            let slot = self.next_stylized_slot;
+            self.next_stylized_slot += 1;
+            if self.next_stylized_slot > SLOT_ASCII_STYLIZED_END {
+                self.evict_lru_and_reallocate(SLOT_ASCII_STYLIZED_START, SLOT_ASCII_STYLIZED_END)
+            } else {
+                slot
+            }
+        } else {
+            let slot = self.next_double_wide_slot;
+            self.next_double_wide_slot += 1;
+            if self.next_double_wide_slot > SLOT_DOUBLE_WIDE_END {
+                self.evict_lru_and_reallocate(SLOT_DOUBLE_WIDE_START, SLOT_DOUBLE_WIDE_END)
+            } else {
+                slot
+            }
+        };
+
+        // Compute 2D texture array coordinates
+        let layer = slot_id / 32;
+        let position = slot_id % 32;
+
+        let coords = AtlasCoordinates {
+            layer,
+            col: position,
+            row: 0,
+        };
+
+        // Insert into caches
+        self.glyph_cache.insert(key, coords);
+        self.lru_cache.push(LruNode { key, slot_id });
+        
+        // Trigger on-demand glyph rasterization via host queue writes
+        self.rasterize_glyph_to_gpu(codepoint, style, coords);
+
+        coords
+    }
+
+    fn refresh_lru(&mut self, key: (u32, u32)) {
+        if let Some(pos) = self.lru_cache.iter().position(|x| x.key == key) {
+            let node = self.lru_cache.remove(pos);
+            self.lru_cache.push(node);
+        }
+    }
+
+    fn evict_lru_and_reallocate(&mut self, min: u32, max: u32) -> u32 {
+        // Evicts the least recently used node that matches the slot boundary ranges
+        if let Some(pos) = self.lru_cache.iter().position(|node| node.slot_id >= min && node.slot_id <= max) {
+            let node = self.lru_cache.remove(pos);
+            self.glyph_cache.remove(&node.key);
+            node.slot_id
+        } else {
+            min // Absolute fallback
+        }
+    }
+
+    fn rasterize_glyph_to_gpu(&self, codepoint: u32, style: u32, coords: AtlasCoordinates) {
+        // Mock swash / FreeType dynamic rasterizer pipeline.
+        // Rasterizes glyph to a standard 8-bit or 32-bit pixel slice and uploads to the GPU.
+        let w = self.cell_width as u32;
+        let h = self.cell_height as u32;
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+
+        // Draw simple geometric outlines to populate the texture array safely
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) * 4) as usize;
+                if x == 0 || x == w - 1 || y == 0 || y == h - 1 {
+                    pixels[idx] = 255;     // Red (Outline border indicator)
+                    pixels[idx + 1] = 255; // Green
+                    pixels[idx + 2] = 255; // Blue
+                    pixels[idx + 3] = 255; // Alpha
+                } else if (codepoint % 7 == 0 && (x == y || x == w - y)) || style == 1 {
+                    pixels[idx + 1] = 200; // Style shading
+                    pixels[idx + 3] = 255;
+                } else {
+                    pixels[idx + 3] = 0;   // Transparent interior
+                }
+            }
+        }
+
+        // Upload to specific layer of our 2D Texture Array
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: coords.col * w,
+                    y: coords.row * h,
+                    z: coords.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    pub fn update_projection_matrix(&self, width: f32, height: f32) {
+        // Compute and write standard orthographic screen projections to our uniform buffer
+        let proj = [
+            2.0 / width,  0.0,          0.0, 0.0,
+            0.0,         -2.0 / height, 0.0, 0.0,
+            0.0,          0.0,          1.0, 0.0,
+           -1.0,          1.0,          0.0, 1.0,
+        ];
+        
+        let mut uniform_data = vec![0u8; 80];
+        uniform_data[0..64].copy_from_slice(bytemuck::cast_slice(&proj));
+        uniform_data[64..68].copy_from_slice(&self.cell_width.to_ne_bytes());
+        uniform_data[68..72].copy_from_slice(&self.cell_height.to_ne_bytes());
+        uniform_data[72..76].copy_from_slice(&(self.grid_cols).to_ne_bytes());
+        uniform_data[76..80].copy_from_slice(&(self.grid_rows).to_ne_bytes());
+
+        self.queue.write_buffer(&self.uniform_buffer, 0, &uniform_data);
+    }
+
+    // Single Draw-Call Renderer Execution
+    pub fn draw_frame(
+        &self,
+        view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+        cells: &[CellInstance],
+    ) {
+        // Upload dynamic instanced layout parameters to our buffer
+        self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(cells));
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("OrpheusRenderPass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        
+        // Single draw call for the entire cell matrix
+        render_pass.draw_indexed(0..6, 0, 0..(cells.len() as u32));
+    }
+}
+
+// ── WGSL Shading Pipeline ──────────────────────────────────────────────
+pub const WGSL_SHADER_SOURCE: &str = r#"
+struct Uniforms {
+    projection_matrix: mat4x4<f32>,
+    cell_width: f32,
+    cell_height: f32,
+    grid_cols: u32,
+    grid_rows: u32,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var atlas_textures: texture_2d_array<f32>;
+@group(0) @binding(2) var atlas_sampler: sampler;
+
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) tex_coord: vec2<f32>,
+};
+
+struct InstanceInput {
+    @location(2) grid_pos: vec2<u32>,
+    @location(3) glyph_id_and_effects: u32,
+    @location(4) packed_colors: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) tex_coord: vec3<f32>,
+    @location(1) @flat fg_color: vec4<f32>,
+    @location(2) @flat bg_color: vec4<f32>,
+    @location(3) @flat effects: u32,
+};
+
+fn unpack_rgba(packed: u32) -> vec4<f32> {
+    let r = f32((packed >> 16u) & 0xFFu) / 255.0;
+    let g = f32((packed >> 8u) & 0xFFu) / 255.0;
+    let b = f32(packed & 0xFFu) / 255.0;
+    return vec4<f32>(r, g, b, 1.0);
+}
+
+@vertex
+fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
+    var out: VertexOutput;
+
+    // 1. Unpack colors from instance attributes
+    let fg_packed = instance.packed_colors >> 12u;
+    let bg_packed = instance.packed_colors & 0xFFFu; // Packed split-matrix colors
+    
+    // Scale standard 12-bit colors to full 24-bit floats
+    let r_fg = f32((fg_packed >> 8u) & 0xFu) / 15.0;
+    let g_fg = f32((fg_packed >> 4u) & 0xFu) / 15.0;
+    let b_fg = f32(fg_packed & 0xFu) / 15.0;
+    out.fg_color = vec4<f32>(r_fg, g_fg, b_fg, 1.0);
+
+    let r_bg = f32((bg_packed >> 8u) & 0xFu) / 15.0;
+    let g_bg = f32((bg_packed >> 4u) & 0xFu) / 15.0;
+    let b_bg = f32(packed_bits_to_bg(instance.packed_colors)) / 255.0; // Dynamic scaling helper
+    out.bg_color = vec4<f32>(r_bg, g_bg, b_bg * 0.5, 1.0);
+
+    // 2. Decode glyph slot allocations
+    let slot_id = instance.glyph_id_and_effects & 0x1FFFu; // 13 bits (Max 8192 slots)
+    let layer = f32(slot_id / 32u);
+    let col = f32(slot_id % 32u);
+
+    // Map corner texture coordinates into the layer subgrid offsets
+    let u = (col + vertex.tex_coord.x) / 32.0;
+    let v = vertex.tex_coord.y; // Symmetrical mapping
+    out.tex_coord = vec3<f32>(u, v, layer);
+
+    // 3. Compute orthographic window transformation
+    let cell_x = f32(instance.grid_pos.x) * uniforms.cell_width;
+    let cell_y = f32(instance.grid_pos.y) * uniforms.cell_height;
+
+    let local_pos = vec2<f32>(
+        vertex.position.x * uniforms.cell_width,
+        vertex.position.y * uniforms.cell_height
+    );
+
+    let world_pos = vec2<f32>(cell_x + local_pos.x, cell_y + local_pos.y);
+    out.clip_position = uniforms.projection_matrix * vec4<f32>(world_pos, 0.0, 1.0);
+    out.effects = instance.glyph_id_and_effects >> 13u; // Extract underline, strikethrough, emoji flags
+
+    return out;
+}
+
+fn packed_bits_to_bg(packed: u32) -> f32 {
+    return f32(packed & 0xFFu); // Fallback color conversion helper
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // 1. Sample from our GPU Texture Array
+    let sampled_color = textureSample(atlas_textures, atlas_sampler, in.tex_coord.xy, u32(in.tex_coord.z));
+
+    // 2. Separate rendering paths for Emoji vs Standard subpixel text
+    let is_emoji = (in.effects & 4u) != 0u; // Bit 15 extracted (15 - 13 = 2)
+    if (is_emoji) {
+        return sampled_color; // Color emoji directly bypassed
+    }
+
+    // Apply inline underline/strikethrough effects directly inside the pixel shader
+    let has_underline = (in.effects & 1u) != 0u;   // Bit 13 (13 - 13 = 0)
+    let has_strikethrough = (in.effects & 2u) != 0u; // Bit 14 (14 - 13 = 1)
+    
+    var final_text_color = mix(in.bg_color, in.fg_color, sampled_color.a);
+
+    // Draw horizontal lines inside specific pixel ranges to preserve rendering bounds
+    let pixel_y = in.tex_coord.y;
+    if (has_underline && pixel_y > 0.9) {
+        final_text_color = in.fg_color;
+    }
+    if (has_strikethrough && pixel_y > 0.45 && pixel_y < 0.55) {
+        final_text_color = in.fg_color;
+    }
+
+    return final_text_color;
+}
+"#;

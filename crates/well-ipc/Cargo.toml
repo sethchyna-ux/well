@@ -22,3 +22,8 @@ async-trait = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[[bench]]
+name = "seqlock_contention"
+harness = false
+

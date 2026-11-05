@@ -1,0 +1,138 @@
+name: Well Production Baseline
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+  pull_request:
+    branches: ["main", "master", "develop"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Baseline target to run"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - check
+          - test
+          - package-macos
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  WELL_MOCK_LLM: "1"
+
+jobs:
+  check:
+    name: Workspace check
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'check' }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-cargo-check-
+
+      - name: Check repository hygiene
+        run: ./scripts/check-repo-hygiene.sh
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace --locked
+
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Production-spine tests
+    needs: [check]
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'test') }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-cargo-test-
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+  package-macos:
+    name: Package macOS app
+    needs: [test]
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'package-macos') }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build app bundle
+        run: ./package-app.sh --archive --cask
+
+      - name: Verify app bundle
+        run: ./scripts/verify-macos-bundle.sh dist/Well.app
+
+      - name: Qualify clean-state release candidate
+        run: ./scripts/verify-release-candidate.sh dist/Well.app
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Well-macOS
+          path: |
+            dist/Well-*-macOS-*.zip
+            dist/Well-*-macOS-*.zip.sha256
+            dist/Casks/well.rb
+          if-no-files-found: error
+          retention-days: 14

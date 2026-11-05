@@ -1,6 +1,8 @@
 # Rust build artifacts
 /target/
 **/*.rs.bk
+.zig-cache/
+zig-out/
 
 # macOS
 .DS_Store

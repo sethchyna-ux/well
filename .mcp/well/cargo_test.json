@@ -1,0 +1,7 @@
+{
+  "toolName": "cargo_test",
+  "description": "Run the Well Rust project's test suite using `cargo test`.",
+  "command": "cargo test --quiet",
+  "workingDirectory": "./",
+  "environment": {}
+}

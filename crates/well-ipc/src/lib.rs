@@ -6,7 +6,10 @@ pub mod rpc;
 pub mod seqlock;
 pub mod ssh;
 
-pub use bypass::{HermesBypassBus, HermesBypassEndpoint, HermesBypassMessage};
+pub use bypass::{
+    BypassExecutionMode, HermesBypassBus, HermesBypassEndpoint, HermesBypassMessage,
+    SharedMemoryBypassRing,
+};
 pub use rpc::{BoundRpcServer, HermesAppCommand, HermesRpcServer, DEFAULT_APP_METHODS};
 pub use seqlock::{HermesSeqlock, HermesViewportState};
 pub use ssh::{ActiveSshSessionInfo, SshHostConfig, SshTarget};

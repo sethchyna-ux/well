@@ -1,0 +1,115 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Package & Deploy Well.app",
+      "type": "shell",
+      "command": "./package-app.sh",
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "cargo run (dev)",
+      "type": "shell",
+      "command": "cargo run --bin well",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "cargo build (debug)",
+      "type": "shell",
+      "command": "cargo build --bin well",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "cargo test",
+      "type": "shell",
+      "command": "cargo test --workspace",
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Launch Installed App",
+      "type": "shell",
+      "command": "killall Well 2>/dev/null; sleep 0.2; open /Applications/Well.app",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Android (All Targets)",
+      "type": "shell",
+      "command": "./package-android.sh all",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "Build Android CLI (Termux)",
+      "type": "shell",
+      "command": "./package-android.sh cli",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "Build Android FFI (.so for Flutter)",
+      "type": "shell",
+      "command": "./package-android.sh ffi",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "Pipeline: Check Workspace",
+      "type": "shell",
+      "command": "./scripts/well-pipeline.sh check",
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": "build"
+    },
+    {
+      "label": "Pipeline: Rerun Workspace Tests",
+      "type": "shell",
+      "command": "./scripts/well-pipeline.sh rerun test",
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": "test"
+    },
+    {
+      "label": "Pipeline: Debug (Trace Mode)",
+      "type": "shell",
+      "command": "./scripts/well-pipeline.sh debug --trace",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "Pipeline: Rerun All",
+      "type": "shell",
+      "command": "./scripts/well-pipeline.sh rerun all",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "Pipeline: Toolchain Doctor",
+      "type": "shell",
+      "command": "./scripts/well-pipeline.sh doctor",
+      "problemMatcher": []
+    }
+  ]
+}

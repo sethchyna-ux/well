@@ -1,0 +1,13 @@
+[package]
+name = "well-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.32", features = ["full"] }
+bincode = "1.3.3"
+well-ipc = { path = "../well-ipc" }
+well-shell = { path = "../well-shell" }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"

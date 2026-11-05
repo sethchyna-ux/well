@@ -1,0 +1,50 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Well",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/well",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo build"
+    },
+    {
+      "name": "Run Well",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/well",
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug Well (Trace & Backtrace)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/well",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        { "name": "RUST_LOG", "value": "trace,well=trace,wgpu=info" },
+        { "name": "RUST_BACKTRACE", "value": "full" },
+        { "name": "WELL_MOCK_LLM", "value": "1" }
+      ],
+      "preLaunchTask": "cargo build (debug)"
+    },
+    {
+      "name": "Debug Well (Mock LLM)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/well",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        { "name": "RUST_LOG", "value": "debug,well=debug" },
+        { "name": "RUST_BACKTRACE", "value": "1" },
+        { "name": "WELL_MOCK_LLM", "value": "1" }
+      ],
+      "preLaunchTask": "cargo build (debug)"
+    }
+  ]
+}

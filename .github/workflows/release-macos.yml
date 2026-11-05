@@ -1,0 +1,77 @@
+name: Release macOS App Bundle & Notarization
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos:
+    name: Build, Sign, Notarize & Publish (macOS arm64)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Zig & Rust toolchains
+        run: |
+          brew install zig jq
+          rustup update stable
+          rustup default stable
+
+      - name: Import Apple Developer ID Certificate into Ephemeral Keychain
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="${RUNNER_TEMP}/well-signing.keychain-db"
+          KEYCHAIN_PASS="$(uuidgen)"
+          echo "${APPLE_CERTIFICATE_P12}" | base64 --decode > "${RUNNER_TEMP}/certificate.p12"
+
+          security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+          security import "${RUNNER_TEMP}/certificate.p12" \
+            -P "${APPLE_CERTIFICATE_PASSWORD}" \
+            -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+
+          xcrun notarytool store-credentials "well-notary-profile" \
+            --apple-id "${APPLE_ID}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
+            --keychain "${KEYCHAIN_PATH}"
+
+      - name: Package, Sign, Notarize, Build DMG & Generate Homebrew Cask
+        env:
+          WELL_SIGN_IDENTITY: ${{ secrets.WELL_SIGN_IDENTITY || '-' }}
+          WELL_NOTARY_PROFILE: "well-notary-profile"
+        run: |
+          if [ "${WELL_SIGN_IDENTITY}" != "-" ]; then
+            ./package-app.sh --archive --dmg --notarize --cask
+            spctl --assess --type execute -v dist/Well.app
+          else
+            ./package-app.sh --archive --dmg --cask
+          fi
+          ./scripts/verify-release-candidate.sh dist/Well.app
+
+      - name: Upload Release Artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Well-*.zip
+            dist/Well-*.zip.sha256
+            dist/Well-*.dmg
+            dist/Well-*.dmg.sha256
+            dist/Casks/well.rb
+
