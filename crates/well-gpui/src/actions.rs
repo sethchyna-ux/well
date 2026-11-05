@@ -200,6 +200,14 @@ pub const WELL_ACTIONS: &[ActionDescriptor] = &[
         key_context: "Workspace",
     },
     ActionDescriptor {
+        id: "terminal::ToggleLineNumbers",
+        label: "Terminal: Toggle Line Numbers Gutter",
+        category: ActionCategory::Terminal,
+        description: "Toggle line number gutter display on the active terminal grid",
+        default_keybind: "⌥L",
+        key_context: "Workspace",
+    },
+    ActionDescriptor {
         id: "well::Quit",
         label: "Well: Quit Application",
         category: ActionCategory::Terminal,
@@ -351,6 +359,7 @@ mod tests {
         let ts = TerminalSettings::default();
         assert!(!ts.modal_open);
         assert!(!ts.settings_open);
+        assert!(!ts.show_line_numbers);
         assert!(ts.requested_hub_switch.is_none());
         assert!(ts.requested_snippet_insert.is_none());
     }
@@ -371,5 +380,21 @@ mod tests {
             ts.snippets.last().unwrap().template,
             "systemctl restart ${1:service}"
         );
+    }
+
+    #[test]
+    fn test_toggle_line_numbers_action_and_settings() {
+        use crate::settings_view::TerminalSettings;
+        let mut ts = TerminalSettings::default();
+        assert!(!ts.show_line_numbers);
+        ts.show_line_numbers = true;
+        assert!(ts.show_line_numbers);
+
+        let toggle_action = WELL_ACTIONS
+            .iter()
+            .find(|a| a.id == "terminal::ToggleLineNumbers")
+            .expect("terminal::ToggleLineNumbers must be in WELL_ACTIONS");
+        assert_eq!(toggle_action.default_keybind, "⌥L");
+        assert_eq!(toggle_action.category, ActionCategory::Terminal);
     }
 }
