@@ -11,7 +11,7 @@ mod theme;
 use actions::{filter_actions, footer_hints_for_context};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use settings_view::{SettingsView, TerminalSettings};
+use settings_view::{SettingsSection, SettingsView, TerminalSettings};
 use ssh_console::{
     build_legacy_bios_option43, build_qemu_uefi_test_command, build_standalone_dns_option6,
     classify_chainload_payload, detect_primary_lan_ip, discover_arp_neighbors,
@@ -4015,9 +4015,7 @@ impl WorkspaceView {
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(rgb(0xf8fafc))
-                                                    .child(format!(
-                                                        "🌐 Embedded HTTP Authorized Key Server (http://{lan_ip}:{ks_port}/authorized_keys)"
-                                                    )),
+                                                    .child("🌐 HTTP Authorized Key Server (/authorized_keys)"),
                                             )
                                             .child(
                                                 div()
@@ -5869,7 +5867,7 @@ impl WorkspaceView {
                     share_cards = share_cards.child(
                         div()
                             .id(("smb-share-card", sidx))
-                            .p_3p5()
+                            .p_3()
                             .rounded_xl()
                             .bg(rgb(0x111726))
                             .border_1()
@@ -5910,112 +5908,114 @@ impl WorkspaceView {
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(rgb(0xf8fafc))
                                                     .child(stitle),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(if mounted {
-                                                        rgb(0x34d399)
-                                                    } else {
-                                                        rgb(0x64748b)
-                                                    })
-                                                    .child(if mounted {
-                                                        format!("● Mounted ({mount_pt})")
-                                                    } else {
-                                                        format!("● Unmounted ({mount_pt})")
-                                                    }),
                                             ),
                                     )
                                     .child(
                                         div()
-                                            .flex()
-                                            .flex_row()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .id(("smb-open-finder", sidx))
-                                                    .px_2p5()
-                                                    .py_1()
-                                                    .rounded_md()
-                                                    .bg(rgb(0x06b6d4))
-                                                    .text_color(rgb(0x090d16))
-                                                    .text_xs()
-                                                    .font_weight(gpui::FontWeight::BOLD)
-                                                    .cursor(gpui::CursorStyle::PointingHand)
-                                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                                        let _ = std::process::Command::new("open")
-                                                            .arg(&url_open)
-                                                            .spawn();
-                                                        view.ssh_state.status_message = Some(format!(
-                                                            "📂 Opened {} in macOS Finder SMB mounter.",
-                                                            url_open
-                                                        ));
-                                                        cx.notify();
-                                                    }))
-                                                    .child("📂 Mount in Finder"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(("smb-mount-cli", sidx))
-                                                    .px_2p5()
-                                                    .py_1()
-                                                    .rounded_md()
-                                                    .bg(rgb(0x161f33))
-                                                    .border_1()
-                                                    .border_color(rgb(0x38bdf8))
-                                                    .text_xs()
-                                                    .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0x38bdf8))
-                                                    .cursor(gpui::CursorStyle::PointingHand)
-                                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                                        view.dispatch_command_to_split_pane(
-                                                            &mount_cmd,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    }))
-                                                    .child("🪟 mount_smbfs in Split"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(("smb-copy-url", sidx))
-                                                    .px_2()
-                                                    .py_1()
-                                                    .rounded_md()
-                                                    .bg(rgb(0x161f33))
-                                                    .border_1()
-                                                    .border_color(rgb(0x26324d))
-                                                    .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
-                                                    .cursor(gpui::CursorStyle::PointingHand)
-                                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                                        cx.write_to_clipboard(
-                                                            gpui::ClipboardItem::new_string(
-                                                                url_copy.clone(),
-                                                            ),
-                                                        );
-                                                        view.ssh_state.status_message = Some(format!(
-                                                            "📋 Copied {} to clipboard",
-                                                            url_copy
-                                                        ));
-                                                        cx.notify();
-                                                    }))
-                                                    .child("📋 URL"),
-                                            ),
+                                            .text_xs()
+                                            .text_color(if mounted {
+                                                rgb(0x34d399)
+                                            } else {
+                                                rgb(0x64748b)
+                                            })
+                                            .child(if mounted {
+                                                format!("● Mounted ({mount_pt})")
+                                            } else {
+                                                format!("● Unmounted ({mount_pt})")
+                                            }),
                                     ),
                             )
                             .child(
                                 div()
-                                    .px_3()
-                                    .py_1p5()
-                                    .rounded_md()
-                                    .bg(rgb(0x090d16))
-                                    .border_1()
-                                    .border_color(rgb(0x162032))
-                                    .font_family("Menlo")
-                                    .text_xs()
-                                    .text_color(rgb(0x22d3ee))
-                                    .child(url),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x090d16))
+                                            .border_1()
+                                            .border_color(rgb(0x162032))
+                                            .font_family("Menlo")
+                                            .text_xs()
+                                            .text_color(rgb(0x22d3ee))
+                                            .child(url),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("smb-open-finder", sidx))
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x06b6d4))
+                                            .text_color(rgb(0x090d16))
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                let _ = std::process::Command::new("open")
+                                                    .arg(&url_open)
+                                                    .spawn();
+                                                view.ssh_state.status_message = Some(format!(
+                                                    "📂 Opened {} in macOS Finder SMB mounter.",
+                                                    url_open
+                                                ));
+                                                cx.notify();
+                                            }))
+                                            .child("📂 Mount in Finder"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("smb-mount-cli", sidx))
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x161f33))
+                                            .border_1()
+                                            .border_color(rgb(0x38bdf8))
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(0x38bdf8))
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.dispatch_command_to_split_pane(
+                                                    &mount_cmd,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }))
+                                            .child("🪟 Mount in Split"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("smb-copy-url", sidx))
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x161f33))
+                                            .border_1()
+                                            .border_color(rgb(0x26324d))
+                                            .text_xs()
+                                            .text_color(rgb(0x94a3b8))
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(
+                                                        url_copy.clone(),
+                                                    ),
+                                                );
+                                                view.ssh_state.status_message = Some(format!(
+                                                    "📋 Copied {} to clipboard",
+                                                    url_copy
+                                                ));
+                                                cx.notify();
+                                            }))
+                                            .child("📋 Copy URL"),
+                                    ),
                             ),
                     );
                 }
@@ -6657,7 +6657,7 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .child(
-                        // Unified Theia's Prism Hub Header Bar inside Theia SSH
+                        // Unified Theia's Prism 3-Mode Header Bar inside Theia SSH
                         div()
                             .px_5()
                             .py_2()
@@ -6684,7 +6684,7 @@ impl WorkspaceView {
                                                     .text_sm()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(theme.border_active)
-                                                    .child("THEIA'S PRISM — UNIFIED OPERATOR CONTROL CENTER"),
+                                                    .child("THEIA'S PRISM — OPERATOR CONTROL CENTER"),
                                             )
                                             .child(
                                                 div()
@@ -6699,11 +6699,11 @@ impl WorkspaceView {
                                     .flex()
                                     .flex_row()
                                     .items_center()
-                                    .gap_1p5()
+                                    .gap_2()
                                     .child(
                                         div()
                                             .id("ssh-hub-to-prism-btn")
-                                            .px_2p5()
+                                            .px_3()
                                             .py_1()
                                             .rounded_md()
                                             .bg(theme.tab_active_bg)
@@ -6714,13 +6714,16 @@ impl WorkspaceView {
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, window, cx| {
+                                                view.settings_view.update(cx, |sv, cx| {
+                                                    sv.set_section(SettingsSection::AppearancePrism, cx);
+                                                });
                                                 view.toggle_settings_modal(window, cx);
                                             }))
-                                            .child("🎨 Prism & Settings (⌘,)"),
+                                            .child("🎨 Theia's Prism (⌘,)"),
                                     )
                                     .child(
                                         div()
-                                            .px_2p5()
+                                            .px_3()
                                             .py_1()
                                             .rounded_md()
                                             .bg(theme.border_active)
@@ -6731,8 +6734,8 @@ impl WorkspaceView {
                                     )
                                     .child(
                                         div()
-                                            .id("ssh-hub-to-palette-btn")
-                                            .px_2p5()
+                                            .id("ssh-hub-to-info-btn")
+                                            .px_3()
                                             .py_1()
                                             .rounded_md()
                                             .bg(theme.tab_active_bg)
@@ -6743,52 +6746,12 @@ impl WorkspaceView {
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, window, cx| {
-                                                view.toggle_command_palette(window, cx);
-                                            }))
-                                            .child("⌘ Functions (⇧⌘P)"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("ssh-hub-to-pythia-btn")
-                                            .px_2p5()
-                                            .py_1()
-                                            .rounded_md()
-                                            .bg(theme.tab_active_bg)
-                                            .border_1()
-                                            .border_color(theme.border_inactive)
-                                            .text_color(theme.fg)
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .cursor(gpui::CursorStyle::PointingHand)
-                                            .on_click(cx.listener(|view, _, window, cx| {
-                                                view.ssh_state.open = false;
-                                                view.sync_modal_open_flag(cx);
-                                                let active_term =
-                                                    view.tabs[view.active_tab].active_terminal.clone();
-                                                active_term.update(cx, |term, cx| {
-                                                    term.pythia.active = true;
-                                                    cx.notify();
+                                                view.settings_view.update(cx, |sv, cx| {
+                                                    sv.set_section(SettingsSection::SystemInfoGuide, cx);
                                                 });
-                                                window.focus(&active_term.read(cx).focus_handle);
+                                                view.toggle_settings_modal(window, cx);
                                             }))
-                                            .child("✨ Pythia AI (⌘K)"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("ssh-hub-close-btn")
-                                            .px_2p5()
-                                            .py_1()
-                                            .rounded_md()
-                                            .bg(theme.tab_active_bg)
-                                            .border_1()
-                                            .border_color(theme.border_inactive)
-                                            .text_color(theme.fg)
-                                            .text_xs()
-                                            .cursor(gpui::CursorStyle::PointingHand)
-                                            .on_click(cx.listener(|view, _, window, cx| {
-                                                view.toggle_ssh_manager(window, cx);
-                                            }))
-                                            .child("✕ Esc"),
+                                            .child("📖 Info & System Guide"),
                                     ),
                             ),
                     )
@@ -6800,10 +6763,15 @@ impl WorkspaceView {
                             .flex_row()
                             .overflow_hidden()
                             .child(icon_rail)
-                            .child(hosts_sidebar)
+                            .children(if self.ssh_state.section == SshConsoleSection::HostEditor {
+                                Some(hosts_sidebar)
+                            } else {
+                                None
+                            })
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .h_full()
                                     .p_4()
                                     .flex()
@@ -7842,94 +7810,7 @@ impl Render for WorkspaceView {
                     .border_color(theme.border_inactive)
                     .child(header_left)
                     .child(header_center)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("command-palette-toggle-btn")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(rgb(0x8ec07c))
-                                    .bg(if self.palette_open {
-                                        rgb(0x8ec07c)
-                                    } else {
-                                        theme.tab_active_bg
-                                    })
-                                    .text_color(if self.palette_open {
-                                        theme.bg
-                                    } else {
-                                        rgb(0x8ec07c)
-                                    })
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _event, window, cx| {
-                                        view.toggle_command_palette(window, cx);
-                                    }))
-                                    .child("⌘ Functions (⇧⌘P)"),
-                            )
-                            .child(
-                                div()
-                                    .id("theia-ssh-toggle-btn")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.border_active)
-                                    .bg(if self.ssh_state.open {
-                                        theme.border_active
-                                    } else {
-                                        theme.tab_active_bg
-                                    })
-                                    .text_color(if self.ssh_state.open {
-                                        theme.bg
-                                    } else {
-                                        theme.border_active
-                                    })
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _event, window, cx| {
-                                        view.toggle_ssh_manager(window, cx);
-                                    }))
-                                    .child("🌐 Theia SSH (⇧⌘S)"),
-                            )
-                            .child(
-                                div()
-                                    .id("pythia-toggle-btn")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.border_active)
-                                    .bg(theme.tab_active_bg)
-                                    .text_color(theme.fg)
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _event, window, cx| {
-                                        view.settings.update(cx, |s, _| {
-                                            s.settings_open = false;
-                                        });
-                                        view.ssh_state.open = false;
-                                        view.palette_open = false;
-                                        let active_term =
-                                            view.tabs[view.active_tab].active_terminal.clone();
-                                        active_term.update(cx, |term, cx| {
-                                            term.pythia.active = !term.pythia.active;
-                                            cx.notify();
-                                        });
-                                        window.focus(&active_term.read(cx).focus_handle);
-                                    }))
-                                    .child("✨ Pythia (⌘K)"),
-                            ),
-                    ),
+                    .child(div().w(px(140.0))),
             )
             // Tier 2 Shell Tab Strip (well #1, well #2, ...)
             .child(
@@ -8134,12 +8015,46 @@ impl Render for WorkspaceView {
                             .items_center()
                             .gap_2()
                             .text_color(rgb(0xa89984))
-                            .children(footer_hints.into_iter().map(|(kb, label)| {
+                            .children(footer_hints.into_iter().enumerate().map(|(hidx, (kb, label))| {
+                                let label_str = label.to_string();
                                 div()
-                                    .px_1()
+                                    .id(("footer-hint-pill", hidx))
+                                    .px_1p5()
+                                    .py_0p5()
                                     .rounded_sm()
                                     .bg(theme.bg)
                                     .text_color(theme.fg)
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        if label_str.contains("Functions") {
+                                            view.toggle_command_palette(window, cx);
+                                        } else if label_str.contains("Pythia") {
+                                            view.settings.update(cx, |s, _| {
+                                                s.settings_open = false;
+                                            });
+                                            view.ssh_state.open = false;
+                                            view.palette_open = false;
+                                            let active_term =
+                                                view.tabs[view.active_tab].active_terminal.clone();
+                                            active_term.update(cx, |term, cx| {
+                                                term.pythia.active = !term.pythia.active;
+                                                cx.notify();
+                                            });
+                                            window.focus(&active_term.read(cx).focus_handle);
+                                        } else if label_str.contains("Snippets") {
+                                            view.execute_palette_action(
+                                                "mneme::ExpandSnippet",
+                                                window,
+                                                cx,
+                                            );
+                                        } else if label_str.contains("Split") {
+                                            view.split_active_pane(
+                                                SplitDirection::Horizontal,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    }))
                                     .child(format!("{kb} {label}"))
                             }))
                     )
@@ -8179,7 +8094,7 @@ impl Render for WorkspaceView {
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.toggle_settings_modal(window, cx);
                                     }))
-                                    .child("⚙️ Settings (⌘,)")
+                                    .child("🏛️ Theia's Prism (⌘,)")
                             )
                     )
             )
