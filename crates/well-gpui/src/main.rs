@@ -11,7 +11,7 @@ mod theme;
 use actions::{filter_actions, footer_hints_for_context};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use settings_view::{SettingsSection, SettingsView, TerminalSettings};
+use settings_view::{CursorShape, SettingsSection, SettingsView, TerminalSettings};
 use ssh_console::{
     build_legacy_bios_option43, build_qemu_uefi_test_command, build_standalone_dns_option6,
     classify_chainload_payload, detect_primary_lan_ip, discover_arp_neighbors,
@@ -169,18 +169,27 @@ impl TerminalView {
             let cx = cx.clone();
             async move {
                 loop {
-                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
-                    if cx.update(|cx| {
+                    let mut sleep_ms = 500u64;
+                    let alive = cx.update(|cx| {
                         if let Some(view) = this.upgrade() {
                             view.update(cx, |view, cx| {
-                                if view.mneme_active {
+                                let s = view.settings.read(cx);
+                                sleep_ms = s.cursor_blink_ms.clamp(200, 1200);
+                                if s.cursor_blink || view.mneme_active || view.pythia.active {
                                     cx.notify();
                                 }
                             });
+                            true
+                        } else {
+                            false
                         }
-                    }).is_err() {
+                    });
+                    if !matches!(alive, Ok(true)) {
                         break;
                     }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(sleep_ms))
+                        .await;
                 }
             }
         }).detach();
@@ -1011,30 +1020,98 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let settings = self.settings.read(cx);
-        let theme = &settings.theme;
+        let is_focused = self.focus_handle.is_focused(_window);
+        let (
+            theme,
+            font_family,
+            font_size,
+            per_host_ssh_theme,
+            cursor_shape,
+            cursor_blink,
+            cursor_blink_ms,
+            cursor_use_accent,
+        ) = {
+            let settings = self.settings.read(cx);
+            (
+                settings.theme.clone(),
+                settings.font_family.clone(),
+                settings.font_size,
+                settings.per_host_ssh_theme,
+                settings.cursor_shape,
+                settings.cursor_blink,
+                settings.cursor_blink_ms,
+                settings.cursor_use_accent,
+            )
+        };
+
+        let blink_period = cursor_blink_ms.clamp(200, 1200) as u128;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let blink_visible = if !cursor_blink {
+            true
+        } else {
+            (now_ms / blink_period).is_multiple_of(2)
+        };
+        let cursor_color = if cursor_use_accent {
+            theme.border_active
+        } else {
+            theme.fg
+        };
+
         let parser = self.pty.parser.lock().unwrap();
         let screen = parser.screen();
-        
+
         let size = screen.size();
-        
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let show_vt_cursor = !screen.hide_cursor() && !self.mneme_active;
+
         let mut row_elements = Vec::new();
         for row in 0..size.0 {
             let mut col_elements = Vec::new();
             for col in 0..size.1 {
+                let is_cursor_cell = show_vt_cursor && row == cursor_row && col == cursor_col;
                 if let Some(cell) = screen.cell(row, col) {
-                    let text = cell.contents().to_string();
-                    let fg_rgb = terminal::convert_color(cell.fgcolor(), theme.fg, theme);
-                    let bg_rgb = terminal::convert_color(cell.bgcolor(), rgba(0x00000000), theme);
+                    let raw = cell.contents();
+                    let text = if raw.is_empty() {
+                        " ".to_string()
+                    } else {
+                        raw.to_string()
+                    };
+                    let fg_rgb = terminal::convert_color(cell.fgcolor(), theme.fg, &theme);
+                    let bg_rgb =
+                        terminal::convert_color(cell.bgcolor(), rgba(0x00000000), &theme);
                     let mut fg = fg_rgb;
                     let mut bg = bg_rgb;
-                    
+
                     if cell.inverse() {
                         std::mem::swap(&mut fg, &mut bg);
                     }
 
+                    if is_cursor_cell && is_focused && blink_visible && cursor_shape == CursorShape::Block {
+                        bg = cursor_color;
+                        fg = theme.bg;
+                    }
+
                     let mut el = div().bg(bg).text_color(fg).child(text);
-                    
+
+                    if is_cursor_cell {
+                        if !is_focused {
+                            el = el.border_1().border_color(cursor_color);
+                        } else if blink_visible {
+                            match cursor_shape {
+                                CursorShape::Block => {}
+                                CursorShape::Beam => {
+                                    el = el.border_l_2().border_color(cursor_color);
+                                }
+                                CursorShape::Underline => {
+                                    el = el.border_b_2().border_color(cursor_color);
+                                }
+                            }
+                        }
+                    }
+
                     if cell.bold() {
                         el = el.font_weight(gpui::FontWeight::BOLD);
                     }
@@ -1044,23 +1121,20 @@ impl Render for TerminalView {
                     if cell.underline() {
                         el = el.underline();
                     }
-                    
+
                     col_elements.push(el);
                 } else {
-                    col_elements.push(div().bg(rgba(0x00000000)).text_color(rgba(0xffffffff)).child(" "));
+                    col_elements.push(
+                        div()
+                            .bg(rgba(0x00000000))
+                            .text_color(rgba(0xffffffff))
+                            .child(" "),
+                    );
                 }
             }
             row_elements.push(div().flex().flex_row().children(col_elements));
         }
 
-
-        let settings = self.settings.read(cx);
-        let theme = &settings.theme;
-        let font_family = settings.font_family.clone();
-        let font_size = settings.font_size;
-        let per_host_ssh_theme = settings.per_host_ssh_theme;
-        
-        let is_focused = self.focus_handle.is_focused(_window);
         let (pane_bg, pane_border) = if let Some(prof) = &self.ssh_profile {
             if per_host_ssh_theme {
                 let (border_hex, bg_hex, _) = prof.tier.prism_palette();
@@ -6630,6 +6704,8 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_center()
+            .px_5()
+            .py_3()
             .track_focus(&self.ssh_focus_handle)
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -6647,8 +6723,10 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("theia-ssh-modal-box")
-                    .w(px(1140.0))
-                    .h(px(690.0))
+                    .w_full()
+                    .h_full()
+                    .max_w(px(1360.0))
+                    .max_h(px(750.0))
                     .overflow_hidden()
                     .bg(theme.bg)
                     .border_2()
@@ -6806,6 +6884,8 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_center()
+            .px_5()
+            .py_3()
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|view: &mut WorkspaceView, _, window, cx| {
@@ -6817,8 +6897,10 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("theia-prism-modal-box")
-                    .w(px(1140.0))
-                    .h(px(690.0))
+                    .w_full()
+                    .h_full()
+                    .max_w(px(1360.0))
+                    .max_h(px(750.0))
                     .overflow_hidden()
                     .bg(theme.bg)
                     .border_2()

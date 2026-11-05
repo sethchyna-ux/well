@@ -16,6 +16,28 @@ fn default_true() -> bool {
     true
 }
 
+fn default_cursor_blink_ms() -> u64 {
+    500
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Beam,
+    Underline,
+}
+
+impl CursorShape {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Block => "▋ Block",
+            Self::Beam => "▏ Beam",
+            Self::Underline => "▁ Underline",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistedOperatorSettings {
     pub theme_id: u32,
@@ -27,6 +49,14 @@ pub struct PersistedOperatorSettings {
     pub kitty_graphics_enabled: bool,
     #[serde(default = "default_true")]
     pub geometric_border: bool,
+    #[serde(default)]
+    pub cursor_shape: CursorShape,
+    #[serde(default = "default_true")]
+    pub cursor_blink: bool,
+    #[serde(default = "default_cursor_blink_ms")]
+    pub cursor_blink_ms: u64,
+    #[serde(default = "default_true")]
+    pub cursor_use_accent: bool,
     pub snippets: Vec<WellSnippet>,
     pub ssh_profiles: Vec<TheiaSshProfile>,
     #[serde(default)]
@@ -47,6 +77,10 @@ pub struct TerminalSettings {
     pub per_host_ssh_theme: bool,
     pub kitty_graphics_enabled: bool,
     pub geometric_border: bool,
+    pub cursor_shape: CursorShape,
+    pub cursor_blink: bool,
+    pub cursor_blink_ms: u64,
+    pub cursor_use_accent: bool,
     pub snippets: Vec<WellSnippet>,
     pub ssh_profiles: Vec<TheiaSshProfile>,
     pub ssh_tunnels: Vec<SshTunnelEntry>,
@@ -149,6 +183,10 @@ impl TerminalSettings {
                     per_host_ssh_theme: persisted.per_host_ssh_theme,
                     kitty_graphics_enabled: persisted.kitty_graphics_enabled,
                     geometric_border: persisted.geometric_border,
+                    cursor_shape: persisted.cursor_shape,
+                    cursor_blink: persisted.cursor_blink,
+                    cursor_blink_ms: persisted.cursor_blink_ms.clamp(200, 1200),
+                    cursor_use_accent: persisted.cursor_use_accent,
                     snippets: if persisted.snippets.is_empty() {
                         WellSnippet::builtin_catalog()
                     } else {
@@ -216,6 +254,10 @@ impl TerminalSettings {
             per_host_ssh_theme: true,
             kitty_graphics_enabled: true,
             geometric_border: true,
+            cursor_shape: CursorShape::Block,
+            cursor_blink: true,
+            cursor_blink_ms: 500,
+            cursor_use_accent: true,
             snippets: WellSnippet::builtin_catalog(),
             ssh_profiles,
             ssh_tunnels: SshTunnelEntry::default_catalog(),
@@ -257,6 +299,10 @@ impl TerminalSettings {
             per_host_ssh_theme: self.per_host_ssh_theme,
             kitty_graphics_enabled: self.kitty_graphics_enabled,
             geometric_border: self.geometric_border,
+            cursor_shape: self.cursor_shape,
+            cursor_blink: self.cursor_blink,
+            cursor_blink_ms: self.cursor_blink_ms,
+            cursor_use_accent: self.cursor_use_accent,
             snippets: self.snippets.clone(),
             ssh_profiles: self.ssh_profiles.clone(),
             ssh_tunnels: self.ssh_tunnels.clone(),
@@ -642,6 +688,10 @@ impl Render for SettingsView {
                 let per_host_ssh_theme = s.per_host_ssh_theme;
                 let kitty_enabled = s.kitty_graphics_enabled;
                 let geometric_border = s.geometric_border;
+                let cursor_shape = s.cursor_shape;
+                let cursor_blink = s.cursor_blink;
+                let cursor_blink_ms = s.cursor_blink_ms;
+                let cursor_use_accent = s.cursor_use_accent;
                 let active_in = self.active_input;
                 let hex_inputs = self.theme_hex_inputs.clone();
 
@@ -919,6 +969,8 @@ impl Render for SettingsView {
                 let sm_ssh_theme = settings_entity.clone();
                 let sm_kitty = settings_entity.clone();
                 let sm_geom = settings_entity.clone();
+                let sm_cursor_blink = settings_entity.clone();
+                let sm_cursor_color = settings_entity.clone();
 
                 let font_families = ["Menlo", "SF Mono", "JetBrains Mono", "Monaco"];
                 let mut font_pills = div().flex().flex_row().items_center().gap_1p5();
@@ -959,13 +1011,124 @@ impl Render for SettingsView {
                     );
                 }
 
+                let cursor_shapes = [
+                    CursorShape::Block,
+                    CursorShape::Beam,
+                    CursorShape::Underline,
+                ];
+                let mut cursor_shape_pills = div().flex().flex_row().items_center().gap_1();
+                for (c_idx, shape_opt) in cursor_shapes.into_iter().enumerate() {
+                    let is_shape_sel = cursor_shape == shape_opt;
+                    let sm_shape = settings_entity.clone();
+                    cursor_shape_pills = cursor_shape_pills.child(
+                        div()
+                            .id(("cursor-shape-pill", c_idx))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if is_shape_sel {
+                                theme.border_active
+                            } else {
+                                theme.border_inactive
+                            })
+                            .bg(if is_shape_sel {
+                                theme.border_active
+                            } else {
+                                theme.bg
+                            })
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(if is_shape_sel { theme.bg } else { theme.fg })
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                sm_shape.update(cx, |s, cx| {
+                                    s.cursor_shape = shape_opt;
+                                    let _ = s.save_to_disk();
+                                    cx.notify();
+                                });
+                                view.status_msg = Some(format!(
+                                    "✓ Set terminal cursor style to '{}' & saved",
+                                    shape_opt.label()
+                                ));
+                                cx.notify();
+                            }))
+                            .child(shape_opt.label()),
+                    );
+                }
+
+                let blink_speeds: [(u64, &'static str); 3] = [
+                    (350, "Fast 350ms"),
+                    (500, "500ms"),
+                    (750, "Calm 750ms"),
+                ];
+                let mut blink_speed_pills = div().flex().flex_row().items_center().gap_1();
+                for (b_idx, (ms_val, ms_label)) in blink_speeds.into_iter().enumerate() {
+                    let is_speed_sel = cursor_blink_ms == ms_val;
+                    let sm_speed = settings_entity.clone();
+                    blink_speed_pills = blink_speed_pills.child(
+                        div()
+                            .id(("cursor-blink-speed-pill", b_idx))
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if is_speed_sel {
+                                theme.border_active
+                            } else {
+                                theme.border_inactive
+                            })
+                            .bg(if is_speed_sel {
+                                theme.tab_active_bg
+                            } else {
+                                theme.bg
+                            })
+                            .text_size(px(10.0))
+                            .font_weight(if is_speed_sel {
+                                gpui::FontWeight::BOLD
+                            } else {
+                                gpui::FontWeight::NORMAL
+                            })
+                            .text_color(if is_speed_sel {
+                                theme.border_active
+                            } else {
+                                rgb(0x928374)
+                            })
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                sm_speed.update(cx, |s, cx| {
+                                    s.cursor_blink_ms = ms_val;
+                                    s.cursor_blink = true;
+                                    let _ = s.save_to_disk();
+                                    cx.notify();
+                                });
+                                view.status_msg = Some(format!(
+                                    "✓ Set cursor blink interval to {ms_val}ms & saved"
+                                ));
+                                cx.notify();
+                            }))
+                            .child(ms_label),
+                    );
+                }
+
+                let preview_cursor_color = if cursor_use_accent {
+                    theme.border_active
+                } else {
+                    theme.fg
+                };
+                let preview_cursor_glyph = match cursor_shape {
+                    CursorShape::Block => "▋",
+                    CursorShape::Beam => "▏",
+                    CursorShape::Underline => "▁",
+                };
+
                 // Live Refractive Spectrum Bar & Mini-Terminal Preview
                 let prism_preview_card = div()
                     .bg(theme.bg)
                     .border_1()
                     .border_color(theme.border_active)
                     .rounded_lg()
-                    .p_2p5()
+                    .p_2()
                     .flex()
                     .flex_col()
                     .gap_1p5()
@@ -995,7 +1158,7 @@ impl Render for SettingsView {
                                     .flex()
                                     .flex_row()
                                     .items_center()
-                                    .gap_2()
+                                    .gap_1p5()
                                     .child(
                                         div()
                                             .px_2()
@@ -1023,13 +1186,29 @@ impl Render for SettingsView {
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0x8ec07c))
                                             .child("well --prism-refract --live"),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(font_family.clone())
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(preview_cursor_color)
+                                            .child(preview_cursor_glyph),
                                     ),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(rgb(0x928374))
-                                    .child(format!("{font_family} · {font_size:.0}px")),
+                                    .child(format!(
+                                        "{font_family} · {font_size:.0}px · {} {}",
+                                        cursor_shape.label(),
+                                        if cursor_blink {
+                                            format!("({cursor_blink_ms}ms blink)")
+                                        } else {
+                                            "(steady)".into()
+                                        }
+                                    )),
                             ),
                     );
 
@@ -1044,7 +1223,7 @@ impl Render for SettingsView {
                             .border_1()
                             .border_color(theme.border_inactive)
                             .rounded_lg()
-                            .p_2p5()
+                            .p_2()
                             .flex()
                             .flex_col()
                             .gap_1p5()
@@ -1104,7 +1283,7 @@ impl Render for SettingsView {
                             .border_1()
                             .border_color(theme.border_inactive)
                             .rounded_lg()
-                            .p_2p5()
+                            .p_2()
                             .flex()
                             .flex_col()
                             .gap_1p5()
@@ -1142,7 +1321,7 @@ impl Render for SettingsView {
                             .border_1()
                             .border_color(theme.border_inactive)
                             .rounded_lg()
-                            .p_2p5()
+                            .p_2()
                             .flex()
                             .flex_col()
                             .gap_1p5()
@@ -1157,7 +1336,7 @@ impl Render for SettingsView {
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(theme.border_active)
-                                            .child("🔤 Typography & Kitty Graphics Protocol"),
+                                            .child("🔤 Typography, Cursor & Kitty Graphics Protocol"),
                                     )
                                     .child(
                                         div()
@@ -1217,17 +1396,133 @@ impl Render for SettingsView {
                                     ),
                             )
                             .child(
+                                // Interactive Terminal Cursor Shape, Blink Toggle, Speed & Color Row
+                                div()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(theme.bg)
+                                    .border_1()
+                                    .border_color(theme.border_inactive)
+                                    .flex()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.0))
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(theme.border_active)
+                                                    .child("▋ Cursor:"),
+                                            )
+                                            .child(cursor_shape_pills),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(
+                                                div()
+                                                    .id("toggle-cursor-blink")
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .border_1()
+                                                    .border_color(if cursor_blink {
+                                                        rgb(0x8ec07c)
+                                                    } else {
+                                                        theme.border_inactive
+                                                    })
+                                                    .bg(if cursor_blink {
+                                                        theme.tab_active_bg
+                                                    } else {
+                                                        theme.bg
+                                                    })
+                                                    .text_size(px(10.0))
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(if cursor_blink {
+                                                        rgb(0x8ec07c)
+                                                    } else {
+                                                        rgb(0x928374)
+                                                    })
+                                                    .cursor(gpui::CursorStyle::PointingHand)
+                                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                                        sm_cursor_blink.update(cx, |s, cx| {
+                                                            s.cursor_blink = !s.cursor_blink;
+                                                            let _ = s.save_to_disk();
+                                                            cx.notify();
+                                                        });
+                                                        view.status_msg = Some(
+                                                            "✓ Toggled terminal cursor blinking & saved".into(),
+                                                        );
+                                                        cx.notify();
+                                                    }))
+                                                    .child(if cursor_blink {
+                                                        "☑ Blink ON"
+                                                    } else {
+                                                        "☐ Steady"
+                                                    }),
+                                            )
+                                            .child(blink_speed_pills),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("toggle-cursor-color-mode")
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(theme.border_active)
+                                            .bg(theme.tab_active_bg)
+                                            .text_size(px(10.0))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(if cursor_use_accent {
+                                                theme.border_active
+                                            } else {
+                                                theme.fg
+                                            })
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                sm_cursor_color.update(cx, |s, cx| {
+                                                    s.cursor_use_accent = !s.cursor_use_accent;
+                                                    let _ = s.save_to_disk();
+                                                    cx.notify();
+                                                });
+                                                view.status_msg = Some(
+                                                    "✓ Switched cursor color mode & saved".into(),
+                                                );
+                                                cx.notify();
+                                            }))
+                                            .child(if cursor_use_accent {
+                                                "🎨 Color: Accent"
+                                            } else {
+                                                "⚪ Color: Text FG"
+                                            }),
+                                    ),
+                            )
+                            .child(
                                 div()
                                     .flex()
-                                    .flex_col()
-                                    .gap_1()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_3()
                                     .child(
                                         div()
                                             .id("toggle-kitty-gfx")
                                             .flex()
                                             .flex_row()
                                             .items_center()
-                                            .gap_2()
+                                            .gap_1p5()
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, _, cx| {
                                                 sm_kitty.update(cx, |s, cx| {
@@ -1253,7 +1548,7 @@ impl Render for SettingsView {
                                                 div()
                                                     .text_size(px(11.0))
                                                     .text_color(theme.fg)
-                                                    .child("Enable inline Kitty Graphics Protocol (\\e_Gf=100...)"),
+                                                    .child("Inline Kitty Graphics (\\e_Gf=100...)"),
                                             ),
                                     )
                                     .child(
@@ -1262,7 +1557,7 @@ impl Render for SettingsView {
                                             .flex()
                                             .flex_row()
                                             .items_center()
-                                            .gap_2()
+                                            .gap_1p5()
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, _, cx| {
                                                 sm_geom.update(cx, |s, cx| {
@@ -1293,7 +1588,7 @@ impl Render for SettingsView {
                                                 div()
                                                     .text_size(px(11.0))
                                                     .text_color(theme.fg)
-                                                    .child("Enable ATLAS Geometric Lattice Border (Cyan / Violet Frame)"),
+                                                    .child("ATLAS Geometric Lattice Border (Cyan / Violet Frame)"),
                                             ),
                                     ),
                             ),
@@ -2574,9 +2869,12 @@ impl Render for SettingsView {
                                       key_badge: &'static str,
                                       badge_color: u32,
                                       myth_origin: &'static str,
-                                      desc: &'static str| {
+                                      desc_line1: &'static str,
+                                      desc_line2: &'static str| {
                     div()
                         .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
                         .p_2p5()
                         .rounded_lg()
                         .bg(theme.bg)
@@ -2627,9 +2925,15 @@ impl Render for SettingsView {
                         )
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(px(10.5))
                                 .text_color(theme.fg)
-                                .child(desc),
+                                .child(desc_line1),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(rgb(0xd5c4a1))
+                                .child(desc_line2),
                         )
                 };
 
@@ -2669,6 +2973,7 @@ impl Render for SettingsView {
                             )
                             .child(
                                 div()
+                                    .w_full()
                                     .flex()
                                     .flex_row()
                                     .gap_2()
@@ -2678,7 +2983,8 @@ impl Render for SettingsView {
                                         "⌘, / ⇧⌘S",
                                         0x22d3ee,
                                         "Titaness of Sight, Light & Shining Ether",
-                                        "Visual Theme Studio, 24-bit color refraction, per-host SSH tier auto-tinting & the 7-module Theia SSH / Net Ops console.",
+                                        "Visual Theme Studio, 24-bit color refraction,",
+                                        "per-host SSH tier auto-tint & 7-module NetOps.",
                                     ))
                                     .child(make_lore_card(
                                         "🌐",
@@ -2686,11 +2992,13 @@ impl Render for SettingsView {
                                         "Top ◈",
                                         0xa855f7,
                                         "Titan Bearing the Celestial Sphere",
-                                        "Zero-copy libghostty VT state machine, GPU dirty-row damage tracking, inline Kitty Graphics & the Cyan/Violet Lattice border.",
+                                        "Zero-copy libghostty VT state machine, GPU",
+                                        "dirty-row damage, Kitty Graphics & Lattice frame.",
                                     )),
                             )
                             .child(
                                 div()
+                                    .w_full()
                                     .flex()
                                     .flex_row()
                                     .gap_2()
@@ -2700,7 +3008,8 @@ impl Render for SettingsView {
                                         "⌘K",
                                         0xfabd2f,
                                         "High Priestess & Oracle of Delphi",
-                                        "Inline natural-language-to-shell AI synthesizer. Translates plain English intent into safe, ready-to-run shell commands.",
+                                        "Inline natural-language-to-shell AI synthesizer.",
+                                        "Translates plain English into safe shell commands.",
                                     ))
                                     .child(make_lore_card(
                                         "🛡️",
@@ -2708,11 +3017,13 @@ impl Render for SettingsView {
                                         "^R",
                                         0xfb4934,
                                         "Muse of Memory & Preservation",
-                                        "Parameterized ${1:arg} workflow templates, multi-line command buffer & Tree-sitter AST destructive command safety gates.",
+                                        "Parameterized ${1:arg} workflow templates, multi-line",
+                                        "command editor & Tree-sitter AST safety gates.",
                                     )),
                             )
                             .child(
                                 div()
+                                    .w_full()
                                     .flex()
                                     .flex_row()
                                     .gap_2()
@@ -2722,7 +3033,8 @@ impl Render for SettingsView {
                                         "Sub-2ms",
                                         0x8ec07c,
                                         "Goddess of Wise Counsel & Cunning",
-                                        "Radix-trie command history (~/.local/share/well/history.db) and offline team recipe cache with sub-2ms lookup latency.",
+                                        "Radix-trie command history (~/.local/share/well/)",
+                                        "& offline team recipe cache with sub-2ms lookup.",
                                     ))
                                     .child(make_lore_card(
                                         "🧭",
@@ -2730,7 +3042,8 @@ impl Render for SettingsView {
                                         "IPC / Git",
                                         0x38bdf8,
                                         "Goddess of Precision + Hermes' Staff",
-                                        "Tracks live CWD (OSC 7), Git branch & dirty state. Caduceus (/tmp/well-caduceus.sock) exposes JSON-RPC 2.0 over SSH -R tunnels.",
+                                        "Tracks live CWD (OSC 7), Git branch & dirty state.",
+                                        "Caduceus exposes JSON-RPC 2.0 over SSH -R sockets.",
                                     )),
                             ),
                     )
@@ -2753,12 +3066,15 @@ impl Render for SettingsView {
                             )
                             .child(
                                 div()
+                                    .w_full()
                                     .flex()
                                     .flex_row()
                                     .gap_2()
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
                                             .p_2p5()
                                             .rounded_md()
                                             .bg(theme.bg)
@@ -2774,14 +3090,16 @@ impl Render for SettingsView {
                                                     .text_color(rgb(0x22d3ee))
                                                     .child("Window Bars & Quick Controls"),
                                             )
-                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• Top Center [ −  ∏  □  ◈ ]: Split Down (−), Split Right (∏), Equalize Panes (□), Toggle ATLAS Lattice Frame (◈)"))
-                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• Bottom Left [ >< Theia SSH (⇧⌘S) ]: Open 7-module SSH & Net Ops Console + Astraea Git branch badge"))
-                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• Bottom Center Pills: Clickable shortcuts for ⇧⌘P Functions, ⌘K Pythia AI, ^R Mneme Snippets & ⌘D Split"))
-                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• Bottom Right [ 🏛️ Theia's Prism (⌘,) ]: Open this unified Operator Control Center")),
+                                            .child(div().text_size(px(10.5)).text_color(theme.fg).child("• Top Center [ −  ∏  □  ◈ ]: Split Down/Right, Equalize & Lattice"))
+                                            .child(div().text_size(px(10.5)).text_color(theme.fg).child("• Bottom Left [ >< Theia SSH ]: 7-module SSH Hub + Git branch"))
+                                            .child(div().text_size(px(10.5)).text_color(theme.fg).child("• Bottom Center: Clickable ⇧⌘P Functions, ⌘K Pythia, ^R Mneme"))
+                                            .child(div().text_size(px(10.5)).text_color(theme.fg).child("• Bottom Right [ 🏛️ Theia's Prism (⌘,) ]: Unified Control Center")),
                                     )
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
                                             .p_2p5()
                                             .rounded_md()
                                             .bg(theme.bg)
@@ -2797,10 +3115,10 @@ impl Render for SettingsView {
                                                     .text_color(rgb(0x8ec07c))
                                                     .child("Theia SSH Left Icon Rail (7 Modules)"),
                                             )
-                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• [ >_ ] 1. SSH Hosts: Saved profiles & ~/.ssh/config launcher"))
-                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• [ ⇄ ] 2. Port Tunnels: Visual -L Local, -R Remote & -D SOCKS5"))
-                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• [ 🔑 / 🛡️ ] 3–4. Key Vault & SSH Server: Ed25519 keys, ssh-agent & HTTP key server"))
-                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• [ 🚀 / 📁 / 📡 ] 5–7. NetOps: PXE/iPXE Bootloader, SMB Shares & Ping/ARP/WoL")),
+                                            .child(div().text_size(px(10.5)).text_color(theme.fg).child("• [ >_ ] 1. SSH Hosts: Saved profiles & ~/.ssh/config launcher"))
+                                            .child(div().text_size(px(10.5)).text_color(theme.fg).child("• [ ⇄ ] 2. Port Tunnels: Visual -L Local, -R Remote & -D SOCKS5"))
+                                            .child(div().text_size(px(10.5)).text_color(theme.fg).child("• [ 🔑 / 🛡️ ] 3–4. Key Vault & SSH Server: Ed25519 & HTTP keys"))
+                                            .child(div().text_size(px(10.5)).text_color(theme.fg).child("• [ 🚀 / 📁 / 📡 ] 5–7. NetOps: PXE Boot, SMB Shares & Ping/WoL")),
                                     ),
                             ),
                     )
