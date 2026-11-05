@@ -1684,6 +1684,7 @@ struct WorkspaceView {
     tabs: Vec<WorkspaceTab>,
     active_tab: usize,
     settings: Entity<TerminalSettings>,
+    settings_view: Entity<SettingsView>,
     ssh_engine: SshEngine,
     ssh_state: TheiaSshState,
     ssh_focus_handle: FocusHandle,
@@ -1696,8 +1697,46 @@ struct WorkspaceView {
 
 impl WorkspaceView {
     fn new(cx: &mut Context<Self>, settings: Entity<TerminalSettings>) -> Self {
-        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&settings, |view: &mut Self, settings_ent, cx| {
+            let req = settings_ent.read(cx).requested_hub_switch;
+            if let Some(target) = req {
+                settings_ent.update(cx, |s, _| {
+                    s.requested_hub_switch = None;
+                });
+                match target {
+                    "ssh" => {
+                        view.ssh_state.open = true;
+                        view.palette_open = false;
+                        view.sync_modal_open_flag(cx);
+                    }
+                    "palette" => {
+                        view.palette_open = true;
+                        view.ssh_state.open = false;
+                        view.sync_modal_open_flag(cx);
+                    }
+                    "pythia" => {
+                        view.ssh_state.open = false;
+                        view.palette_open = false;
+                        view.sync_modal_open_flag(cx);
+                        let active_term = view.tabs[view.active_tab].active_terminal.clone();
+                        active_term.update(cx, |term, cx| {
+                            term.pythia.active = true;
+                            cx.notify();
+                        });
+                    }
+                    "close" => {
+                        view.ssh_state.open = false;
+                        view.palette_open = false;
+                        view.sync_modal_open_flag(cx);
+                    }
+                    _ => {}
+                }
+            }
+            cx.notify();
+        })
+        .detach();
         let first_term = cx.new(|cx| TerminalView::new(cx, settings.clone()));
+        let settings_view = cx.new(|cx| SettingsView::new(cx, settings.clone()));
         let ssh_focus_handle = cx.focus_handle();
         let palette_focus_handle = cx.focus_handle();
         Self {
@@ -1711,6 +1750,7 @@ impl WorkspaceView {
             }],
             active_tab: 0,
             settings,
+            settings_view,
             ssh_engine: SshEngine::new(),
             ssh_state: TheiaSshState::default(),
             ssh_focus_handle,
@@ -1723,7 +1763,8 @@ impl WorkspaceView {
     }
 
     fn sync_modal_open_flag(&self, cx: &mut Context<Self>) {
-        let is_open = self.palette_open || self.ssh_state.open;
+        let settings_open = self.settings.read(cx).settings_open;
+        let is_open = self.palette_open || self.ssh_state.open || settings_open;
         self.settings.update(cx, |s, _| {
             s.modal_open = is_open;
         });
@@ -1733,6 +1774,9 @@ impl WorkspaceView {
         self.palette_open = !self.palette_open;
         if self.palette_open {
             self.ssh_state.open = false;
+            self.settings.update(cx, |s, _| {
+                s.settings_open = false;
+            });
             self.palette_selected_idx = 0;
             window.focus(&self.palette_focus_handle);
         } else {
@@ -1743,29 +1787,22 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn open_settings_window(&self, cx: &mut Context<Self>) {
-        let settings_model = self.settings.clone();
-        if let Err(err) = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: Point::new(px(240.0), px(140.0)),
-                    size: size(px(900.0), px(640.0)),
-                })),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("🏛️ Theia's Prism — Operator Control Center".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(Point::new(px(12.0), px(12.0))),
-                }),
-                ..Default::default()
-            },
-            move |window, cx| {
-                let settings_view = cx.new(|cx| SettingsView::new(cx, settings_model.clone()));
-                window.focus(&settings_view.read(cx).focus_handle);
-                settings_view
-            },
-        ) {
-            eprintln!("[well-gpui] failed to open settings window: {err}");
+    fn toggle_settings_modal(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let now_open = !self.settings.read(cx).settings_open;
+        self.settings.update(cx, |s, _| {
+            s.settings_open = now_open;
+        });
+        if now_open {
+            self.ssh_state.open = false;
+            self.palette_open = false;
+            let focus = self.settings_view.read(cx).focus_handle.clone();
+            window.focus(&focus);
+        } else {
+            let focus = self.tabs[self.active_tab].active_terminal.read(cx).focus_handle.clone();
+            window.focus(&focus);
         }
+        self.sync_modal_open_flag(cx);
+        cx.notify();
     }
 
     fn execute_palette_action(
@@ -1780,7 +1817,7 @@ impl WorkspaceView {
         self.sync_modal_open_flag(cx);
         match action_id {
             "well::OpenSettings" | "settings::OpenSettings" => {
-                self.open_settings_window(cx);
+                self.toggle_settings_modal(window, cx);
             }
             "well::OpenCommandPalette" | "workspace::OpenCommandPalette" => {
                 self.toggle_command_palette(window, cx);
@@ -1896,6 +1933,9 @@ impl WorkspaceView {
         self.ssh_state.open = !self.ssh_state.open;
         if self.ssh_state.open {
             self.palette_open = false;
+            self.settings.update(cx, |s, _| {
+                s.settings_open = false;
+            });
             window.focus(&self.ssh_focus_handle);
         } else {
             let focus = self.tabs[self.active_tab].active_terminal.read(cx).focus_handle.clone();
@@ -2227,11 +2267,11 @@ impl WorkspaceView {
         ];
 
         let mut icon_rail = div()
-            .w(px(48.0))
+            .w(px(50.0))
             .h_full()
-            .bg(rgb(0x0b0f17))
+            .bg(theme.tab_inactive_bg)
             .border_r_1()
-            .border_color(rgb(0x1e2638))
+            .border_color(theme.border_inactive)
             .py_3()
             .flex()
             .flex_col()
@@ -2252,20 +2292,20 @@ impl WorkspaceView {
                     .justify_center()
                     .cursor(gpui::CursorStyle::PointingHand)
                     .bg(if is_active {
-                        gpui::rgba(0x06b6d428)
+                        theme.tab_active_bg
                     } else {
                         gpui::rgba(0x00000000)
                     })
                     .border_1()
                     .border_color(if is_active {
-                        rgb(0x06b6d4)
+                        theme.border_active
                     } else {
                         gpui::rgba(0x00000000)
                     })
                     .text_color(if is_active {
-                        rgb(0x22d3ee)
+                        theme.border_active
                     } else {
-                        rgb(0x64748b)
+                        rgb(0x94a3b8)
                     })
                     .text_sm()
                     .font_weight(gpui::FontWeight::BOLD)
@@ -2282,14 +2322,14 @@ impl WorkspaceView {
                 .w(px(34.0))
                 .h(px(34.0))
                 .rounded_lg()
-                .bg(rgb(0x111827))
+                .bg(theme.tab_active_bg)
                 .border_1()
-                .border_color(rgb(0x1e293b))
+                .border_color(theme.border_inactive)
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_xs()
-                .text_color(rgb(0x94a3b8))
+                .text_color(theme.fg)
                 .cursor(gpui::CursorStyle::PointingHand)
                 .on_click(cx.listener(|view, _, window, cx| {
                     view.toggle_ssh_manager(window, cx);
@@ -2299,11 +2339,12 @@ impl WorkspaceView {
 
         let search_focused = active_input == SshConsoleInputField::SidebarSearch;
         let mut hosts_sidebar = div()
-            .w(px(245.0))
+            .w(px(268.0))
             .h_full()
-            .bg(rgb(0x0d121c))
+            .flex_shrink_0()
+            .bg(theme.tab_inactive_bg)
             .border_r_1()
-            .border_color(rgb(0x1e2638))
+            .border_color(theme.border_inactive)
             .p_3()
             .flex()
             .flex_col()
@@ -2315,12 +2356,12 @@ impl WorkspaceView {
                     .px_2p5()
                     .py_1p5()
                     .rounded_md()
-                    .bg(rgb(0x131b2e))
+                    .bg(theme.bg)
                     .border_1()
                     .border_color(if search_focused {
-                        rgb(0x06b6d4)
+                        theme.border_active
                     } else {
-                        rgb(0x1e293b)
+                        theme.border_inactive
                     })
                     .flex()
                     .flex_row()
@@ -2338,7 +2379,7 @@ impl WorkspaceView {
                             .text_color(if search_filter.is_empty() {
                                 rgb(0x64748b)
                             } else {
-                                rgb(0xe2e8f0)
+                                theme.fg
                             })
                             .child(if search_filter.is_empty() {
                                 if search_focused {
@@ -2363,8 +2404,8 @@ impl WorkspaceView {
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(0x64748b))
-                            .child("SERVERS & CLUSTERS"),
+                            .text_color(theme.border_active)
+                            .child("SSH HOSTS"),
                     )
                     .child(
                         div()
@@ -2378,11 +2419,11 @@ impl WorkspaceView {
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(rgb(0x161f33))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
-                                    .border_color(rgb(0x26324d))
+                                    .border_color(theme.border_inactive)
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(theme.fg)
                                     .cursor(gpui::CursorStyle::PointingHand)
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.ssh_engine.reload();
@@ -2390,7 +2431,7 @@ impl WorkspaceView {
                                             Some("🔄 Reloaded ~/.ssh/config & host profiles.".to_string());
                                         cx.notify();
                                     }))
-                                    .child("↻ Manage"),
+                                    .child("↻ Reload"),
                             )
                             .child(
                                 div()
@@ -2398,12 +2439,12 @@ impl WorkspaceView {
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(gpui::rgba(0x06b6d428))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
-                                    .border_color(rgb(0x06b6d4))
+                                    .border_color(theme.border_active)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0x22d3ee))
+                                    .text_color(theme.border_active)
                                     .cursor(gpui::CursorStyle::PointingHand)
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.ssh_state.section = SshConsoleSection::HostEditor;
@@ -2414,7 +2455,7 @@ impl WorkspaceView {
                                         );
                                         cx.notify();
                                     }))
-                                    .child("+ Add"),
+                                    .child("+ New"),
                             ),
                     ),
             );
@@ -3104,16 +3145,30 @@ impl WorkspaceView {
                             .child(
                                 div()
                                     .flex()
-                                    .flex_row()
-                                    .justify_between()
-                                    .items_center()
+                                    .flex_col()
+                                    .gap_2p5()
                                     .pt_1()
-                                    .child(tier_row)
                                     .child(
                                         div()
                                             .flex()
                                             .flex_row()
-                                            .gap_2()
+                                            .justify_between()
+                                            .items_center()
+                                            .child(tier_row)
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.5))
+                                                    .text_color(rgb(0x94a3b8))
+                                                    .child("Persists to ~/.config/well/operator_settings.json"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .justify_end()
+                                            .items_center()
+                                            .gap_2p5()
                                             .child(
                                                 div()
                                                     .id("ssh-ed-save-btn")
@@ -3133,7 +3188,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .id("ssh-ed-conn-tab-btn")
-                                                    .px_3()
+                                                    .px_3p5()
                                                     .py_1p5()
                                                     .rounded_md()
                                                     .bg(rgb(0x10b981))
@@ -3162,7 +3217,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .id("ssh-ed-split-btn")
-                                                    .px_3()
+                                                    .px_3p5()
                                                     .py_1p5()
                                                     .rounded_md()
                                                     .bg(rgb(0x1e293b))
@@ -6592,40 +6647,216 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("theia-ssh-modal-box")
-                    .w(px(1080.0))
-                    .h(px(640.0))
+                    .w(px(1140.0))
+                    .h(px(690.0))
                     .overflow_hidden()
-                    .bg(rgb(0x0b0f17))
-                    .border_1()
+                    .bg(theme.bg)
+                    .border_2()
                     .border_color(theme.border_active)
                     .rounded_xl()
                     .flex()
-                    .flex_row()
-                    .child(icon_rail)
-                    .child(hosts_sidebar)
+                    .flex_col()
+                    .child(
+                        // Unified Theia's Prism Hub Header Bar inside Theia SSH
+                        div()
+                            .px_5()
+                            .py_2()
+                            .bg(theme.tab_inactive_bg)
+                            .border_b_1()
+                            .border_color(theme.border_inactive)
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2p5()
+                                    .child(div().text_lg().child("🏛️"))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(theme.border_active)
+                                                    .child("THEIA'S PRISM — UNIFIED OPERATOR CONTROL CENTER"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.5))
+                                                    .text_color(rgb(0x94a3b8))
+                                                    .child("Theia SSH, Tunnels, Key Vault, PXE Bootloader & Network Ops"),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .id("ssh-hub-to-prism-btn")
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_color(theme.fg)
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.toggle_settings_modal(window, cx);
+                                            }))
+                                            .child("🎨 Prism & Settings (⌘,)"),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.border_active)
+                                            .text_color(theme.bg)
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .child("🌐 Theia SSH & Net Ops (⇧⌘S)"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("ssh-hub-to-palette-btn")
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_color(theme.fg)
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.toggle_command_palette(window, cx);
+                                            }))
+                                            .child("⌘ Functions (⇧⌘P)"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("ssh-hub-to-pythia-btn")
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_color(theme.fg)
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.ssh_state.open = false;
+                                                view.sync_modal_open_flag(cx);
+                                                let active_term =
+                                                    view.tabs[view.active_tab].active_terminal.clone();
+                                                active_term.update(cx, |term, cx| {
+                                                    term.pythia.active = true;
+                                                    cx.notify();
+                                                });
+                                                window.focus(&active_term.read(cx).focus_handle);
+                                            }))
+                                            .child("✨ Pythia AI (⌘K)"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("ssh-hub-close-btn")
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_color(theme.fg)
+                                            .text_xs()
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.toggle_ssh_manager(window, cx);
+                                            }))
+                                            .child("✕ Esc"),
+                                    ),
+                            ),
+                    )
                     .child(
                         div()
                             .flex_1()
-                            .h_full()
-                            .p_5()
+                            .min_h_0()
                             .flex()
-                            .flex_col()
-                            .gap_3()
+                            .flex_row()
                             .overflow_hidden()
-                            .children(status_message.map(|msg| {
+                            .child(icon_rail)
+                            .child(hosts_sidebar)
+                            .child(
                                 div()
-                                    .px_3()
-                                    .py_1p5()
-                                    .rounded_md()
-                                    .bg(gpui::rgba(0x06b6d422))
-                                    .border_1()
-                                    .border_color(rgb(0x06b6d4))
-                                    .text_color(rgb(0x22d3ee))
-                                    .text_xs()
-                                    .child(msg)
-                            }))
-                            .child(right_content),
+                                    .flex_1()
+                                    .h_full()
+                                    .p_4()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .overflow_hidden()
+                                    .children(status_message.map(|msg| {
+                                        div()
+                                            .px_3()
+                                            .py_1p5()
+                                            .rounded_md()
+                                            .bg(gpui::rgba(0x06b6d422))
+                                            .border_1()
+                                            .border_color(rgb(0x06b6d4))
+                                            .text_color(rgb(0x22d3ee))
+                                            .text_xs()
+                                            .child(msg)
+                                    }))
+                                    .child(right_content),
+                            ),
                     ),
+            )
+    }
+
+    fn render_settings_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.settings.read(cx).theme.clone();
+        div()
+            .id("theia-prism-modal-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(gpui::rgba(0x000000dd))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|view: &mut WorkspaceView, _, window, cx| {
+                    let focus = view.settings_view.read(cx).focus_handle.clone();
+                    window.focus(&focus);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .id("theia-prism-modal-box")
+                    .w(px(1140.0))
+                    .h(px(690.0))
+                    .overflow_hidden()
+                    .bg(theme.bg)
+                    .border_2()
+                    .border_color(theme.border_active)
+                    .rounded_xl()
+                    .child(self.settings_view.clone()),
             )
     }
 
@@ -6822,19 +7053,60 @@ impl WorkspaceView {
                             )
                             .child(
                                 div()
-                                    .id("close-palette-x")
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.border_inactive)
-                                    .text_color(theme.fg)
-                                    .text_xs()
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.toggle_command_palette(window, cx);
-                                    }))
-                                    .child("Esc"),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .id("pal-to-prism-btn")
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_color(theme.fg)
+                                            .text_xs()
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.toggle_settings_modal(window, cx);
+                                            }))
+                                            .child("🎨 Prism & Settings"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("pal-to-ssh-btn")
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_color(theme.fg)
+                                            .text_xs()
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.toggle_ssh_manager(window, cx);
+                                            }))
+                                            .child("🌐 Theia SSH"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("close-palette-x")
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_color(theme.fg)
+                                            .text_xs()
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.toggle_command_palette(window, cx);
+                                            }))
+                                            .child("✕ Esc"),
+                                    ),
                             ),
                     )
                     .child(
@@ -7217,19 +7489,25 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.palette_open && !self.palette_focus_handle.is_focused(window) {
-            window.focus(&self.palette_focus_handle);
-        } else if self.ssh_state.open && !self.ssh_focus_handle.is_focused(window) {
-            window.focus(&self.ssh_focus_handle);
-        }
-        let (theme, font_family, geometric_border) = {
+        let (theme, font_family, geometric_border, settings_open) = {
             let settings = self.settings.read(cx);
             (
                 settings.theme.clone(),
                 settings.font_family.clone(),
                 settings.geometric_border,
+                settings.settings_open,
             )
         };
+        if self.palette_open && !self.palette_focus_handle.is_focused(window) {
+            window.focus(&self.palette_focus_handle);
+        } else if self.ssh_state.open && !self.ssh_focus_handle.is_focused(window) {
+            window.focus(&self.ssh_focus_handle);
+        } else if settings_open {
+            let sf = self.settings_view.read(cx).focus_handle.clone();
+            if !sf.is_focused(window) {
+                window.focus(&sf);
+            }
+        }
 
         let active_tab_idx = self.active_tab;
         let active_tab = &self.tabs[active_tab_idx];
@@ -7543,6 +7821,11 @@ impl Render for WorkspaceView {
                     view.toggle_ssh_manager(window, cx);
                 },
             ))
+            .on_action(cx.listener(
+                |view: &mut WorkspaceView, _: &OpenSettings, window, cx| {
+                    view.toggle_settings_modal(window, cx);
+                },
+            ))
             // Tier 1 Header Bar
             .child(
                 div()
@@ -7631,6 +7914,11 @@ impl Render for WorkspaceView {
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
                                     .on_click(cx.listener(|view, _event, window, cx| {
+                                        view.settings.update(cx, |s, _| {
+                                            s.settings_open = false;
+                                        });
+                                        view.ssh_state.open = false;
+                                        view.palette_open = false;
                                         let active_term =
                                             view.tabs[view.active_tab].active_terminal.clone();
                                         active_term.update(cx, |term, cx| {
@@ -7640,24 +7928,6 @@ impl Render for WorkspaceView {
                                         window.focus(&active_term.read(cx).focus_handle);
                                     }))
                                     .child("✨ Pythia (⌘K)"),
-                            )
-                            .child(
-                                div()
-                                    .id("theia-prism-toggle-btn")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.border_active)
-                                    .bg(theme.tab_active_bg)
-                                    .text_color(theme.border_active)
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _event, _window, cx| {
-                                        view.open_settings_window(cx);
-                                    }))
-                                    .child("⚙️ Settings (⌘,)"),
                             ),
                     ),
             )
@@ -7789,6 +8059,11 @@ impl Render for WorkspaceView {
                         Some(self.render_command_palette(cx))
                     } else {
                         None
+                    })
+                    .children(if settings_open {
+                        Some(self.render_settings_modal(cx))
+                    } else {
+                        None
                     }),
             )
             .child(
@@ -7886,11 +8161,23 @@ impl Render for WorkspaceView {
                                     .flex_row()
                                     .items_center()
                                     .gap_1()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
                                     .cursor(gpui::CursorStyle::PointingHand)
-                                    .text_color(theme.border_active)
+                                    .bg(if settings_open {
+                                        theme.border_active
+                                    } else {
+                                        theme.bg
+                                    })
+                                    .text_color(if settings_open {
+                                        theme.bg
+                                    } else {
+                                        theme.border_active
+                                    })
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.open_settings_window(cx);
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.toggle_settings_modal(window, cx);
                                     }))
                                     .child("⚙️ Settings (⌘,)")
                             )
@@ -7970,8 +8257,8 @@ fn main() {
         cx.on_action(move |_: &OpenSettings, cx: &mut App| {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: Point::new(px(220.0), px(120.0)),
-                    size: size(px(900.0), px(640.0)),
+                    origin: Point::new(px(140.0), px(90.0)),
+                    size: size(px(1140.0), px(740.0)),
                 })),
                 titlebar: Some(TitlebarOptions {
                     title: Some("🏛️ Theia's Prism — Operator Control Center".into()),
@@ -7991,8 +8278,8 @@ fn main() {
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: Point::new(px(200.0), px(200.0)),
-                size: size(px(860.0), px(640.0)),
+                origin: Point::new(px(100.0), px(70.0)),
+                size: size(px(1280.0), px(820.0)),
             })),
             titlebar: Some(TitlebarOptions {
                 title: Some("Well — Theia's Prism Terminal".into()),

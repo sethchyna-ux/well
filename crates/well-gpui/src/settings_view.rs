@@ -58,6 +58,8 @@ pub struct TerminalSettings {
     pub metis_offline_cache_priority: bool,
     pub last_saved_status: Option<String>,
     pub modal_open: bool,
+    pub settings_open: bool,
+    pub requested_hub_switch: Option<&'static str>,
 }
 
 pub fn extract_printable_char(keystroke: &gpui::Keystroke) -> Option<String> {
@@ -170,6 +172,8 @@ impl TerminalSettings {
                     metis_offline_cache_priority: persisted.metis_offline_cache_priority,
                     last_saved_status: Some(format!("Loaded from {}", op_path.display())),
                     modal_open: false,
+                    settings_open: false,
+                    requested_hub_switch: None,
                 };
             }
         }
@@ -223,6 +227,8 @@ impl TerminalSettings {
             metis_offline_cache_priority: true,
             last_saved_status: None,
             modal_open: false,
+            settings_open: false,
+            requested_hub_switch: None,
         }
     }
 
@@ -560,7 +566,7 @@ impl Render for SettingsView {
         }
 
         let sidebar = div()
-            .w(px(235.0))
+            .w(px(238.0))
             .h_full()
             .flex_shrink_0()
             .bg(theme.tab_inactive_bg)
@@ -573,30 +579,44 @@ impl Render for SettingsView {
             .child(nav_items)
             .child(
                 div()
+                    .p_2p5()
+                    .rounded_lg()
+                    .bg(theme.bg)
+                    .border_1()
+                    .border_color(theme.border_inactive)
                     .flex()
                     .flex_col()
                     .gap_1p5()
                     .child(
                         div()
-                            .id("sidebar-save-btn")
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(rgb(0x8ec07c))
-                            .text_color(rgb(0x1d2021))
-                            .text_xs()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .cursor(gpui::CursorStyle::PointingHand)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.save_all(cx);
-                            }))
-                            .child("💾 Save All Changes (⌘S)"),
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.border_active)
+                                    .child(format!("◈ {}", theme.name)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_1()
+                                    .child(div().size(px(7.0)).rounded_full().bg(theme.bg))
+                                    .child(div().size(px(7.0)).rounded_full().bg(theme.border_active))
+                                    .child(div().size(px(7.0)).rounded_full().bg(rgb(0x22d3ee)))
+                                    .child(div().size(px(7.0)).rounded_full().bg(rgb(0xa855f7)))
+                                    .child(div().size(px(7.0)).rounded_full().bg(theme.fg)),
+                            ),
                     )
                     .child(
                         div()
                             .text_size(px(10.0))
                             .text_color(rgb(0x928374))
-                            .child("Persists to ~/.config/well/"),
+                            .child("Live sync → ~/.config/well/"),
                     ),
             );
 
@@ -696,7 +716,7 @@ impl Render for SettingsView {
                     );
                 }
 
-                // Custom Theme Studio — 6 Editable Color Token Slots (Hex input + Quick Swatches)
+                // Custom Theme Studio — 6 Editable Color Token Slots (2-Row Cards for Zero Clipping)
                 let slot_defs: [(usize, &'static str, [u32; 6]); 6] = [
                     (
                         0,
@@ -706,27 +726,27 @@ impl Render for SettingsView {
                     (
                         1,
                         "Foreground (fg)",
-                        [0xebdbb2, 0x00ffff, 0x7dcfff, 0xc0caf5, 0xf8f8f2, 0x39ff14],
+                        [0xebdbb2, 0x00ffff, 0x7dcfff, 0xc0caf5, 0xf8f8f2, 0xfbf1c7],
                     ),
                     (
                         2,
                         "Accent / Border",
-                        [0x22d3ee, 0xfe8019, 0x00ffff, 0x7aa2f7, 0xbd93f9, 0x8ec07c],
+                        [0x22d3ee, 0xfe8019, 0x00ffff, 0x7aa2f7, 0xbd93f9, 0xfb4934],
                     ),
                     (
                         3,
                         "Muted Border",
-                        [0x1e293b, 0x3c3836, 0x222233, 0x292e42, 0x44475a, 0x30363d],
+                        [0x1e293b, 0x3c3836, 0x222233, 0x292e42, 0x44475a, 0x5c2320],
                     ),
                     (
                         4,
                         "Card / Tab Surface",
-                        [0x162030, 0x282828, 0x1a1a24, 0x24283b, 0x44475a, 0x21262d],
+                        [0x162030, 0x282828, 0x1a1a24, 0x24283b, 0x44475a, 0x3c1818],
                     ),
                     (
                         5,
                         "Header / Sidebar",
-                        [0x0b0f17, 0x1d2021, 0x0f0f15, 0x1f2335, 0x282a36, 0x161b22],
+                        [0x0b0f17, 0x1d2021, 0x0f0f15, 0x1f2335, 0x282a36, 0x221112],
                     ),
                 ];
 
@@ -745,14 +765,14 @@ impl Render for SettingsView {
                         _ => theme.tab_inactive_bg,
                     });
 
-                    let mut swatch_row = div().flex().flex_row().items_center().gap_1();
+                    let mut swatch_row = div().flex().flex_row().items_center().gap_1p5();
                     for (sw_i, sw_hex) in swatches.into_iter().enumerate() {
                         let formatted_sw = format!("#{sw_hex:06X}");
                         let is_current_sw = raw_hex.eq_ignore_ascii_case(&formatted_sw);
                         swatch_row = swatch_row.child(
                             div()
                                 .id(("custom-theme-swatch", slot_idx * 10 + sw_i))
-                                .size(px(15.0))
+                                .size(px(14.0))
                                 .rounded_full()
                                 .bg(rgb(sw_hex))
                                 .border_1()
@@ -783,44 +803,41 @@ impl Render for SettingsView {
                             theme.border_inactive
                         })
                         .flex()
-                        .flex_row()
-                        .justify_between()
-                        .items_center()
-                        .gap_2()
+                        .flex_col()
+                        .gap_1()
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
+                                .justify_between()
                                 .items_center()
-                                .gap_1p5()
+                                .gap_2()
                                 .child(
                                     div()
-                                        .size(px(14.0))
-                                        .rounded_sm()
-                                        .bg(preview_rgb)
-                                        .border_1()
-                                        .border_color(theme.border_active),
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(
+                                            div()
+                                                .size(px(14.0))
+                                                .rounded_sm()
+                                                .bg(preview_rgb)
+                                                .border_1()
+                                                .border_color(theme.border_active),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .text_color(theme.fg)
+                                                .child(slot_label),
+                                        ),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(theme.fg)
-                                        .child(slot_label),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .child(swatch_row)
-                                .child(
-                                    div()
                                         .id(("theme-hex-input", slot_idx))
-                                        .w(px(74.0))
-                                        .px_1p5()
+                                        .px_2()
                                         .py_0p5()
                                         .rounded_sm()
                                         .bg(theme.tab_active_bg)
@@ -831,7 +848,8 @@ impl Render for SettingsView {
                                             theme.border_inactive
                                         })
                                         .cursor(gpui::CursorStyle::IBeam)
-                                        .text_size(px(11.0))
+                                        .font_family("Menlo")
+                                        .text_size(px(10.5))
                                         .font_weight(gpui::FontWeight::BOLD)
                                         .text_color(if is_editing {
                                             theme.border_active
@@ -849,6 +867,20 @@ impl Render for SettingsView {
                                             raw_hex
                                         }),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .justify_between()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_size(px(9.5))
+                                        .text_color(rgb(0x928374))
+                                        .child("Quick swatches:"),
+                                )
+                                .child(swatch_row),
                         )
                 };
 
@@ -916,10 +948,85 @@ impl Render for SettingsView {
                     );
                 }
 
+                // Live Refractive Spectrum Bar & Mini-Terminal Preview
+                let prism_preview_card = div()
+                    .bg(theme.bg)
+                    .border_1()
+                    .border_color(theme.border_active)
+                    .rounded_lg()
+                    .p_2p5()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(4.0))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .flex()
+                            .flex_row()
+                            .child(div().flex_1().h_full().bg(theme.border_active))
+                            .child(div().flex_1().h_full().bg(rgb(0x22d3ee)))
+                            .child(div().flex_1().h_full().bg(rgb(0xa855f7)))
+                            .child(div().flex_1().h_full().bg(rgb(0x8ec07c)))
+                            .child(div().flex_1().h_full().bg(rgb(0xfabd2f)))
+                            .child(div().flex_1().h_full().bg(theme.fg)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_active)
+                                            .text_size(px(10.0))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme.border_active)
+                                            .child(format!("◈ PRISM LIVE: {}", theme.name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(font_family.clone())
+                                            .text_xs()
+                                            .text_color(theme.fg)
+                                            .child("yocan@trismagistic ~ % "),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(font_family.clone())
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(0x8ec07c))
+                                            .child("well --prism-refract --live"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0x928374))
+                                    .child(format!("{font_family} · {font_size:.0}px")),
+                            ),
+                    );
+
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2p5()
+                    .gap_2()
+                    .child(prism_preview_card)
                     .child(
                         div()
                             .bg(theme.tab_active_bg)
@@ -1001,13 +1108,17 @@ impl Render for SettingsView {
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(theme.border_active)
-                                            .child("🖌️ Custom Theme Studio — Click Any Swatch or Type #RRGGBB Hex"),
+                                            .child("🖌️ Custom Theme Studio — Click Any Swatch or Type #RRGGBB"),
                                     )
                                     .child(
                                         div()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(theme.bg)
                                             .text_size(px(10.0))
-                                            .text_color(rgb(0x928374))
-                                            .child("Updates workspace & saves live to operator_settings.json"),
+                                            .text_color(rgb(0x8ec07c))
+                                            .child("● Live Auto-Save"),
                                     ),
                             )
                             .child(row_a)
@@ -1026,17 +1137,17 @@ impl Render for SettingsView {
                             .gap_1p5()
                             .child(
                                 div()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme.border_active)
-                                    .child("🔤 Typography & Kitty Graphics Protocol"),
-                            )
-                            .child(
-                                div()
                                     .flex()
                                     .flex_row()
                                     .justify_between()
                                     .items_center()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme.border_active)
+                                            .child("🔤 Typography & Kitty Graphics Protocol"),
+                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -1049,13 +1160,7 @@ impl Render for SettingsView {
                                                     .text_color(theme.fg)
                                                     .child(format!("Font ({font_size:.0}px):")),
                                             )
-                                            .child(font_pills),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .gap_2()
+                                            .child(font_pills)
                                             .child(
                                                 div()
                                                     .id("font-dec-btn")
@@ -1103,9 +1208,8 @@ impl Render for SettingsView {
                             .child(
                                 div()
                                     .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_6()
+                                    .flex_col()
+                                    .gap_1()
                                     .child(
                                         div()
                                             .id("toggle-kitty-gfx")
@@ -1537,9 +1641,9 @@ impl Render for SettingsView {
                             .px_3()
                             .py_1p5()
                             .rounded_lg()
-                            .bg(rgb(0x1d2021))
+                            .bg(theme.bg)
                             .border_1()
-                            .border_color(rgb(0x3c3836))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_row()
                             .justify_between()
@@ -1567,17 +1671,17 @@ impl Render for SettingsView {
                                                     .px_2()
                                                     .py_0p5()
                                                     .rounded_sm()
-                                                    .bg(rgb(0x282828))
+                                                    .bg(theme.tab_active_bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xfe8019))
+                                                    .text_color(theme.border_active)
                                                     .child(snip.trigger.clone()),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xebdbb2))
+                                                    .text_color(theme.fg)
                                                     .child(snip.label.clone()),
                                             )
                                             .child(
@@ -1637,9 +1741,9 @@ impl Render for SettingsView {
                         div()
                             .p_3()
                             .rounded_lg()
-                            .bg(rgb(0x282828))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x504945))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -1653,7 +1757,7 @@ impl Render for SettingsView {
                                         div()
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(rgb(0xfe8019))
+                                            .text_color(theme.border_active)
                                             .child("➕ Create & Save Custom Parameterized Snippet (Click field to edit)"),
                                     )
                                     .child(
@@ -1711,15 +1815,15 @@ impl Render for SettingsView {
                                             .px_2()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(rgb(0x1d2021))
+                                            .bg(theme.bg)
                                             .border_1()
                                             .border_color(if active_in == ActiveFormInput::SnippetTrigger {
-                                                rgb(0xfe8019)
+                                                theme.border_active
                                             } else {
-                                                rgb(0x3c3836)
+                                                theme.border_inactive
                                             })
                                             .text_xs()
-                                            .text_color(rgb(0xfe8019))
+                                            .text_color(theme.border_active)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, _, cx| {
                                                 view.active_input = ActiveFormInput::SnippetTrigger;
@@ -1734,15 +1838,15 @@ impl Render for SettingsView {
                                             .px_2()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(rgb(0x1d2021))
+                                            .bg(theme.bg)
                                             .border_1()
                                             .border_color(if active_in == ActiveFormInput::SnippetLabel {
-                                                rgb(0xfe8019)
+                                                theme.border_active
                                             } else {
-                                                rgb(0x3c3836)
+                                                theme.border_inactive
                                             })
                                             .text_xs()
-                                            .text_color(rgb(0xebdbb2))
+                                            .text_color(theme.fg)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, _, cx| {
                                                 view.active_input = ActiveFormInput::SnippetLabel;
@@ -1757,12 +1861,12 @@ impl Render for SettingsView {
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x1d2021))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if active_in == ActiveFormInput::SnippetTemplate {
-                                        rgb(0xfe8019)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x3c3836)
+                                        theme.border_inactive
                                     })
                                     .text_xs()
                                     .text_color(rgb(0x8ec07c))
@@ -2003,6 +2107,7 @@ impl Render for SettingsView {
                 }
 
                 let sm_save_ssh = settings_entity.clone();
+                let sm_launch_ssh = settings_entity.clone();
                 let build_ssh_field = |id_str: &'static str,
                                        label: &'static str,
                                        val: String,
@@ -2061,6 +2166,46 @@ impl Render for SettingsView {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .child(
+                        div()
+                            .id("open-full-theia-ssh-console-btn")
+                            .px_3()
+                            .py_1p5()
+                            .rounded_lg()
+                            .bg(theme.tab_active_bg)
+                            .border_1()
+                            .border_color(theme.border_active)
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                sm_launch_ssh.update(cx, |s, cx| {
+                                    s.settings_open = false;
+                                    s.requested_hub_switch = Some("ssh");
+                                    cx.notify();
+                                });
+                            }))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.border_active)
+                                    .child("🌐 Open Full 7-Module Theia SSH, Tunnels, Key Vault, PXE & Net Ops Console (⇧⌘S)"),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(theme.border_active)
+                                    .text_color(theme.bg)
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("Launch Console ➔"),
+                            ),
+                    )
                     .child(
                         div()
                             .p_3()
@@ -2246,9 +2391,9 @@ impl Render for SettingsView {
                     .gap_3()
                     .child(
                         div()
-                            .bg(rgb(0x282828))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x3c3836))
+                            .border_color(theme.border_inactive)
                             .rounded_lg()
                             .p_4()
                             .flex()
@@ -2258,7 +2403,7 @@ impl Render for SettingsView {
                                 div()
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xfe8019))
+                                    .text_color(theme.border_active)
                                     .child("🛡️ Mneme Tree-Sitter AST Destructive Command Gates"),
                             )
                             .child(
@@ -2285,7 +2430,7 @@ impl Render for SettingsView {
                                         cx.notify();
                                     }))
                                     .child(div().text_color(rgb(0x8ec07c)).child(if gate_rm { "☑" } else { "☐" }))
-                                    .child(div().text_xs().text_color(rgb(0xebdbb2)).child("Block recursive root/system removal (rm -rf /, /System, /etc, mkfs, dd of=/dev/*)")),
+                                    .child(div().text_xs().text_color(theme.fg).child("Block recursive root/system removal (rm -rf /, /System, /etc, mkfs, dd of=/dev/*)")),
                             )
                             .child(
                                 div()
@@ -2305,7 +2450,7 @@ impl Render for SettingsView {
                                         cx.notify();
                                     }))
                                     .child(div().text_color(rgb(0x8ec07c)).child(if gate_k8s { "☑" } else { "☐" }))
-                                    .child(div().text_xs().text_color(rgb(0xebdbb2)).child("Block Kubernetes bulk/critical deletions (kubectl delete --all, namespace, node)")),
+                                    .child(div().text_xs().text_color(theme.fg).child("Block Kubernetes bulk/critical deletions (kubectl delete --all, namespace, node)")),
                             )
                             .child(
                                 div()
@@ -2325,7 +2470,7 @@ impl Render for SettingsView {
                                         cx.notify();
                                     }))
                                     .child(div().text_color(rgb(0x8ec07c)).child(if gate_git { "☑" } else { "☐" }))
-                                    .child(div().text_xs().text_color(rgb(0xebdbb2)).child("Block Git history destruction (git push --force main/master/prod, git reset --hard)")),
+                                    .child(div().text_xs().text_color(theme.fg).child("Block Git history destruction (git push --force main/master/prod, git reset --hard)")),
                             )
                             .child(
                                 div()
@@ -2345,7 +2490,7 @@ impl Render for SettingsView {
                                         cx.notify();
                                     }))
                                     .child(div().text_color(rgb(0x8ec07c)).child(if gate_tf { "☑" } else { "☐" }))
-                                    .child(div().text_xs().text_color(rgb(0xebdbb2)).child("Block unattended Terraform infrastructure destruction (terraform destroy --auto-approve)")),
+                                    .child(div().text_xs().text_color(theme.fg).child("Block unattended Terraform infrastructure destruction (terraform destroy --auto-approve)")),
                             ),
                     )
                     .into_any_element()
@@ -2360,9 +2505,9 @@ impl Render for SettingsView {
                     .gap_3()
                     .child(
                         div()
-                            .bg(rgb(0x282828))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x3c3836))
+                            .border_color(theme.border_inactive)
                             .rounded_lg()
                             .p_4()
                             .flex()
@@ -2372,7 +2517,7 @@ impl Render for SettingsView {
                                 div()
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xfe8019))
+                                    .text_color(theme.border_active)
                                     .child("✨ Pythia AI, Metis Cache & Caduceus IPC Telemetry"),
                             )
                             .child(
@@ -2393,15 +2538,15 @@ impl Render for SettingsView {
                                         cx.notify();
                                     }))
                                     .child(div().text_color(rgb(0x8ec07c)).child(if metis_priority { "☑" } else { "☐" }))
-                                    .child(div().text_xs().text_color(rgb(0xebdbb2)).child("Prioritize <2ms offline Metis SQLite/Trie recipe cache before remote LLM calls")),
+                                    .child(div().text_xs().text_color(theme.fg).child("Prioritize <2ms offline Metis SQLite/Trie recipe cache before remote LLM calls")),
                             )
                             .child(
                                 div()
                                     .p_3()
                                     .rounded_md()
-                                    .bg(rgb(0x1d2021))
+                                    .bg(theme.bg)
                                     .border_1()
-                                    .border_color(rgb(0x3c3836))
+                                    .border_color(theme.border_inactive)
                                     .flex()
                                     .flex_col()
                                     .gap_1()
@@ -2413,6 +2558,11 @@ impl Render for SettingsView {
                     .into_any_element()
             }
         };
+
+        let sm_switch_ssh = settings_entity.clone();
+        let sm_switch_pal = settings_entity.clone();
+        let sm_switch_pythia = settings_entity.clone();
+        let sm_close_bottom = settings_entity.clone();
 
         div()
             .id("theia-prism-settings-window")
@@ -2469,6 +2619,26 @@ impl Render for SettingsView {
 
                 let target_input = if view.active_input != ActiveFormInput::None {
                     view.active_input
+                } else if view.active_section == SettingsSection::KeyboardShortcuts
+                    && !view.shortcuts_filter.is_empty()
+                {
+                    ActiveFormInput::ShortcutsFilter
+                } else {
+                    ActiveFormInput::None
+                };
+
+                if target_input == ActiveFormInput::None && event.keystroke.key == "escape" {
+                    view.save_all(cx);
+                    view.settings.update(cx, |s, cx| {
+                        s.settings_open = false;
+                        s.modal_open = false;
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                let target_input = if target_input != ActiveFormInput::None {
+                    target_input
                 } else if view.active_section == SettingsSection::KeyboardShortcuts {
                     ActiveFormInput::ShortcutsFilter
                 } else {
@@ -2592,10 +2762,9 @@ impl Render for SettingsView {
                 }
             }))
             .child(
-                // Top Title Banner with Prominent Save & Close Controls
+                // Top Title Banner with Unified Theia's Prism Mode Switcher (no redundant save buttons here!)
                 div()
-                    .pl_20()
-                    .pr_5()
+                    .px_5()
                     .py_2p5()
                     .bg(theme.tab_inactive_bg)
                     .border_b_1()
@@ -2609,7 +2778,7 @@ impl Render for SettingsView {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_2()
+                            .gap_2p5()
                             .child(div().text_xl().child("🏛️"))
                             .child(
                                 div()
@@ -2620,7 +2789,7 @@ impl Render for SettingsView {
                                             .text_sm()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(theme.border_active)
-                                            .child("THEIA'S PRISM — OPERATOR SETTINGS & ACTION REGISTRY (⌘,)"),
+                                            .child("THEIA'S PRISM — UNIFIED OPERATOR CONTROL CENTER"),
                                     )
                                     .child(
                                         div()
@@ -2635,38 +2804,83 @@ impl Render for SettingsView {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_2()
+                            .gap_1p5()
                             .child(
                                 div()
-                                    .id("top-save-btn")
-                                    .px_3()
+                                    .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x8ec07c))
-                                    .text_color(rgb(0x1d2021))
+                                    .bg(theme.border_active)
+                                    .text_color(theme.bg)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.save_all(cx);
-                                    }))
-                                    .child("💾 Save & Apply (⌘S)"),
+                                    .child("🎨 Prism & Settings (⌘,)"),
                             )
                             .child(
                                 div()
-                                    .id("top-close-settings-btn")
-                                    .px_3()
+                                    .id("hub-switch-ssh-btn")
+                                    .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(theme.border_inactive)
+                                    .bg(theme.tab_active_bg)
+                                    .border_1()
+                                    .border_color(theme.border_inactive)
                                     .text_color(theme.fg)
                                     .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.save_all(cx);
-                                        window.remove_window();
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        sm_switch_ssh.update(cx, |s, cx| {
+                                            s.settings_open = false;
+                                            s.requested_hub_switch = Some("ssh");
+                                            cx.notify();
+                                        });
                                     }))
-                                    .child("✓ Save & Close"),
+                                    .child("🌐 Theia SSH & Net Ops (⇧⌘S)"),
+                            )
+                            .child(
+                                div()
+                                    .id("hub-switch-palette-btn")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(theme.tab_active_bg)
+                                    .border_1()
+                                    .border_color(theme.border_inactive)
+                                    .text_color(theme.fg)
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        sm_switch_pal.update(cx, |s, cx| {
+                                            s.settings_open = false;
+                                            s.requested_hub_switch = Some("palette");
+                                            cx.notify();
+                                        });
+                                    }))
+                                    .child("⌘ Functions (⇧⌘P)"),
+                            )
+                            .child(
+                                div()
+                                    .id("hub-switch-pythia-btn")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(theme.tab_active_bg)
+                                    .border_1()
+                                    .border_color(theme.border_inactive)
+                                    .text_color(theme.fg)
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        sm_switch_pythia.update(cx, |s, cx| {
+                                            s.settings_open = false;
+                                            s.requested_hub_switch = Some("pythia");
+                                            cx.notify();
+                                        });
+                                    }))
+                                    .child("✨ Pythia AI (⌘K)"),
                             ),
                     ),
             )
@@ -2689,7 +2903,7 @@ impl Render for SettingsView {
                     ),
             )
             .child(
-                // Sticky Bottom Persistence & Action Bar (Always Visible)
+                // Sticky Bottom Persistence & Single Save & Close Bar
                 div()
                     .px_4()
                     .py_2()
@@ -2729,10 +2943,16 @@ impl Render for SettingsView {
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, _, cx| {
+                                    .on_click(cx.listener(move |view, _, _, cx| {
                                         view.save_all(cx);
+                                        sm_close_bottom.update(cx, |s, cx| {
+                                            s.settings_open = false;
+                                            s.modal_open = false;
+                                            s.requested_hub_switch = Some("close");
+                                            cx.notify();
+                                        });
                                     }))
-                                    .child("💾 Save All Changes to Disk (⌘S)"),
+                                    .child("✓ Save & Close (⌘S)"),
                             ),
                     ),
             )
