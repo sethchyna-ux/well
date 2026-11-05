@@ -1,0 +1,44 @@
+name: Native builds
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    strategy:
+      matrix:
+        runner: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    env:
+      WELL_BUILD_TARGET_DIR: ${{ runner.temp }}/well-build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Check and package
+        run: |
+          cargo +stable check --workspace --all-targets --locked --target-dir "$WELL_BUILD_TARGET_DIR"
+          rustup default stable
+          ./well-build-harness.sh --skip-tests --package --output "$RUNNER_TEMP/packages"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: well-${{ matrix.runner }}
+          path: ${{ runner.temp }}/packages/*.zip*
+  arch-linux:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - name: Install native build dependencies
+        run: pacman -Syu --noconfirm --needed git rust libxkbcommon libxkbcommon-x11 libx11 libxcursor libxi libxrandr wayland vulkan-icd-loader ttf-dejavu fontconfig
+      - uses: actions/checkout@v4
+      - name: Build and package as an unprivileged user
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -c 'cd "'"$GITHUB_WORKSPACE"'" && cargo check --workspace --all-targets --locked --target-dir /tmp/well-build && WELL_BUILD_TARGET_DIR=/tmp/well-build ./well-build-harness.sh --skip-tests --package --output /tmp/well-packages'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: well-arch-x86_64
+          path: /tmp/well-packages/*.pkg.tar.zst*

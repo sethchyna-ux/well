@@ -1,0 +1,44 @@
+﻿Combining Fish, Starship, and Ghostty creates an incredibly fast, highly informative, and visually cohesive terminal environment. Because of Ghostty’s deep native integration with the OSC 133 Semantic Prompts specification and Fish’s out-of-the-box features, these three tools harmonize perfectly 1, 2.
+Here is the comprehensive guide to combining and optimizing this modern command-line stack:
+Step 1: Initialize Starship in your Fish Shell
+To connect your shell to your prompt engine, you must instruct Fish to initialize Starship upon startup.
+1. Open (or create) your Fish configuration file at ~/.config/fish/config.fish 3, 4.
+2. Add the following line to the end of the file 5:
+3. starship init fish | source
+4. Ensure you have a Nerd Font (such as Fira Code Nerd Font) installed and active in your terminal emulator to render Starship's contextual branch, language, and environment icons properly 6.
+Step 2: Unlocking Ghostty 1.3.0 Native Features for Fish
+With Ghostty 1.3.0, you get advanced terminal-to-shell integrations that work natively with Fish without requiring manual scripting:
+* Click-to-Move Cursor in Prompts: Ghostty natively supports the click-events and cl=line extensions to the OSC 133 Semantic Prompts specification 1. In Fish 4.1+, you can simply click your mouse inside an active prompt to move the cursor to that character, making it behave like a normal text box 1.
+* Command Finished Notifications: Ghostty can send you desktop notifications when slow background processes finish executing 7. Because Fish natively sends OSC 133 execution tracking sequences, this works out of the box 2. You can configure this behavior in your .ghostty configuration file 8:
+* # Options: always, unfocused (only when window is out of focus), or never
+* notify-on-command-finish = unfocused
+* # Send a desktop notification instead of just a system bell
+* notify-on-command-finish-action = notify
+* # Only notify if the command took longer than 5 seconds
+* notify-on-command-finish-after = 5
+* Descriptive Tab-Completions: Ghostty supplies explicit descriptions for its shell completions under Fish, making command-line flag documentation much more legible 9.
+* Fixing Ctrl+L Behavior: In Ghostty 1.3.0, the parser correctly preserves scrolled-off lines in the scrollback buffer during CSI Scroll Up operations 10. This directly resolves a long-standing issue in Fish where hitting Ctrl+L (which triggers scrollback-push) would accidentally erase your terminal viewport history 10.
+Step 3: Configure Advanced Starship + Fish Tweaks
+To keep your prompt clean and maintain sub-millisecond execution speeds, configure these options in your ~/.config/starship.toml file 11, 12:
+1. Enable Transient Prompts
+If you run long terminal sessions and don't want a massive, multi-line prompt cluttering your viewport scrollback, you can enable transience 13. This shrinks your historical prompt to a single character (like ❯) the moment you hit Enter 13, 14.
+* Add this line to your ~/.config/fish/config.fish to make it permanent 13:
+* enable_transience
+* By default, the previous left-side prompt will collapse into a bold green ❯ 14. You can customize exactly what the collapsed prompt looks like by defining a custom transient function in your config.fish 14:
+* function starship_transient_prompt_func
+*   starship module character
+* end
+2. Manage Latency and Timeouts
+While Starship is written in Rust and is exceptionally fast 15, checking heavy external contexts like large git repository structures or executing background runtime version checks can sometimes introduce minor latency papercuts 16-18.
+Prevent your shell from feeling laggy by adding strict timeouts inside your ~/.config/starship.toml 3, 11:
+# Stop scanning directories for context if it takes longer than 30ms
+scan_timeout = 30
+
+
+# Cap the execution of external version checks at 500ms
+command_timeout = 500
+Step 4: Personalize and Save your Theme
+Both Fish and Starship let you customize themes directly on the fly.
+* Fish Web Configurator: Run fish_config in your terminal to open a local browser portal where you can visually inspect keybindings, functions, and choose from premade syntax highlighting color themes 19-21.
+* Starship Presets: Run starship preset in your terminal to see a list of visual presets (like Tokyo Night, Gruvbox Dark, or Pure) that you can output directly into your config file to match your terminal’s appearance 22-24.
+🧩 I could build a custom keyboard shortcut cheatsheet or interactive quick-reference guide highlighting the unified bindings across Fish, Starship, and Ghostty.

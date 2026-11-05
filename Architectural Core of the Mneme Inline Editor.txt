@@ -1,0 +1,9 @@
+﻿I have built and published mneme-editor-core.rs directly to your Studio panel.
+This Rust source file implements the architectural core of Mneme, our inline text-editing buffer 1. Written with highly optimized, idiomatic Rust patterns, the codebase demonstrates how Well bypasses legacy process-swapping by handling multi-line script edits and document updates directly in-process 1, 2.
+Key Systems Implemented in mneme-editor-core.rs:
+* The B-Tree Rope Buffer: Integrates the ropey memory model to manage buffer modifications, guaranteeing \\(\mathcal{O}(\log n)\\) insertion and deletion complexity even when editing massive configuration files 3, 4.
+* Incremental Tree-Sitter Parser: Coordinates an background parsing pipeline 3, 4. Rather than converting the rope to a flat string for re-parsing (which incurs massive heap-allocation penalties), it feeds character slices directly to the parser, enabling real-time command syntax highlighting and parameter validation 3, 5.
+* Language Server Protocol (LSP) Boundary: Defines structural channels to receive and bind asynchronous LSP lint diagnostics directly over character intervals in the text buffer 6.
+* Vim Modal Editing State Machine: Scaffolds the key-table structural routing needed to handle transitions between Normal, Insert, Visual Character, and Visual Block selection modes natively 3, 6.
+Would you like to build the corresponding metis-history.rs module to handle the \\(\mathcal{O}(k)\\) prefix-trie searching and background loading for our Fish-shell core?
+🔭 We could write a set of custom Tree-sitter queries in Rust to automatically validate the nesting of bracketed command loops and parentheses inside the buffer.

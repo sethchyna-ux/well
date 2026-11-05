@@ -1,0 +1,13 @@
+[package]
+name = "well-prompt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+well-ipc = { version = "0.1.0", path = "../well-ipc" }
+
+[dev-dependencies]
+tempfile = "3"
+

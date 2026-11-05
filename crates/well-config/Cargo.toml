@@ -1,0 +1,12 @@
+[package]
+name = "well-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+egui = { version = "0.28.1", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+tempfile = "3"
+well-prompt = { path = "../well-prompt" }
+well-ipc = { path = "../well-ipc" }

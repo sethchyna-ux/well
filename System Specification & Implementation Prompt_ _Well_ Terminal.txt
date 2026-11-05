@@ -1,0 +1,98 @@
+﻿System Specification & Implementation Prompt: "Well" Terminal
+1. System Overview
+Well is a unified, next-generation terminal, shell, and prompt environment designed to run at the absolute performance ceiling of modern computer hardware. It consolidates a high-performance GPU renderer (Orpheus / libghostty), an in-process shell logic core (Metis / Fish Core), a memory-mapped prompt compiler (Astraea / Starship), an inline rope text editor (Mneme), a GPU-accelerated immediate-mode configuration dashboard (Theia's Prism), and a zero-copy shared-memory inter-process communication protocol (Hermes).
+To achieve sub-millisecond input-to-pixel latencies and remove the system resource overhead of traditional terminal setups, Well must bypass legacy UNIX pseudo-terminals (PTYs) and avoid spawning synchronous subprocesses. Instead, it runs all components compiled statically as a single native binary on a highly optimized, asynchronous Rust workspace.
+┌────────────────────────────────────────────────────────────────────────┐
+│                              WELL (Phrear)                             │
+│                  Unified Workspace Host (Cargo / Rust)                 │
+├─────────────────┬──────────────────────┬───────────────┬───────────────┤
+│      ATLAS      │       ORPHEUS        │    HERMES     │   CADUCEUS    │
+│  winit OS Loop  │  wgpu/HarfBuzz GPU   │  Seqlock IPC  │ In-Process RPC│
+│  [3, 14]    │  [3, 15, 16]     │  [3, 17]   │ [18, 19]    │
+├─────────────────┴──────────────────────┴───────────────┴───────────────┤
+│                              SUBSYSTEMS                                │
+├─────────────────────────┬──────────────────────────┬───────────────────┤
+│          METIS          │          MNEME           │      ASTRAEA      │
+│     Fish Shell Core     │    Rope Editor & AST     │  Prompt Compiler  │
+│       [12, 20]         │     [21-23]       │  [3, 12, 24]   │
+├─────────────────────────┴──────────────────────────┴───────────────────┤
+│                             THEIA'S PRISM                              │
+│                Visual egui Control Center Tab [3, 13]               │
+└────────────────────────────────────────────────────────────────────────┘
+
+
+________________
+
+
+2. Structural Workspace Blueprint
+Generate a Cargo workspace with the following module tree:
+well/
+├── Cargo.toml                  # Fat LTO, 1 Codegen Unit, Panic=Abort [13, 25]
+├── build.rs                    # Compiles libghostty with Zig 0.15 [13, 26]
+├── src/
+│   └── main.rs                 # Host windowing, event loop, and tab switcher (Atlas) [14]
+└── crates/
+    ├── well-shell/             # Fish core shell & prefix trie logic (Metis) [13, 14]
+    ├── well-prompt/            # Memory-mapped prompt (Astraea) [13, 27]
+    ├── well-editor/            # Rope-based composition text buffer (Mneme) [13, 27]
+    ├── well-render/            # WebGPU dynamic glyph-atlas pipeline (Orpheus) [3]
+    ├── well-config/            # egui immediate-mode visual dashboard (Theia) [13, 28]
+    └── well-ipc/               # Shared-memory queues & async Hyper RPC server (Hermes) [3]
+
+
+Configure Cargo.toml with the following optimized release profile to enforce strict performance boundaries:
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+
+________________
+
+
+3. Subsystem Architectural Guidelines
+Part I: Metis (Shell Logic Core) & prefix-Trie History
+* Static Integration: Link the Fish Shell core directly into the binary's process namespace instead of launching a detached child process. Run the shell loop on a dedicated concurrent thread.
+* Logarithmic Suggestion Engine: Implement an in-memory prefix trie structure in Rust to index up to 260,000 commands from a SQLite history file. Queries must execute in O(k) complexity (where k is active input length) to suggest predictive command completions instantly as the user types.
+* Frictionless Suggestions: Render suggestions inline in a muted style. Hook the Right Arrow key and Ctrl+F to accept suggestions, and Alt+Right Arrow / Alt+F to accept the next word for path-by-path folder traversal.
+Part II: Mneme (The Inline Text Editor)
+* Composition Mode: Replace legacy process-swapping (launching a full-screen external editor that clears the terminal viewport) with inline multi-line editing frames. When the user inputs an unclosed command block (such as an unclosed for loop or if branch) or hits Alt+E / Alt+V, the cursor must not break; instead, expand the prompt dynamically in-place into a multi-line composition frame.
+* Rope Buffer Memory: Back the composition frame with a B-tree rope data structure (using the ropey library) to ensure O(logn) insertion, selection, and deletion complexity.
+* Safety AST Validator: Run an incremental Tree-sitter parser on a background thread to compile syntax trees of the active buffer in real time. Paint valid paths in green and invalid parameters or unclosed bracket chains in red.
+* LSP Integration: Establish Language Server Protocol (LSP) channels to stream inline diagnostics, warnings, and formatting folding directly inside the terminal viewport.
+Part III: Astraea (Prompt Compiler) & State Vectoring
+* State-Vector Prompting: Bypass standard directory file-system probing and subprocess forks on command returns (such as calling external git branch or rustc --version commands), which introduce 10ms–50ms lag spikes.
+* Event-Driven Updates: Astraea must read system metrics, Git status parameters, and cloud provider details from a single, kernel-mediated, memory-mapped state vector. Update this vector asynchronously in the background via OS filesystem and SCM event notifications, keeping prompt compile times strictly below 100 microseconds.
+* Prompt Transience: Enforce strict prompt transience. The moment a command executes, collapse the historical multi-line decorated prompt layout in the console storage buffer to a single compact character (e.g., ❯), keeping scrollback clean and saving GPU viewport memory.
+Part IV: Hermes (PTY-Bypass Protocol & Seqlock IPC)
+* PTY-Bypass Ring Buffers: Eliminate the UNIX pseudoterminal driver /dev/ptmx. Build zero-copy shared-memory ring queues mapped directly between the terminal renderer (Orpheus) and the shell thread (Metis).
+* Strongly Typed Schemas: Pack IPC data payloads in strongly typed binary structures (Protobuf or FlatBuffers) instead of streaming raw, ANSI-decorated ASCII byte arrays.
+* Seqlock State Synchronization: To prevent rendering thread freezes, manage the state of the active terminal viewport using a lightweight, lock-free Sequence Lock (Seqlock). Worker threads must write to buffers while the GPU reads the state concurrently; if the generation counter detects a collision mid-write, skip the frame to eliminate mutex contention.
+* Input Fidelity: Enforce full, progressive compliance with the Kitty Keyboard Protocol. Capture physical key releases, key repeats, and complex modifier key combinations (Shift, Alt, Ctrl, and Super) as strongly typed bitmasks to prevent formatting collisions.
+Part V: Orpheus (Texture Renderer) & Shader Compositing
+* Single-Pass Instancing: Render the entire viewport in a single, instanced graphics draw call (draw_indexed) using a flat, tightly packed array of 64-bit instance data.
+* Layered Dynamic Texture Array: Rasterize characters dynamically into a GPU-resident, multi-layered 2D texture array with separate monochrome and color emoji channels. Manage allocations via a four-tier slot boundary:
+   1. Slots 0–94: Static pre-allocated monochrome ASCII (Normal).
+   2. Slots 95–2047: Dynamic LRU cached monochrome ASCII variants (Bold, Italic).
+   3. Slots 2048–6143: Dynamic LRU cached double-wide characters (CJK scripts).
+   4. Slots 6144–8191: Dynamic LRU cached multi-colored emojis (RGBA).
+* Branchless WGSL Shading Pipeline: Process all viewport scaling, subpixel metric alignment, and character effects (underlines, strikethroughs) procedurally inside the pixel fragment shader to conserve GPU memory.
+* Dynamic CRT Curvature Shader: Implement an optional retro CRT visual layer within the pipeline. Author a WGSL fragment shader that performs a barrel-distortion transformation on UV coordinates, integrates horizontal scanline sinusoids, applies chromatic aberration phosphor-bleeding, and generates a pulsing neon cursor glow [orpheus-crt-shader.wgsl].
+* Automatic 150ms Synchronized Recovery: To prevent the terminal from permanently locking up when a TUI application crashes or network connection fails inside a DEC 2026 synchronized-output session (CSI ? 2026 h), implement an automated 150ms timeout safety gate to clear the rendering block.
+Part VI: Theia's Prism (Visual Configuration Dashboard)
+* egui Visual Overlays: Expose a visually stunning configuration dashboard powered by an immediate-mode egui canvas on top of our wgpu backend. Trigger this overlay seamlessly via the F12 hotkey.
+* Interactive Control Panels: Build visual sliders and toggles to load Starship formatting presets, toggle Git telemetry modules, customize Fish abbreviations, and pick terminal colors.
+* Validation Gate: Run the in-process Tree-sitter TOML and YAML parsers on user configurations as they type inside the dashboard. If the syntax contains errors, print inline warning ribbons and disable the "Apply Changes" handler, protecting the user from ever corrupting their local configuration files.
+Part VII: Caduceus (In-Process hyper RPC Server)
+* Local-Only Asynchronous RPC: Run an in-process, asynchronous HTTP and WebSocket server using the Rust hyper library over local Unix Domain Sockets (well.sock on macOS/Linux) or Named Pipes (\\.\pipe\well on Windows).
+* Security Peer Verification: Restrict file access to owner-only permissions (0600). Every connection must call the kernel's SO_PEERCRED (or LOCAL_PEERCRED on macOS) before dispatching any API calls, instantly rejecting connections from other local UIDs to enforce a secure, local-only trust boundary.
+* Agent Orchestration Hooks: Expose structural namespaces (workspace.*, surface.*, ai.*) to allow external developer agents, editors, or custom scripts to programmatically send text to active panes, split panels, or stream background agent lifecycle events straight into the UI.
+________________
+
+
+4. Technical Constraints & Verification
+* Minimal Dependency Profile: Avoid heavy graphical toolkit wrappers, Electron, or Tauri. Rely on winit for windowing and wgpu for cross-platform rendering.
+* Strict Memory & Latency Targets: The base memory footprint must not exceed 30MB, with a target keystroke-to-pixel latency strictly below 2.5 milliseconds.
+* Robust I/O Event Coalescing: Implement a strict 4ms batched event coalescing window. Do not trigger full GPU rendering cycles immediately upon PTY data read operations. Gather and queue all stream packets received within the 4ms window, processing them in a single batch to cap the frame update frequency at 250 FPS. This prevents GPU rendering saturation under massive log floods.

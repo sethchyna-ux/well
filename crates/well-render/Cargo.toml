@@ -1,0 +1,17 @@
+[package]
+name = "well-render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = { version = "0.20", default-features = false, features = ["hal", "wgsl", "metal"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+ab_glyph = "0.2.32"
+fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "fontconfig"] }
+well-shell = { path = "../well-shell" }
+well-config = { path = "../well-config" }
+vt100.workspace = true
+
+[dev-dependencies]
+vt100.workspace = true
+well-ipc = { path = "../well-ipc" }
