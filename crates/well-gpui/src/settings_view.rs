@@ -287,6 +287,7 @@ pub enum SettingsSection {
     TheiaSshHosts,
     MnemeSafetyGates,
     PythiaTelemetry,
+    SystemInfoGuide,
 }
 
 impl SettingsSection {
@@ -297,6 +298,7 @@ impl SettingsSection {
         Self::TheiaSshHosts,
         Self::MnemeSafetyGates,
         Self::PythiaTelemetry,
+        Self::SystemInfoGuide,
     ];
 
     pub const fn title(self) -> &'static str {
@@ -307,6 +309,7 @@ impl SettingsSection {
             Self::TheiaSshHosts => "4. Theia SSH Hosts",
             Self::MnemeSafetyGates => "5. Mneme Safety Gates",
             Self::PythiaTelemetry => "6. Pythia AI & Telemetry",
+            Self::SystemInfoGuide => "7. Info, Names & Guide",
         }
     }
 
@@ -318,6 +321,7 @@ impl SettingsSection {
             Self::TheiaSshHosts => "Host profiles, redacted keys & IPC tunnel",
             Self::MnemeSafetyGates => "Tree-sitter AST destructive command gates",
             Self::PythiaTelemetry => "Sub-2ms Metis cache & Caduceus IPC health",
+            Self::SystemInfoGuide => "Mythological names, subsystems & functions",
         }
     }
 }
@@ -492,6 +496,13 @@ impl SettingsView {
         self.status_msg = Some("✓ Reset & saved all keyboard shortcuts to factory defaults".into());
         cx.notify();
     }
+
+    pub fn set_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.active_section = section;
+        self.rebinding_index = None;
+        self.active_input = ActiveFormInput::None;
+        cx.notify();
+    }
 }
 
 impl Render for SettingsView {
@@ -506,18 +517,18 @@ impl Render for SettingsView {
             .clone()
             .or_else(|| self.settings.read(cx).last_saved_status.clone())
             .unwrap_or_else(|| {
-                "All changes auto-save & can be explicitly saved via 💾 Save Changes (⌘S)".into()
+                "All changes auto-save & can be explicitly saved via ✓ Save & Close (⌘S)".into()
             });
         let settings_entity = self.settings.clone();
 
-        // Left Sidebar Navigation (6 Clear Sections)
-        let mut nav_items = div().flex().flex_col().gap_1p5();
+        // Left Sidebar Navigation (7 Clear Sections)
+        let mut nav_items = div().flex().flex_col().gap_1();
         for (idx, section) in SettingsSection::ALL.iter().copied().enumerate() {
             let is_active = section == active_section;
             nav_items = nav_items.child(
                 div()
                     .id(("settings-nav", idx))
-                    .px_3()
+                    .px_2p5()
                     .py_1p5()
                     .rounded_lg()
                     .cursor(gpui::CursorStyle::PointingHand)
@@ -2557,12 +2568,249 @@ impl Render for SettingsView {
                     )
                     .into_any_element()
             }
+            SettingsSection::SystemInfoGuide => {
+                let make_lore_card = |icon: &'static str,
+                                      name: &'static str,
+                                      key_badge: &'static str,
+                                      badge_color: u32,
+                                      myth_origin: &'static str,
+                                      desc: &'static str| {
+                    div()
+                        .flex_1()
+                        .p_2p5()
+                        .rounded_lg()
+                        .bg(theme.bg)
+                        .border_1()
+                        .border_color(theme.border_inactive)
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .justify_between()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(div().text_xs().child(icon))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::BOLD)
+                                                .text_color(theme.border_active)
+                                                .child(name),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(rgb(badge_color))
+                                        .text_size(px(10.0))
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(0x090d16))
+                                        .child(key_badge),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgb(0x8ec07c))
+                                .child(myth_origin),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.fg)
+                                .child(desc),
+                        )
+                };
+
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(theme.tab_active_bg)
+                            .border_1()
+                            .border_color(theme.border_active)
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme.border_active)
+                                            .child("📖 WELL TERMINAL — MYTHOLOGICAL SUBSYSTEM NAMES & ARCHITECTURE"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.5))
+                                            .text_color(rgb(0xa89984))
+                                            .child("Why every subsystem is named & what it powers"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(make_lore_card(
+                                        "🏛️",
+                                        "THEIA & THEIA'S PRISM",
+                                        "⌘, / ⇧⌘S",
+                                        0x22d3ee,
+                                        "Titaness of Sight, Light & Shining Ether",
+                                        "Visual Theme Studio, 24-bit color refraction, per-host SSH tier auto-tinting & the 7-module Theia SSH / Net Ops console.",
+                                    ))
+                                    .child(make_lore_card(
+                                        "🌐",
+                                        "ATLAS GRID & LATTICE",
+                                        "Top ◈",
+                                        0xa855f7,
+                                        "Titan Bearing the Celestial Sphere",
+                                        "Zero-copy libghostty VT state machine, GPU dirty-row damage tracking, inline Kitty Graphics & the Cyan/Violet Lattice border.",
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(make_lore_card(
+                                        "✨",
+                                        "PYTHIA AI ORACLE",
+                                        "⌘K",
+                                        0xfabd2f,
+                                        "High Priestess & Oracle of Delphi",
+                                        "Inline natural-language-to-shell AI synthesizer. Translates plain English intent into safe, ready-to-run shell commands.",
+                                    ))
+                                    .child(make_lore_card(
+                                        "🛡️",
+                                        "MNEME SNIPPETS & GATES",
+                                        "^R",
+                                        0xfb4934,
+                                        "Muse of Memory & Preservation",
+                                        "Parameterized ${1:arg} workflow templates, multi-line command buffer & Tree-sitter AST destructive command safety gates.",
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(make_lore_card(
+                                        "⚡",
+                                        "METIS HISTORY ENGINE",
+                                        "Sub-2ms",
+                                        0x8ec07c,
+                                        "Goddess of Wise Counsel & Cunning",
+                                        "Radix-trie command history (~/.local/share/well/history.db) and offline team recipe cache with sub-2ms lookup latency.",
+                                    ))
+                                    .child(make_lore_card(
+                                        "🧭",
+                                        "ASTRAEA & CADUCEUS IPC",
+                                        "IPC / Git",
+                                        0x38bdf8,
+                                        "Goddess of Precision + Hermes' Staff",
+                                        "Tracks live CWD (OSC 7), Git branch & dirty state. Caduceus (/tmp/well-caduceus.sock) exposes JSON-RPC 2.0 over SSH -R tunnels.",
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(theme.tab_active_bg)
+                            .border_1()
+                            .border_color(theme.border_inactive)
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.border_active)
+                                    .child("⚡ COMPLETE FUNCTIONS, BARS & THEIA SSH 7-MODULE REFERENCE"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .p_2p5()
+                                            .rounded_md()
+                                            .bg(theme.bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(rgb(0x22d3ee))
+                                                    .child("Window Bars & Quick Controls"),
+                                            )
+                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• Top Center [ −  ∏  □  ◈ ]: Split Down (−), Split Right (∏), Equalize Panes (□), Toggle ATLAS Lattice Frame (◈)"))
+                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• Bottom Left [ >< Theia SSH (⇧⌘S) ]: Open 7-module SSH & Net Ops Console + Astraea Git branch badge"))
+                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• Bottom Center Pills: Clickable shortcuts for ⇧⌘P Functions, ⌘K Pythia AI, ^R Mneme Snippets & ⌘D Split"))
+                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• Bottom Right [ 🏛️ Theia's Prism (⌘,) ]: Open this unified Operator Control Center")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .p_2p5()
+                                            .rounded_md()
+                                            .bg(theme.bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(rgb(0x8ec07c))
+                                                    .child("Theia SSH Left Icon Rail (7 Modules)"),
+                                            )
+                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• [ >_ ] 1. SSH Hosts: Saved profiles & ~/.ssh/config launcher"))
+                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• [ ⇄ ] 2. Port Tunnels: Visual -L Local, -R Remote & -D SOCKS5"))
+                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• [ 🔑 / 🛡️ ] 3–4. Key Vault & SSH Server: Ed25519 keys, ssh-agent & HTTP key server"))
+                                            .child(div().text_size(px(11.0)).text_color(theme.fg).child("• [ 🚀 / 📁 / 📡 ] 5–7. NetOps: PXE/iPXE Bootloader, SMB Shares & Ping/ARP/WoL")),
+                                    ),
+                            ),
+                    )
+                    .into_any_element()
+            }
         };
 
         let sm_switch_ssh = settings_entity.clone();
-        let sm_switch_pal = settings_entity.clone();
-        let sm_switch_pythia = settings_entity.clone();
         let sm_close_bottom = settings_entity.clone();
+        let is_info_tab = active_section == SettingsSection::SystemInfoGuide;
 
         div()
             .id("theia-prism-settings-window")
@@ -2762,7 +3010,7 @@ impl Render for SettingsView {
                 }
             }))
             .child(
-                // Top Title Banner with Unified Theia's Prism Mode Switcher (no redundant save buttons here!)
+                // Top Title Banner with Unified Theia's Prism 3-Mode Switcher
                 div()
                     .px_5()
                     .py_2p5()
@@ -2789,7 +3037,7 @@ impl Render for SettingsView {
                                             .text_sm()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(theme.border_active)
-                                            .child("THEIA'S PRISM — UNIFIED OPERATOR CONTROL CENTER"),
+                                            .child("THEIA'S PRISM — OPERATOR CONTROL CENTER"),
                                     )
                                     .child(
                                         div()
@@ -2804,22 +3052,44 @@ impl Render for SettingsView {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_1p5()
+                            .gap_2()
                             .child(
                                 div()
-                                    .px_2p5()
+                                    .id("hub-switch-prism-btn")
+                                    .px_3()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(theme.border_active)
-                                    .text_color(theme.bg)
+                                    .bg(if !is_info_tab {
+                                        theme.border_active
+                                    } else {
+                                        theme.tab_active_bg
+                                    })
+                                    .border_1()
+                                    .border_color(if !is_info_tab {
+                                        theme.border_active
+                                    } else {
+                                        theme.border_inactive
+                                    })
+                                    .text_color(if !is_info_tab {
+                                        theme.bg
+                                    } else {
+                                        theme.fg
+                                    })
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .child("🎨 Prism & Settings (⌘,)"),
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        if view.active_section == SettingsSection::SystemInfoGuide {
+                                            view.active_section = SettingsSection::AppearancePrism;
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child("🎨 Theia's Prism (⌘,)"),
                             )
                             .child(
                                 div()
                                     .id("hub-switch-ssh-btn")
-                                    .px_2p5()
+                                    .px_3()
                                     .py_1()
                                     .rounded_md()
                                     .bg(theme.tab_active_bg)
@@ -2840,47 +3110,36 @@ impl Render for SettingsView {
                             )
                             .child(
                                 div()
-                                    .id("hub-switch-palette-btn")
-                                    .px_2p5()
+                                    .id("hub-switch-info-btn")
+                                    .px_3()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(theme.tab_active_bg)
+                                    .bg(if is_info_tab {
+                                        theme.border_active
+                                    } else {
+                                        theme.tab_active_bg
+                                    })
                                     .border_1()
-                                    .border_color(theme.border_inactive)
-                                    .text_color(theme.fg)
+                                    .border_color(if is_info_tab {
+                                        theme.border_active
+                                    } else {
+                                        theme.border_inactive
+                                    })
+                                    .text_color(if is_info_tab {
+                                        theme.bg
+                                    } else {
+                                        theme.fg
+                                    })
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        sm_switch_pal.update(cx, |s, cx| {
-                                            s.settings_open = false;
-                                            s.requested_hub_switch = Some("palette");
-                                            cx.notify();
-                                        });
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.active_section = SettingsSection::SystemInfoGuide;
+                                        view.rebinding_index = None;
+                                        view.active_input = ActiveFormInput::None;
+                                        cx.notify();
                                     }))
-                                    .child("⌘ Functions (⇧⌘P)"),
-                            )
-                            .child(
-                                div()
-                                    .id("hub-switch-pythia-btn")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(theme.tab_active_bg)
-                                    .border_1()
-                                    .border_color(theme.border_inactive)
-                                    .text_color(theme.fg)
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        sm_switch_pythia.update(cx, |s, cx| {
-                                            s.settings_open = false;
-                                            s.requested_hub_switch = Some("pythia");
-                                            cx.notify();
-                                        });
-                                    }))
-                                    .child("✨ Pythia AI (⌘K)"),
+                                    .child("📖 Info & System Guide"),
                             ),
                     ),
             )
