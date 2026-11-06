@@ -20,6 +20,7 @@ zig-out/
 *.mp4
 *.m4a
 Gemini_Generated_Image_*.png
+Screenshot*.png
 node_modules/
 app/android/app/src/main/assets/*/well-cli
 app/android/app/src/main/jniLibs/**/*.so
