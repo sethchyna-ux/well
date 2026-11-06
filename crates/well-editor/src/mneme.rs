@@ -395,13 +395,19 @@ impl MnemeEditor {
         if token_start_char > 0 {
             let start = cursor - token_start_char;
             let token = self.buffer.slice(start..cursor).to_string();
-            if let Some(snippet) = catalog
-                .iter()
-                .find(|s| s.trigger == token && s.scope.matches_context(is_ssh))
-            {
-                let snippet_clone = snippet.clone();
-                self.expand_snippet(&snippet_clone, Some(start..cursor));
-                return true;
+            let clean_token = token.trim_start_matches(':');
+            if !clean_token.is_empty() {
+                if let Some(snippet) = catalog
+                    .iter()
+                    .find(|s| {
+                        (s.trigger == token || s.trigger.trim_start_matches(':') == clean_token)
+                            && s.scope.matches_context(is_ssh)
+                    })
+                {
+                    let snippet_clone = snippet.clone();
+                    self.expand_snippet(&snippet_clone, Some(start..cursor));
+                    return true;
+                }
             }
         }
         self.next_snippet_placeholder()
@@ -1001,5 +1007,11 @@ mod tests {
         );
         assert!(editor.expand_or_advance_snippet(&catalog, false));
         assert!(editor.active_snippet_stop().is_none());
+
+        // Also test expansion with double colons (::klogs) or raw name (klogs)
+        let mut editor2 = MnemeEditor::default();
+        editor2.insert_text("::klogs");
+        assert!(editor2.expand_or_advance_snippet(&catalog, false));
+        assert_eq!(editor2.get_text(), "kubectl logs -f -n default pod-name");
     }
 }

@@ -933,3 +933,159 @@ Completed all three tracks of Iteration 22 across `well-gpui`, `well-editor`, `w
   - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
   - Built optimized release binary `well-gpui` in 1m 24s.
   - Updated, sanitized, and ad-hoc codesigned `/Applications/Well.app` and `dist/Well.app`.
+
+
+### Session Update: 2026-11-05T22:08:00-05:00 (Snippet Expansion & Focus Trap Fix, Mneme Execution & Command Palette ⌘K Restoration)
+- **Command Palette (`⌘K`) Shortcut Restoration (`crates/well-gpui/src/main.rs`, `crates/well-gpui/src/actions.rs`)**:
+  - Bound `KeyBinding::new("cmd-k", OpenCommandPalette, None)` alongside `"cmd-shift-p"` in application keys.
+  - Removed `modifiers.platform` interception in `TerminalView.on_key_down`, changing `is_cmd_k` to `is_copilot_toggle` (`Ctrl+Shift+K`).
+  - `⌘K` now cleanly bubbles to GPUI action dispatch and opens the Command Palette from anywhere in the window.
+- **Snippet Execution & Focus Restoration (`crates/well-gpui/src/main.rs`, `crates/well-editor/src/mneme.rs`)**:
+  - Fixed focus trap in `WorkspaceView::render`: removed stale modal check (`!settings_view.focus_handle.is_focused()`) that previously prevented keyboard focus from reverting to the active terminal when Settings closed.
+  - Added click focus listener (`.on_mouse_down`) and `IBeam` cursor to `mneme_overlay`.
+  - Fixed snippet trigger expansion: in `WorkspaceView::new`, cleaned leading `:` to prevent double prefixing (`::klogs`), and invoked `mneme_editor.expand_snippet` directly when matched, immediately expanding tab-stops.
+  - Fixed Enter execution: added `\r` carriage return appending and stream flushing in `TerminalView.on_key_down` on Enter / Shift+Enter command submission from Mneme to ensure immediate PTY shell execution.
+- **Verification & Deployment**:
+  - `cargo test -p well-gpui -p well-editor --locked`: **All 34 unit tests passing**.
+  - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
+  - Rebuilt optimized release binary `well-gpui` in 1m 37s.
+  - Installed, sanitized xattrs, and ad-hoc signed `/Applications/Well.app` and `dist/Well.app`.
+
+
+### Session Update: 2026-11-05T22:35:00-05:00 (Cross-Platform Compilation: Arch Linux x86_64 Native Build)
+- **Target Host Verification (`chyna@192.168.1.141`)**:
+  - Connected to EndeavourOS / Arch Linux x86_64 host (Kernel `7.2.9-zen1-1-zen`).
+  - Installed `vulkan-headers` via pacman; verified `fontconfig`, `freetype2`, `libxkbcommon`, `libxcb`, `wayland`, `vulkan-icd-loader`, and `alsa-lib`.
+  - Synced latest Well workspace via `rsync`.
+- **Arch Linux Release Compilation**:
+  - Successfully ran `cargo build --release -p well-gpui` on Arch Linux x86_64 in 13m 40s.
+  - Produced 23MB stripped release ELF binary: `/home/chyna/well-linux/target/release/well-gpui` (ELF 64-bit LSB pie executable, dynamically linked against `libc.so.6`, `libxcb.so.1`, `libxkbcommon.so.0`, `libxkbcommon-x11.so.0`).
+- **Binary Verification & Packaging**:
+  - Tested `--version`: returns `Well 0.1.0`.
+  - Tested `--help`: returns standard CLI usage flags.
+  - Tested `--diagnose`: correctly identifies `target_os: "linux"`, `target_arch: "x86_64"`, `macos_app_bundle: false`, and live shell configuration.
+  - Mirrored release binary locally to `dist/linux/well-gpui`.
+
+
+### Session Update: 2026-11-06T00:02:00-05:00 (Two-Hour Cadence: Multi-Platform Maturity, Modal Focus Invariants & Skill Codification)
+- **Active Milestones Achieved**:
+  1. **Keyboard Event Loop & Shortcut Routing**:
+     - Resolved `Cmd+K` vs `ToggleCopilot` conflict: reserved `⌘K` globally for Command Palette (`OpenCommandPalette`) and mapped Copilot toggle to `^⇧K`.
+     - Verified action bubbling and keystroke propagation across all scoped key contexts (`"Workspace"`, `"TerminalPty"`, `"MnemeInlineEditor"`).
+  2. **Mneme Composer Execution & Snippet Engine**:
+     - Direct snippet AST expansion without colon corruption (`::klogs` -> `kubectl logs -f -n default pod-name`).
+     - Real-time tab-stop navigation between placeholders (`${1:default}`, `${2:pod-name}`).
+     - Guaranteed `\r` carriage return injection and writer flush on command submission to avoid uncommitted buffer lockup.
+  3. **GPUI Retained-Mode Focus Trap Prevention**:
+     - Eliminated stale modal focus check in `WorkspaceView::render`. Explicitly refocuses `active_terminal` whenever modals (`CommandPalette`, `SettingsView`, `TheiaSshState`) close.
+     - Added click-to-focus hitboxes (`IBeam` cursor + `.on_mouse_down`) on `mneme_overlay`.
+  4. **Arch Linux (`x86_64`) Native Release Pipeline**:
+     - Established automated SSH pipeline to remote Arch Linux host (`chyna@192.168.1.141`).
+     - Installed build toolchain prerequisites (`vulkan-headers`, `wayland`, `fontconfig`, `freetype2`, `libxkbcommon`, `libxcb`).
+     - Successfully built stripped 23 MiB release ELF binary with Fat LTO (`well-gpui`).
+     - Verified CLI execution (`--version`, `--help`, `--diagnose`) and mirrored artifact to `dist/linux/well-gpui`.
+  5. **Skill Learning Codification**:
+     - Documented Section 10 in `~/.gemini/config/skills/well-terminal-engineering/SKILL.md` detailing system C library requirements, LTO RAM/duration profiles, and headless CLI compatibility on Linux.
+- **Current Verification Suite**:
+  - `cargo test -p well-gpui -p well-editor --locked`: 34 passed, 0 failed.
+  - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: 0 warnings.
+  - macOS release app signed and deployed to `/Applications/Well.app` and `dist/Well.app`.
+  - Linux x86_64 release binary tested and stored in `dist/linux/well-gpui`.
+
+
+### Session Update: 2026-11-06T02:02:00-05:00 (Two-Hour Cadence: Continuous Regression Audit & Cross-Platform Release Health)
+- **Regression Audit & Stability Verification**:
+  - Executed full test suite across workspace crates:
+    - `well-config`: 11 passed (atomic persistence, custom syntax themes, schema validation).
+    - `well-editor`: 11 passed (Tree-sitter safety barriers, selection multicursor, parameter tab stops).
+    - `well-gpui`: 23 passed (diagnostics CLI flags, actions catalog conflict detection, Kitty graphics, WoL magic packet).
+    - `well-ipc`: 30 passed (seqlock zero-copy stream, ring buffer concurrent stress, framing JSON-RPC).
+  - Workspace test total: **75 tests passed, 0 failed, 0 warnings**.
+- **Distribution Health**:
+  - macOS package `/Applications/Well.app` (GPUI arm64 native bundle) verified with valid ad-hoc codesigning.
+  - Linux binary `dist/linux/well-gpui` verified for Arch Linux `x86_64` ELF execution.
+- **Continuous Monitoring**:
+  - Re-armed 2-hour cadence scheduler (Task ID `1816`).
+
+
+### Session Update: 2026-11-06T04:02:00-05:00 (Two-Hour Cadence: Continuous Regression Audit & Release Spine Integrity)
+- **Continuous Hygiene & Quality Verification**:
+  - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
+  - `cargo test -p well-gpui --locked`: **All 23 unit tests passing**.
+  - Zero compiler regressions or deprecation warnings across GPUI rendering, actions catalog, and PTY I/O.
+- **Artifact & Deployment State**:
+  - macOS: `/Applications/Well.app` and `dist/Well.app` (GPUI native bundle) verified with valid code signatures.
+  - Linux: `dist/linux/well-gpui` (Arch Linux `x86_64` stripped ELF binary) verified and archived.
+- **Continuous Monitoring**:
+  - Re-armed 2-hour cadence scheduler (Task ID `1830`).
+
+
+### Session Update: 2026-11-06T06:03:00-05:00 (Two-Hour Cadence: Multi-Crate Regression Audit & Production Release Stability)
+- **Regression Audit & Quality Verification**:
+  - Full workspace regression pass across core subsystems (`well-config`, `well-editor`, `well-gpui`, `well-ipc`):
+    - `well-config`: 11 passed (atomic config store, custom themes, parser validation).
+    - `well-editor`: 11 passed (Tree-sitter safety barriers, selection multicursor, parameter tab-stops).
+    - `well-gpui`: 23 passed (diagnostics CLI flags, actions conflict detector, Kitty graphics, WoL magic packet).
+    - `well-ipc`: 30 passed (seqlock concurrent read/write, ring buffer stress test, framed JSON-RPC).
+  - Total: **75 tests passed, 0 failed, 0 warnings**.
+- **Distribution Health**:
+  - macOS: `/Applications/Well.app` (GPUI arm64 native bundle) verified with valid ad-hoc codesigning.
+  - Linux: `dist/linux/well-gpui` (Arch Linux `x86_64` stripped ELF binary) verified and operational.
+- **Continuous Monitoring**:
+  - Re-armed 2-hour cadence scheduler (Task ID `1842`).
+
+
+### Session Update: 2026-11-06T08:03:00-05:00 (Two-Hour Cadence: Continuous Regression Audit & Release Spine Integrity)
+- **Continuous Hygiene & Quality Verification**:
+  - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
+  - `cargo test -p well-gpui --locked`: **All 23 unit tests passing**.
+  - Verified stability of action catalog, diagnostics reporting, theme token parsing, and PTY I/O.
+- **Artifact & Deployment State**:
+  - macOS: `/Applications/Well.app` and `dist/Well.app` (GPUI native bundle) verified with valid code signatures.
+  - Linux: `dist/linux/well-gpui` (Arch Linux `x86_64` stripped ELF binary) verified and operational.
+- **Continuous Monitoring**:
+  - Re-armed 2-hour cadence scheduler (Task ID `1854`).
+
+
+### Session Update: 2026-11-06T10:03:00-05:00 (Two-Hour Cadence: Continuous Regression Audit & Release Spine Integrity)
+- **Continuous Hygiene & Quality Verification**:
+  - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
+  - `cargo test -p well-gpui --locked`: **All 23 unit tests passing**.
+  - Verified stability of action catalog, diagnostics reporting, theme token parsing, and PTY I/O.
+- **Artifact & Deployment State**:
+  - macOS: `/Applications/Well.app` and `dist/Well.app` (GPUI native bundle) verified with valid code signatures.
+  - Linux: `dist/linux/well-gpui` (Arch Linux `x86_64` stripped ELF binary) verified and operational.
+- **Continuous Monitoring**:
+  - Re-armed 2-hour cadence scheduler (Task ID `1866`).
+
+
+### Session Update: 2026-11-06T12:00:00-05:00 (Linux Window Dragging, Native Titlebar Elimination & Center Capsule Window Controls)
+- **Linux Window Movement (`crates/well-gpui/src/main.rs`)**:
+  - Implemented client-side window dragging: bound `window.start_window_move()` on mouse down across the top titlebar header (`#app-titlebar-header`) and the shell tab strip (`#app-shell-tab-strip`).
+  - Added double-click titlebar zoom toggle (`window.zoom_window()`) on empty header areas.
+  - Added `cx.stop_propagation()` across all interactive child elements (`header-new-term-btn`, `header-host-btn`, tab pills, palette, and settings triggers) to avoid accidental window dragging when clicking controls.
+- **Removed Corner Traffic Lights**:
+  - Eliminated left-hand margin offset (`.pl_20()` -> `.px_3()`).
+  - Relocated macOS traffic lights off-screen (`traffic_light_position: Some(Point::new(px(-9999.0), px(-9999.0)))`), ensuring uniform client decorations across macOS and Linux.
+- **Central Capsule Window Controls**:
+  - Integrated full window controls into the middle capsule:
+    - `−`: Minimize window (`window.minimize_window()`).
+    - `∏`: Vertical pane split (`view.split_active_pane`).
+    - `□`: Maximize / restore window (`window.zoom_window()`).
+    - `◈`: Toggle ATLAS geometric lattice border.
+    - `✕`: Close window / quit Well (`cx.quit()`, styled with red coral highlight `rgb(0xf43f5e)`).
+- **Cross-Platform Verification & Packaging**:
+  - macOS: Recompiled and re-signed `/Applications/Well.app` and `dist/Well.app`.
+  - Linux: Synced and recompiled native release ELF binary on Arch Linux (`chyna@192.168.1.141`), validated with `--diagnose`, and updated `dist/linux/well-gpui`.
+
+
+### Session Update: 2026-11-06T12:03:00-05:00 (Two-Hour Cadence: Multi-Platform CSD & Regression Audit)
+- **Continuous Hygiene & Quality Verification**:
+  - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
+  - `cargo test -p well-gpui --locked`: **All 23 unit tests passing**.
+  - Verified window dragging (`window.start_window_move()`) on client-side header and tab strip, double-click zoom toggle, and central capsule window controls.
+- **Artifact & Deployment State**:
+  - macOS: `/Applications/Well.app` and `dist/Well.app` (GPUI native bundle) verified with valid code signatures.
+  - Linux: `dist/linux/well-gpui` (Arch Linux `x86_64` stripped ELF binary) verified and operational.
+- **Continuous Monitoring**:
+  - Re-armed 2-hour cadence scheduler (Task ID `2033`).

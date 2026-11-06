@@ -1360,8 +1360,8 @@ impl Render for TerminalView {
                 if this.settings.read(cx).modal_open {
                     return;
                 }
-                let is_cmd_k = (event.keystroke.modifiers.platform || (event.keystroke.modifiers.control && event.keystroke.modifiers.shift)) && event.keystroke.key == "k";
-                if is_cmd_k {
+                let is_copilot_toggle = event.keystroke.modifiers.control && event.keystroke.modifiers.shift && event.keystroke.key == "k";
+                if is_copilot_toggle {
                     this.pythia.active = !this.pythia.active;
                     cx.notify();
                     return;
@@ -1442,8 +1442,15 @@ impl Render for TerminalView {
                                     if let Some(payload) = this.mneme_editor.take_execution_payload() {
                                         let mut writer = this.pty.writer.lock().unwrap();
                                         use std::io::Write;
-                                        let _ = writer.write_all(payload.as_bytes());
+                                        let mut bytes = payload.into_bytes();
+                                        if !bytes.ends_with(b"\n") && !bytes.ends_with(b"\r") {
+                                            bytes.push(b'\r');
+                                        }
+                                        let _ = writer.write_all(&bytes);
+                                        let _ = writer.flush();
                                         this.mneme_active = false;
+                                        this.input_buffer.clear();
+                                        this.ghost_suggestion = None;
                                     }
                                 } else {
                                     this.mneme_editor.insert_text("\n");
@@ -1452,8 +1459,15 @@ impl Render for TerminalView {
                                 if let Some(payload) = this.mneme_editor.take_execution_payload() {
                                     let mut writer = this.pty.writer.lock().unwrap();
                                     use std::io::Write;
-                                    let _ = writer.write_all(payload.as_bytes());
+                                    let mut bytes = payload.into_bytes();
+                                    if !bytes.ends_with(b"\n") && !bytes.ends_with(b"\r") {
+                                        bytes.push(b'\r');
+                                    }
+                                    let _ = writer.write_all(&bytes);
+                                    let _ = writer.flush();
                                     this.mneme_active = false;
+                                    this.input_buffer.clear();
+                                    this.ghost_suggestion = None;
                                 }
                             }
                         }
@@ -1820,6 +1834,14 @@ impl Render for TerminalView {
             
             let mneme_overlay = div()
                 .key_context("MnemeInlineEditor")
+                .cursor(gpui::CursorStyle::IBeam)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        window.focus(&this.focus_handle);
+                        cx.stop_propagation();
+                    }),
+                )
                 .absolute()
                 .bottom_0()
                 .left_0()
@@ -2222,13 +2244,21 @@ impl WorkspaceView {
                 view.ssh_state.open = false;
                 view.palette_open = false;
                 view.sync_modal_open_flag(cx);
+                let clean_trig = trigger.trim_start_matches(':').to_string();
                 let active_term = view.tabs[view.active_tab].active_terminal.clone();
                 active_term.update(cx, |term, cx| {
                     term.mneme_active = true;
-                    term.mneme_editor.set_text(&format!(":{trigger}"));
                     let snippets = term.settings.read(cx).snippets.clone();
                     let is_ssh = term.ssh_profile.is_some();
-                    let _ = term.mneme_editor.expand_or_advance_snippet(&snippets, is_ssh);
+                    if let Some(snippet) = snippets.iter().find(|s| {
+                        s.trigger == trigger || s.trigger.trim_start_matches(':') == clean_trig
+                    }) {
+                        term.mneme_editor.set_text("");
+                        term.mneme_editor.expand_snippet(snippet, None);
+                    } else {
+                        term.mneme_editor.set_text(&format!(":{clean_trig}"));
+                        let _ = term.mneme_editor.expand_or_advance_snippet(&snippets, is_ssh);
+                    }
                     cx.notify();
                 });
             }
@@ -8299,11 +8329,7 @@ impl Render for WorkspaceView {
                 .read(cx)
                 .focus_handle
                 .clone();
-            if !active_term_handle.is_focused(window)
-                && !self.palette_focus_handle.is_focused(window)
-                && !self.ssh_focus_handle.is_focused(window)
-                && !self.settings_view.read(cx).focus_handle.is_focused(window)
-            {
+            if !active_term_handle.is_focused(window) {
                 window.focus(&active_term_handle);
             }
         }
@@ -8393,11 +8419,15 @@ impl Render for WorkspaceView {
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .cursor(gpui::CursorStyle::PointingHand)
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
                     .on_click(cx.listener(|view, _event, window, cx| {
                         if view.ssh_state.open {
                             view.ssh_state.open = false;
                         }
                         view.add_tab(window, cx);
+                        cx.stop_propagation();
                     }))
                     .child("+ >_ Terminal"),
             )
@@ -8414,13 +8444,17 @@ impl Render for WorkspaceView {
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .cursor(gpui::CursorStyle::PointingHand)
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
                     .on_click(cx.listener(|view, _event, window, cx| {
                         view.toggle_ssh_manager(window, cx);
+                        cx.stop_propagation();
                     }))
                     .child("🖧 Host"),
             );
 
-        // Tier 1 Center: Split-Pane & Geometric Frame Control Capsule [ −  ·  ∏  ·  ⊞  ·  ◈ ]
+        // Tier 1 Center: Window & Layout Control Capsule [ −  ·  ∏  ·  □  ·  ◈  ·  ✕ ]
         let header_center = div()
             .px_2p5()
             .py_0p5()
@@ -8432,9 +8466,12 @@ impl Render for WorkspaceView {
             .flex_row()
             .items_center()
             .gap_2()
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
             .child(
                 div()
-                    .id("capsule-split-horiz")
+                    .id("capsule-window-minimize")
                     .px_1p5()
                     .py_0p5()
                     .rounded_sm()
@@ -8442,8 +8479,9 @@ impl Render for WorkspaceView {
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgb(0xc8d7e6))
                     .cursor(gpui::CursorStyle::PointingHand)
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.split_active_pane(SplitDirection::Horizontal, window, cx);
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.minimize_window();
+                        cx.stop_propagation();
                     }))
                     .child("−"),
             )
@@ -8456,26 +8494,28 @@ impl Render for WorkspaceView {
                     .rounded_sm()
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(0xc8d7e6))
+                    .text_color(rgb(0x38bdf8))
                     .cursor(gpui::CursorStyle::PointingHand)
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.split_active_pane(SplitDirection::Vertical, window, cx);
+                        cx.stop_propagation();
                     }))
                     .child("∏"),
             )
             .child(div().text_xs().text_color(rgb(0x2d3c55)).child("·"))
             .child(
                 div()
-                    .id("capsule-cycle-pane")
+                    .id("capsule-window-maximize")
                     .px_1p5()
                     .py_0p5()
                     .rounded_sm()
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(rgb(0xf56e82))
+                    .text_color(rgb(0xc8d7e6))
                     .cursor(gpui::CursorStyle::PointingHand)
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.focus_next_pane(window, cx);
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.zoom_window();
+                        cx.stop_propagation();
                     }))
                     .child("□"),
             )
@@ -8501,8 +8541,26 @@ impl Render for WorkspaceView {
                             cx.notify();
                         });
                         cx.notify();
+                        cx.stop_propagation();
                     }))
                     .child("◈"),
+            )
+            .child(div().text_xs().text_color(rgb(0x2d3c55)).child("·"))
+            .child(
+                div()
+                    .id("capsule-window-close")
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(0xf43f5e))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.quit();
+                        cx.stop_propagation();
+                    }))
+                    .child("✕"),
             );
 
         // Tier 1 Right: Palette, HUD, Prism Settings
@@ -8523,8 +8581,12 @@ impl Render for WorkspaceView {
                     .text_xs()
                     .text_color(rgb(0x94a3b8))
                     .cursor(gpui::CursorStyle::PointingHand)
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.toggle_command_palette(window, cx);
+                        cx.stop_propagation();
                     }))
                     .child("⌘K"),
             )
@@ -8553,8 +8615,12 @@ impl Render for WorkspaceView {
                     .text_xs()
                     .text_color(rgb(0x94a3b8))
                     .cursor(gpui::CursorStyle::PointingHand)
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.toggle_settings_modal(window, cx);
+                        cx.stop_propagation();
                     }))
                     .child("⚙"),
             );
@@ -8597,6 +8663,9 @@ impl Render for WorkspaceView {
                     .flex_row()
                     .gap_2()
                     .items_center()
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    }))
                     .child(
                         div()
                             .id(("select", i))
@@ -8708,17 +8777,27 @@ impl Render for WorkspaceView {
             // Tier 1 Header Bar
             .child(
                 div()
+                    .id("app-titlebar-header")
                     .flex()
                     .flex_row()
                     .justify_between()
                     .items_center()
                     .w_full()
-                    .pl_20()
-                    .pr_4()
+                    .px_3()
                     .py_1p5()
                     .bg(theme.tab_inactive_bg)
                     .border_b_1()
                     .border_color(theme.border_inactive)
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_view, event: &gpui::MouseDownEvent, window, _cx| {
+                            if event.click_count == 2 {
+                                window.zoom_window();
+                            } else {
+                                window.start_window_move();
+                            }
+                        }),
+                    )
                     .child(header_left)
                     .child(header_center)
                     .child(header_right),
@@ -8726,6 +8805,7 @@ impl Render for WorkspaceView {
             // Tier 2 Shell Tab Strip (well #1, well #2, ...)
             .child(
                 div()
+                    .id("app-shell-tab-strip")
                     .w_full()
                     .px_3()
                     .pt_1()
@@ -8737,6 +8817,16 @@ impl Render for WorkspaceView {
                     .flex_row()
                     .items_center()
                     .gap_1p5()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|_view, event: &gpui::MouseDownEvent, window, _cx| {
+                            if event.click_count == 2 {
+                                window.zoom_window();
+                            } else {
+                                window.start_window_move();
+                            }
+                        }),
+                    )
                     .children(tab_strip_items),
             )
             // Main Terminal Viewport + Optional ATLAS Geometric Lattice Border
@@ -9076,6 +9166,7 @@ fn main() {
         let settings_model = cx.new(|_| TerminalSettings::new());
         cx.bind_keys([
             KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-k", OpenCommandPalette, None),
             KeyBinding::new("cmd-shift-p", OpenCommandPalette, None),
             KeyBinding::new("cmd-t", NewTab, None),
             KeyBinding::new("ctrl-r", OpenSnippetPicker, None),
@@ -9124,8 +9215,11 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some("🏛️ Theia's Prism — Operator Control Center".into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(Point::new(px(12.0), px(12.0))),
+                    traffic_light_position: Some(Point::new(px(-9999.0), px(-9999.0))),
                 }),
+                is_movable: true,
+                is_resizable: true,
+                is_minimizable: true,
                 ..Default::default()
             };
 
@@ -9145,8 +9239,11 @@ fn main() {
             titlebar: Some(TitlebarOptions {
                 title: Some("Well — Theia's Prism Terminal".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(Point::new(px(12.0), px(12.0))),
+                traffic_light_position: Some(Point::new(px(-9999.0), px(-9999.0))),
             }),
+            is_movable: true,
+            is_resizable: true,
+            is_minimizable: true,
             ..Default::default()
         };
 

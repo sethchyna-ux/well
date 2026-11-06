@@ -67,6 +67,21 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSMenu", "NSMenuItem"] }
 objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "hermes_bench"
+harness = false
+
+[[bench]]
+name = "astraea_bench"
+harness = false
+
+[[bench]]
+name = "metis_bench"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"

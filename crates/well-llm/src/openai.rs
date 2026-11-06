@@ -146,9 +146,20 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept connection");
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).expect("read request");
-            let req_str = String::from_utf8_lossy(&buf[..n]);
+            let mut data = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut chunk).expect("read request");
+                if n == 0 {
+                    break;
+                }
+                data.extend_from_slice(&chunk[..n]);
+                let req_so_far = String::from_utf8_lossy(&data);
+                if req_so_far.contains("\"model\":\"gpt-4o-mini\"") {
+                    break;
+                }
+            }
+            let req_str = String::from_utf8_lossy(&data);
             assert!(req_str.contains("POST /v1/chat/completions"));
             assert!(req_str.contains("Authorization: Bearer sk-test-openai-key"));
             assert!(req_str.contains("\"model\":\"gpt-4o-mini\""));
@@ -160,6 +171,7 @@ mod tests {
                 body
             );
             stream.write_all(resp.as_bytes()).expect("write response");
+            stream.flush().expect("flush response");
         });
 
         let client = OpenAIClient::new("sk-test-openai-key")

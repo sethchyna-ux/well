@@ -52,7 +52,7 @@ pub const WELL_ACTIONS: &[ActionDescriptor] = &[
         label: "Command Palette: Show All Actions...",
         category: ActionCategory::Settings,
         description: "Fuzzy-searchable catalog of all Well functions and shortcuts",
-        default_keybind: "⇧⌘P",
+        default_keybind: "⌘K",
         key_context: "Workspace",
     },
     ActionDescriptor {
@@ -124,7 +124,7 @@ pub const WELL_ACTIONS: &[ActionDescriptor] = &[
         label: "Pythia AI: Command Synthesis & Image Studio",
         category: ActionCategory::PythiaAi,
         description: "Toggle Pythia Copilot (<2ms Metis cache, LLM & Kitty Image Studio)",
-        default_keybind: "⌘K",
+        default_keybind: "^⇧K",
         key_context: "Workspace",
     },
     ActionDescriptor {

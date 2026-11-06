@@ -155,13 +155,11 @@ impl TerminalSettings {
     }
 
     pub fn new() -> Self {
-        let mut font_family = "Menlo".into();
+        let mut font_family = "OpenDyslexic Nerd Font".into();
         let mut font_size = 14.0;
         if let Ok(path) = well_config::ConfigStore::default_path() {
             if let Ok((_, prefs)) = well_config::ConfigStore::load(path) {
-                if !prefs.appearance.font_family.is_empty()
-                    && prefs.appearance.font_family != "OpenDyslexic Nerd Font"
-                {
+                if !prefs.appearance.font_family.is_empty() {
                     font_family = prefs.appearance.font_family;
                 }
                 font_size = prefs.appearance.font_size;
@@ -989,7 +987,13 @@ impl Render for SettingsView {
                 let sm_cursor_color = settings_entity.clone();
                 let sm_line_numbers = settings_entity.clone();
 
-                let font_families = ["Menlo", "SF Mono", "JetBrains Mono", "Monaco"];
+                let font_families = [
+                    "OpenDyslexic Nerd Font",
+                    "Menlo",
+                    "SF Mono",
+                    "JetBrains Mono",
+                    "Monaco",
+                ];
                 let mut font_pills = div().flex().flex_row().items_center().gap_1p5();
                 for (f_idx, f_name) in font_families.into_iter().enumerate() {
                     let is_font_sel = font_family == f_name;

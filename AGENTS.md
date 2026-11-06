@@ -74,6 +74,13 @@ The latest release-trust work added:
   - `docs/RELEASE_SIGNING.md`
   - `docs/HOMEBREW.md`
   - `docs/RELEASE_QUALIFICATION.md`
+- GPUI operator UX & focus restoration:
+  - Command Palette is bound to `⌘K` globally; Pythia copilot toggled with `^⇧K`.
+  - Mneme inline editor tab-stops expand parameter placeholders directly without trigger syntax duplication (`::klogs`), and `Enter` / `Shift+Enter` flush `\r` to execute in the terminal PTY.
+  - Modal dismissal explicitly returns focus to the active terminal view.
+- Arch Linux (`x86_64`) release binary support:
+  - Verified native release compilation on Arch Linux / EndeavourOS (`7.2.9-zen`).
+  - Standalone 23 MiB stripped ELF binary available at `dist/linux/well-gpui` supporting headless `--version`, `--help`, and `--diagnose`.
 
 The latest known package verification pass rebuilt `dist/Well.app`, generated
 the arm64 ZIP/checksum/Cask, and passed clean-state diagnostics plus GUI smoke.
