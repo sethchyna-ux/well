@@ -169,56 +169,58 @@ impl TerminalSettings {
         }
 
         let op_path = Self::operator_settings_path();
-        if let Ok(raw) = std::fs::read_to_string(&op_path) {
-            if let Ok(persisted) = serde_json::from_str::<PersistedOperatorSettings>(&raw) {
-                let custom_theme = persisted
-                    .custom_theme
-                    .unwrap_or_else(|| CustomThemeHex::from_theme(&Theme::get(persisted.theme_id)));
-                let theme = if persisted.theme_id == 5 {
-                    custom_theme.to_theme()
-                } else {
-                    Theme::get(persisted.theme_id)
-                };
-                return Self {
-                    font_family: persisted.font_family,
-                    font_size: persisted.font_size,
-                    theme,
-                    custom_theme,
-                    per_host_ssh_theme: persisted.per_host_ssh_theme,
-                    kitty_graphics_enabled: persisted.kitty_graphics_enabled,
-                    geometric_border: persisted.geometric_border,
-                    cursor_shape: persisted.cursor_shape,
-                    cursor_blink: persisted.cursor_blink,
-                    cursor_blink_ms: persisted.cursor_blink_ms.clamp(200, 1200),
-                    cursor_use_accent: persisted.cursor_use_accent,
-                    show_line_numbers: persisted.show_line_numbers,
-                    snippets: if persisted.snippets.is_empty() {
-                        WellSnippet::builtin_catalog()
+        if !cfg!(test) {
+            if let Ok(raw) = std::fs::read_to_string(&op_path) {
+                if let Ok(persisted) = serde_json::from_str::<PersistedOperatorSettings>(&raw) {
+                    let custom_theme = persisted
+                        .custom_theme
+                        .unwrap_or_else(|| CustomThemeHex::from_theme(&Theme::get(persisted.theme_id)));
+                    let theme = if persisted.theme_id == 5 {
+                        custom_theme.to_theme()
                     } else {
-                        persisted.snippets
-                    },
-                    ssh_profiles: persisted.ssh_profiles,
-                    ssh_tunnels: if persisted.ssh_tunnels.is_empty() {
-                        SshTunnelEntry::default_catalog()
-                    } else {
-                        persisted.ssh_tunnels
-                    },
-                    custom_bindings: if persisted.custom_bindings.len() == WELL_ACTIONS.len() {
-                        persisted.custom_bindings
-                    } else {
-                        Self::default_bindings()
-                    },
-                    gate_rm_root: persisted.gate_rm_root,
-                    gate_kubectl_delete: persisted.gate_kubectl_delete,
-                    gate_git_force_push: persisted.gate_git_force_push,
-                    gate_terraform_destroy: persisted.gate_terraform_destroy,
-                    metis_offline_cache_priority: persisted.metis_offline_cache_priority,
-                    last_saved_status: Some(format!("Loaded from {}", op_path.display())),
-                    modal_open: false,
-                    settings_open: false,
-                    requested_hub_switch: None,
-                    requested_snippet_insert: None,
-                };
+                        Theme::get(persisted.theme_id)
+                    };
+                    return Self {
+                        font_family: persisted.font_family,
+                        font_size: persisted.font_size,
+                        theme,
+                        custom_theme,
+                        per_host_ssh_theme: persisted.per_host_ssh_theme,
+                        kitty_graphics_enabled: persisted.kitty_graphics_enabled,
+                        geometric_border: persisted.geometric_border,
+                        cursor_shape: persisted.cursor_shape,
+                        cursor_blink: persisted.cursor_blink,
+                        cursor_blink_ms: persisted.cursor_blink_ms.clamp(200, 1200),
+                        cursor_use_accent: persisted.cursor_use_accent,
+                        show_line_numbers: persisted.show_line_numbers,
+                        snippets: if persisted.snippets.is_empty() {
+                            WellSnippet::builtin_catalog()
+                        } else {
+                            persisted.snippets
+                        },
+                        ssh_profiles: persisted.ssh_profiles,
+                        ssh_tunnels: if persisted.ssh_tunnels.is_empty() {
+                            SshTunnelEntry::default_catalog()
+                        } else {
+                            persisted.ssh_tunnels
+                        },
+                        custom_bindings: if persisted.custom_bindings.len() == WELL_ACTIONS.len() {
+                            persisted.custom_bindings
+                        } else {
+                            Self::default_bindings()
+                        },
+                        gate_rm_root: persisted.gate_rm_root,
+                        gate_kubectl_delete: persisted.gate_kubectl_delete,
+                        gate_git_force_push: persisted.gate_git_force_push,
+                        gate_terraform_destroy: persisted.gate_terraform_destroy,
+                        metis_offline_cache_priority: persisted.metis_offline_cache_priority,
+                        last_saved_status: Some(format!("Loaded from {}", op_path.display())),
+                        modal_open: false,
+                        settings_open: false,
+                        requested_hub_switch: None,
+                        requested_snippet_insert: None,
+                    };
+                }
             }
         }
 
@@ -230,12 +232,12 @@ impl TerminalSettings {
             .collect();
         if ssh_profiles.is_empty() {
             ssh_profiles.push(TheiaSshProfile::from_host(SshHostConfig {
-                name: "prod-k8s-cluster".into(),
-                hostname: "10.240.0.10".into(),
-                user: Some("ops".into()),
+                name: "Ended".into(),
+                hostname: "192.168.1.12".into(),
+                user: Some("chyna".into()),
                 port: 22,
                 identity_file: Some(PathBuf::from("~/.ssh/id_ed25519")),
-                proxy_jump: Some("bastion.internal".into()),
+                proxy_jump: None,
                 forward_agent: true,
                 options: Default::default(),
             }));

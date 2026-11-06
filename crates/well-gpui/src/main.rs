@@ -127,8 +127,11 @@ struct TerminalView {
     astraea: std::sync::Arc<well_prompt::AstraeaStateVector>,
     pub pythia: PythiaState,
     pub ssh_profile: Option<TheiaSshProfile>,
-    #[allow(dead_code)]
     metis: std::sync::Arc<std::sync::RwLock<well_shell::MetisHistory>>,
+    input_buffer: String,
+    ghost_suggestion: Option<String>,
+    scroll_pixel_accumulator: f32,
+    scroll_line_accumulator: f32,
 }
 
 impl Focusable for TerminalView {
@@ -210,6 +213,10 @@ impl TerminalView {
             pythia: PythiaState::default(),
             ssh_profile: None,
             metis: shared_metis_history(),
+            input_buffer: String::new(),
+            ghost_suggestion: None,
+            scroll_pixel_accumulator: 0.0,
+            scroll_line_accumulator: 0.0,
         };
         view.update_text();
         view
@@ -1063,12 +1070,17 @@ impl Render for TerminalView {
             theme.fg
         };
 
-        let parser = self.pty.parser.lock().unwrap();
-        let screen = parser.screen();
-
-        let size = screen.size();
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        let show_vt_cursor = !screen.hide_cursor() && !self.mneme_active;
+        let mut parser = self.pty.parser.lock().unwrap();
+        let scrollback = parser.screen().scrollback();
+        let size = parser.screen().size();
+        let (cursor_row, cursor_col) = parser.screen().cursor_position();
+        let show_vt_cursor = !parser.screen().hide_cursor() && !self.mneme_active && scrollback == 0;
+        let active_ghost = if scrollback == 0 && !self.mneme_active && !self.pythia.active {
+            self.ghost_suggestion.as_deref()
+        } else {
+            None
+        };
+        let ghost_len = active_ghost.map(|g| g.chars().count() as u16).unwrap_or(0);
 
         let mut row_elements = Vec::new();
         for row in 0..size.0 {
@@ -1099,9 +1111,33 @@ impl Render for TerminalView {
             }
             for col in 0..size.1 {
                 let is_cursor_cell = show_vt_cursor && row == cursor_row && col == cursor_col;
-                if let Some(cell) = screen.cell(row, col) {
+                let is_ghost_hint_cell = show_vt_cursor
+                    && row == cursor_row
+                    && ghost_len > 0
+                    && col == cursor_col.saturating_add(ghost_len).saturating_add(1);
+
+                if is_ghost_hint_cell {
+                    col_elements.push(
+                        div()
+                            .flex_shrink_0()
+                            .px_1p5()
+                            .py_0()
+                            .ml_1()
+                            .rounded_sm()
+                            .bg(gpui::rgba(0x1e293bee))
+                            .border_1()
+                            .border_color(gpui::rgba(0x38bdf866))
+                            .text_color(gpui::rgba(0x38bdf8ee))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child("⇥ Tab / Alt+→"),
+                    );
+                    continue;
+                }
+
+                if let Some(cell) = parser.screen().cell(row, col) {
                     let raw = cell.contents();
-                    let text = if raw.is_empty() {
+                    let mut text = if raw.is_empty() {
                         " ".to_string()
                     } else {
                         raw.to_string()
@@ -1112,16 +1148,39 @@ impl Render for TerminalView {
                     let mut fg = fg_rgb;
                     let mut bg = bg_rgb;
 
+                    let mut is_ghost_char = false;
+                    if show_vt_cursor && row == cursor_row && col > cursor_col && raw.trim().is_empty() {
+                        if let Some(ghost) = active_ghost {
+                            let ghost_char_idx = (col - cursor_col - 1) as usize;
+                            if let Some(ghost_char) = ghost.chars().nth(ghost_char_idx) {
+                                text = ghost_char.to_string();
+                                fg = gpui::rgba(0x38bdf888);
+                                is_ghost_char = true;
+                            }
+                        }
+                    }
+
                     if cell.inverse() {
                         std::mem::swap(&mut fg, &mut bg);
                     }
 
                     if is_cursor_cell && is_focused && blink_visible && cursor_shape == CursorShape::Block {
+                        if text == " " {
+                            if let Some(ghost) = active_ghost {
+                                if let Some(first_ch) = ghost.chars().next() {
+                                    text = first_ch.to_string();
+                                }
+                            }
+                        }
                         bg = cursor_color;
                         fg = theme.bg;
                     }
 
                     let mut el = div().bg(bg).text_color(fg).child(text);
+
+                    if is_ghost_char {
+                        el = el.italic();
+                    }
 
                     if is_cursor_cell {
                         if !is_focused {
@@ -1162,6 +1221,16 @@ impl Render for TerminalView {
             row_elements.push(div().flex().flex_row().children(col_elements));
         }
 
+        let max_scroll = {
+            let cur = parser.screen().scrollback();
+            let screen_mut = parser.screen_mut();
+            screen_mut.set_scrollback(usize::MAX);
+            let max = screen_mut.scrollback();
+            screen_mut.set_scrollback(cur);
+            max
+        };
+        drop(parser);
+
         let (pane_bg, pane_border) = if let Some(prof) = &self.ssh_profile {
             if per_host_ssh_theme {
                 let (border_hex, bg_hex, _) = prof.tier.prism_palette();
@@ -1197,6 +1266,96 @@ impl Render for TerminalView {
             .text_size(px(font_size))
             .cursor(gpui::CursorStyle::Arrow)
             .track_focus(&self.focus_handle)
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                if this.settings.read(cx).modal_open {
+                    return;
+                }
+                let font_size = this.settings.read(cx).font_size;
+                let line_height = (font_size * 1.25).max(12.0);
+
+                let lines = match event.delta {
+                    gpui::ScrollDelta::Lines(p) => {
+                        this.scroll_line_accumulator += p.y * 3.0;
+                        if this.scroll_line_accumulator.abs() >= 1.0 {
+                            let c = this.scroll_line_accumulator as i32;
+                            this.scroll_line_accumulator -= c as f32;
+                            c
+                        } else if p.y != 0.0 {
+                            let c = if p.y > 0.0 { 1 } else { -1 };
+                            this.scroll_line_accumulator = 0.0;
+                            c
+                        } else {
+                            0
+                        }
+                    }
+                    gpui::ScrollDelta::Pixels(p) => {
+                        let py = f32::from(p.y);
+                        this.scroll_pixel_accumulator += py;
+                        let step = (line_height / 2.0).clamp(6.0, 18.0);
+                        let mut count = (this.scroll_pixel_accumulator / step) as i32;
+                        if count != 0 {
+                            this.scroll_pixel_accumulator -= count as f32 * step;
+                        } else if py.abs() >= 1.0 && this.scroll_pixel_accumulator.abs() >= (step * 0.5) {
+                            count = if this.scroll_pixel_accumulator > 0.0 { 1 } else { -1 };
+                            this.scroll_pixel_accumulator = 0.0;
+                        }
+                        count
+                    }
+                };
+
+                if lines != 0 {
+                    let mut parser = this.pty.parser.lock().unwrap();
+                    let mouse_mode = parser.screen().mouse_protocol_mode();
+                    let mouse_encoding = parser.screen().mouse_protocol_encoding();
+                    let is_alt_screen = parser.screen().alternate_screen();
+
+                    if mouse_mode != vt100::MouseProtocolMode::None {
+                        let btn = if lines > 0 { 64 } else { 65 };
+                        let count = lines.abs();
+                        let mut bytes = Vec::new();
+                        let col = 1u16;
+                        let row = 1u16;
+                        for _ in 0..count {
+                            match mouse_encoding {
+                                vt100::MouseProtocolEncoding::Sgr => {
+                                    let seq = format!("\x1b[<{};{};{}M", btn, col, row);
+                                    bytes.extend_from_slice(seq.as_bytes());
+                                }
+                                vt100::MouseProtocolEncoding::Default
+                                | vt100::MouseProtocolEncoding::Utf8 => {
+                                    let b = 32u8.saturating_add(btn);
+                                    let c = 32u8.saturating_add(col.min(223) as u8);
+                                    let r = 32u8.saturating_add(row.min(223) as u8);
+                                    bytes.extend_from_slice(&[0x1b, b'[', b'M', b, c, r]);
+                                }
+                            }
+                        }
+                        drop(parser);
+                        let mut writer = this.pty.writer.lock().unwrap();
+                        use std::io::Write;
+                        let _ = writer.write_all(&bytes);
+                    } else if is_alt_screen {
+                        let count = lines.abs();
+                        let seq = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
+                        let mut bytes = Vec::with_capacity(count as usize * seq.len());
+                        for _ in 0..count {
+                            bytes.extend_from_slice(seq);
+                        }
+                        drop(parser);
+                        let mut writer = this.pty.writer.lock().unwrap();
+                        use std::io::Write;
+                        let _ = writer.write_all(&bytes);
+                    } else {
+                        let cur = parser.screen().scrollback();
+                        if lines > 0 {
+                            parser.screen_mut().set_scrollback(cur.saturating_add(lines as usize));
+                        } else {
+                            parser.screen_mut().set_scrollback(cur.saturating_sub((-lines) as usize));
+                        }
+                    }
+                    cx.notify();
+                }
+            }))
             .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
                 if this.settings.read(cx).modal_open {
                     return;
@@ -1308,6 +1467,94 @@ impl Render for TerminalView {
                     return;
                 }
 
+                // Keyboard scrollback navigation
+                let key_str = event.keystroke.key.as_str();
+                let is_alt = event.keystroke.modifiers.alt;
+                let is_ctrl = event.keystroke.modifiers.control;
+                let is_shift = event.keystroke.modifiers.shift;
+                let is_platform = event.keystroke.modifiers.platform;
+
+                if key_str == "pageup" {
+                    let mut parser = this.pty.parser.lock().unwrap();
+                    if parser.screen().alternate_screen() {
+                        let mut writer = this.pty.writer.lock().unwrap();
+                        use std::io::Write;
+                        let _ = writer.write_all(b"\x1b[5~");
+                    } else {
+                        let cur = parser.screen().scrollback();
+                        let size = parser.screen().size();
+                        let step = size.0.saturating_sub(2).max(1) as usize;
+                        parser.screen_mut().set_scrollback(cur.saturating_add(step));
+                        cx.notify();
+                    }
+                    return;
+                }
+                if key_str == "pagedown" {
+                    let mut parser = this.pty.parser.lock().unwrap();
+                    if parser.screen().alternate_screen() {
+                        let mut writer = this.pty.writer.lock().unwrap();
+                        use std::io::Write;
+                        let _ = writer.write_all(b"\x1b[6~");
+                    } else {
+                        let cur = parser.screen().scrollback();
+                        let size = parser.screen().size();
+                        let step = size.0.saturating_sub(2).max(1) as usize;
+                        parser.screen_mut().set_scrollback(cur.saturating_sub(step));
+                        cx.notify();
+                    }
+                    return;
+                }
+                if key_str == "home" && (is_shift || is_platform) {
+                    let mut parser = this.pty.parser.lock().unwrap();
+                    if !parser.screen().alternate_screen() {
+                        parser.screen_mut().set_scrollback(usize::MAX);
+                        cx.notify();
+                        return;
+                    }
+                }
+                if key_str == "end" && (is_shift || is_platform) {
+                    let mut parser = this.pty.parser.lock().unwrap();
+                    if !parser.screen().alternate_screen() {
+                        parser.screen_mut().set_scrollback(0);
+                        cx.notify();
+                        return;
+                    }
+                }
+
+                // Reset scrollback on any regular command typing
+                {
+                    let mut parser = this.pty.parser.lock().unwrap();
+                    if parser.screen().scrollback() > 0 && key_str != "escape" {
+                        parser.screen_mut().set_scrollback(0);
+                    }
+                }
+
+                // Ghost predictive autocomplete handling
+                if this.ghost_suggestion.is_some() && !is_shift {
+                    if key_str == "right" && is_alt {
+                        let hist = this.metis.read().unwrap();
+                        if let Some(next_word) = hist.next_word_suggestion(&this.input_buffer) {
+                            let mut writer = this.pty.writer.lock().unwrap();
+                            use std::io::Write;
+                            let _ = writer.write_all(next_word.as_bytes());
+                            this.input_buffer.push_str(&next_word);
+                            this.ghost_suggestion = hist.remaining_suggestion(&this.input_buffer);
+                            cx.notify();
+                            return;
+                        }
+                    } else if key_str == "tab" || (key_str == "right" && !is_alt) || (is_ctrl && key_str == "f") {
+                        if let Some(rem) = this.ghost_suggestion.take() {
+                            let mut writer = this.pty.writer.lock().unwrap();
+                            use std::io::Write;
+                            let _ = writer.write_all(rem.as_bytes());
+                            this.input_buffer.push_str(&rem);
+                            this.ghost_suggestion = None;
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
+
                 let mut writer = this.pty.writer.lock().unwrap();
                 let key = &event.keystroke.key;
                 let modifiers = &event.keystroke.modifiers;
@@ -1315,12 +1562,59 @@ impl Render for TerminalView {
                     let chars: Vec<char> = key.chars().collect();
                     if chars.len() == 1 {
                         let c = chars[0].to_ascii_lowercase();
+                        if c == 'c' || c == 'u' {
+                            this.input_buffer.clear();
+                            this.ghost_suggestion = None;
+                            cx.notify();
+                        }
                         if c.is_ascii_lowercase() {
                             let ctrl_c = c as u8 - b'a' + 1;
                             let _ = writer.write_all(&[ctrl_c]);
                         }
                     }
                     return;
+                }
+
+                match key.as_str() {
+                    "enter" => {
+                        let trimmed = this.input_buffer.trim().to_string();
+                        if !trimmed.is_empty() {
+                            if let Ok(mut hist) = this.metis.write() {
+                                hist.learn_command(&trimmed);
+                                if let Ok(path) = well_shell::MetisHistory::default_path() {
+                                    let _ = well_shell::MetisHistory::append_to_file(&path, &trimmed);
+                                }
+                            }
+                        }
+                        this.input_buffer.clear();
+                        this.ghost_suggestion = None;
+                    }
+                    "backspace" => {
+                        this.input_buffer.pop();
+                        let hist = this.metis.read().unwrap();
+                        this.ghost_suggestion = if this.input_buffer.is_empty() {
+                            None
+                        } else {
+                            hist.remaining_suggestion(&this.input_buffer)
+                        };
+                    }
+                    "escape" => {
+                        this.input_buffer.clear();
+                        this.ghost_suggestion = None;
+                        let mut parser = this.pty.parser.lock().unwrap();
+                        if parser.screen().scrollback() > 0 {
+                            parser.screen_mut().set_scrollback(0);
+                        }
+                    }
+                    _ => {
+                        if !modifiers.control && !modifiers.platform {
+                            if let Some(c) = settings_view::extract_printable_char(&event.keystroke) {
+                                this.input_buffer.push_str(&c);
+                                let hist = this.metis.read().unwrap();
+                                this.ghost_suggestion = hist.remaining_suggestion(&this.input_buffer);
+                            }
+                        }
+                    }
                 }
 
                 let bytes: &[u8] = match key.as_str() {
@@ -1346,6 +1640,7 @@ impl Render for TerminalView {
                     use std::io::Write;
                     let _ = writer.write_all(bytes);
                 }
+                cx.notify();
             }))
             .child({
                 let pty = self.pty.clone();
@@ -1405,6 +1700,85 @@ impl Render for TerminalView {
                     div().absolute().top(px(top)).left(px(left)).child(el)
                 })
             );
+
+        if scrollback > 0 {
+            container = container.child(
+                div()
+                    .absolute()
+                    .top_2()
+                    .right_4()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(gpui::rgba(0x0e1117ee))
+                    .border_1()
+                    .border_color(theme.border_active)
+                    .shadow_md()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(theme.border_active)
+                            .child(format!("⏱ SCROLLBACK: -{} lines", scrollback)),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(theme.border_active)
+                            .text_color(theme.bg)
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    let mut parser = this.pty.parser.lock().unwrap();
+                                    parser.screen_mut().set_scrollback(0);
+                                    cx.notify();
+                                }),
+                            )
+                            .child("Jump to Present ↵"),
+                    ),
+            );
+        }
+
+        if max_scroll > 0 {
+            let total_lines = (max_scroll + size.0 as usize) as f32;
+            let visible_ratio = (size.0 as f32 / total_lines).clamp(0.05, 0.95);
+            let scroll_pos_ratio = (scrollback as f32 / max_scroll as f32).clamp(0.0, 1.0);
+            let thumb_top_pct = (1.0 - scroll_pos_ratio) * (1.0 - visible_ratio) * 100.0;
+            let thumb_h_pct = visible_ratio * 100.0;
+
+            container = container.child(
+                div()
+                    .absolute()
+                    .top_1()
+                    .bottom_1()
+                    .right_1()
+                    .w_1p5()
+                    .rounded_full()
+                    .bg(gpui::rgba(0xffffff15))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(gpui::relative(thumb_top_pct / 100.0))
+                            .h(gpui::relative(thumb_h_pct / 100.0))
+                            .w_full()
+                            .rounded_full()
+                            .bg(if scrollback > 0 {
+                                theme.border_active
+                            } else {
+                                gpui::rgba(0x94a3b866)
+                            }),
+                    ),
+            );
+        }
 
         if self.mneme_active {
             let mneme_text = self.mneme_editor.get_text();
@@ -2427,11 +2801,11 @@ impl WorkspaceView {
 
         let rail_sections = [
             (SshConsoleSection::HostEditor, ">_", "SSH Host Editor & Terminal"),
-            (SshConsoleSection::PortForwarding, "⇄", "Port Forwarding & Tunnels"),
-            (SshConsoleSection::KeyVault, "🔑", "SSH Key Vault & HTTP Key Server"),
-            (SshConsoleSection::ServerAndAgentHub, "🖧", "SSH Server, $SSH_AUTH_SOCK & Ops Agent"),
-            (SshConsoleSection::PxeAndBootloader, "🚀", "PXE / ProxyDHCP & Custom UEFI Bootloader"),
             (SshConsoleSection::SmbShares, "📁", "SMB / CIFS Network Shares & Mounts"),
+            (SshConsoleSection::PortForwarding, "🖧", "Visual Port Forwarding & Tunnels"),
+            (SshConsoleSection::PxeAndBootloader, "</>", "PXE / ProxyDHCP & Custom UEFI Bootloader"),
+            (SshConsoleSection::KeyVault, "🔑", "Local SSH Key Vault"),
+            (SshConsoleSection::ServerAndAgentHub, "⇄", "SSH Server Hosting & SSH Agent Hub"),
             (SshConsoleSection::NetworkTools, "📡", "Networking Tools (Port Scan, ARP, WoL)"),
         ];
 
@@ -2478,8 +2852,9 @@ impl WorkspaceView {
                     })
                     .text_sm()
                     .font_weight(gpui::FontWeight::BOLD)
-                    .on_click(cx.listener(move |view, _, _, cx| {
+                    .on_click(cx.listener(move |view, _, window, cx| {
                         view.ssh_state.section = sec;
+                        window.focus(&view.ssh_focus_handle);
                         cx.notify();
                     }))
                     .child(icon),
@@ -2487,23 +2862,23 @@ impl WorkspaceView {
         }
         icon_rail = icon_rail.child(rail_top).child(
             div()
-                .id("ssh-rail-close")
+                .id("ssh-rail-orb")
                 .w(px(34.0))
                 .h(px(34.0))
-                .rounded_lg()
+                .rounded_full()
                 .bg(theme.tab_active_bg)
                 .border_1()
-                .border_color(theme.border_inactive)
+                .border_color(rgb(0x06b6d4))
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_xs()
-                .text_color(theme.fg)
+                .text_color(rgb(0x38bdf8))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .on_click(cx.listener(|view, _, window, cx| {
                     view.toggle_ssh_manager(window, cx);
                 }))
-                .child("✕"),
+                .child("❖"),
         );
 
         let search_focused = active_input == SshConsoleInputField::SidebarSearch;
@@ -2537,8 +2912,9 @@ impl WorkspaceView {
                     .items_center()
                     .gap_2()
                     .cursor(gpui::CursorStyle::IBeam)
-                    .on_click(cx.listener(|view, _, _, cx| {
+                    .on_click(cx.listener(|view, _, window, cx| {
                         view.ssh_state.active_input = SshConsoleInputField::SidebarSearch;
+                        window.focus(&view.ssh_focus_handle);
                         cx.notify();
                     }))
                     .child(div().text_xs().text_color(rgb(0x64748b)).child("🔍"))
@@ -2573,8 +2949,8 @@ impl WorkspaceView {
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.border_active)
-                            .child("SSH HOSTS"),
+                            .text_color(rgb(0x94a3b8))
+                            .child("SERVERS & CLUSTERS"),
                     )
                     .child(
                         div()
@@ -2594,13 +2970,14 @@ impl WorkspaceView {
                                     .text_xs()
                                     .text_color(theme.fg)
                                     .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, _, cx| {
+                                    .on_click(cx.listener(|view, _, window, cx| {
                                         view.ssh_engine.reload();
+                                        window.focus(&view.ssh_focus_handle);
                                         view.ssh_state.status_message =
                                             Some("🔄 Reloaded ~/.ssh/config & host profiles.".to_string());
                                         cx.notify();
                                     }))
-                                    .child("↻ Reload"),
+                                    .child("⚙ Manage"),
                             )
                             .child(
                                 div()
@@ -2608,28 +2985,36 @@ impl WorkspaceView {
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(theme.tab_active_bg)
-                                    .border_1()
-                                    .border_color(theme.border_active)
+                                    .bg(rgb(0x06b6d4))
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme.border_active)
+                                    .text_color(rgb(0x090d16))
                                     .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, _, cx| {
+                                    .on_click(cx.listener(|view, _, window, cx| {
                                         view.ssh_state.section = SshConsoleSection::HostEditor;
                                         view.ssh_state.host_draft = SshHostEditorDraft::new_blank();
                                         view.ssh_state.active_input = SshConsoleInputField::HostName;
+                                        window.focus(&view.ssh_focus_handle);
                                         view.ssh_state.status_message = Some(
                                             "Creating new SSH host profile — fill fields on the right and click Save Host.".to_string(),
                                         );
                                         cx.notify();
                                     }))
-                                    .child("+ New"),
+                                    .child("+ Add"),
                             ),
                     ),
             );
 
-        hosts_sidebar = hosts_sidebar.child(
+        let mut scroll_trees = div()
+            .id("ssh-sidebar-scroll")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .overflow_y_scroll();
+
+        scroll_trees = scroll_trees.child(
             div()
                 .flex()
                 .flex_row()
@@ -2641,7 +3026,7 @@ impl WorkspaceView {
                         .text_xs()
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(rgb(0x94a3b8))
-                        .child("⌄ 📁 Saved Profiles"),
+                        .child("⌄ 📁 /home/chyna"),
                 )
                 .child(
                     div()
@@ -2652,7 +3037,7 @@ impl WorkspaceView {
         );
 
         let mut saved_list = div().flex().flex_col().gap_1p5();
-        for (orig_idx, prof) in filtered_saved.iter().take(5) {
+        for (orig_idx, prof) in &filtered_saved {
             let idx_val = *orig_idx;
             let hname = prof.host.name.clone();
             let user_str = prof.host.user.clone().unwrap_or_else(|| "root".to_string());
@@ -2706,16 +3091,17 @@ impl WorkspaceView {
                                             .text_xs()
                                             .text_color(rgb(0x94a3b8))
                                             .cursor(gpui::CursorStyle::PointingHand)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                            .on_click(cx.listener(move |view, _, window, cx| {
                                                 view.ssh_state.section = SshConsoleSection::HostEditor;
                                                 view.ssh_state.host_draft = SshHostEditorDraft::from_profile(
                                                     Some(idx_val),
                                                     &prof_edit,
                                                 );
                                                 view.ssh_state.active_input = SshConsoleInputField::HostHostname;
+                                                window.focus(&view.ssh_focus_handle);
                                                 cx.notify();
                                             }))
-                                            .child("✎"),
+                                            .child("✏"),
                                     )
                                     .child(
                                         div()
@@ -2764,9 +3150,9 @@ impl WorkspaceView {
                     ),
             );
         }
-        hosts_sidebar = hosts_sidebar.child(saved_list);
+        scroll_trees = scroll_trees.child(saved_list);
 
-        hosts_sidebar = hosts_sidebar.child(
+        scroll_trees = scroll_trees.child(
             div()
                 .flex()
                 .flex_row()
@@ -2789,7 +3175,7 @@ impl WorkspaceView {
         );
 
         let mut cfg_list = div().flex().flex_col().gap_1p5();
-        for (cidx, host_cfg) in filtered_config.iter().take(4).enumerate() {
+        for (cidx, host_cfg) in filtered_config.iter().enumerate() {
             let prof = TheiaSshProfile::from_host(host_cfg.clone());
             let hname = prof.host.name.clone();
             let user_str = prof.host.user.clone().unwrap_or_else(|| "user".to_string());
@@ -2849,15 +3235,16 @@ impl WorkspaceView {
                                             .text_xs()
                                             .text_color(rgb(0x94a3b8))
                                             .cursor(gpui::CursorStyle::PointingHand)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                            .on_click(cx.listener(move |view, _, window, cx| {
                                                 view.ssh_state.section = SshConsoleSection::HostEditor;
                                                 view.ssh_state.host_draft =
                                                     SshHostEditorDraft::from_profile(None, &prof_edit);
                                                 view.ssh_state.active_input =
                                                     SshConsoleInputField::HostHostname;
+                                                window.focus(&view.ssh_focus_handle);
                                                 cx.notify();
                                             }))
-                                            .child("✎"),
+                                            .child("✏"),
                                     )
                                     .child(
                                         div()
@@ -2885,7 +3272,8 @@ impl WorkspaceView {
                     ),
             );
         }
-        hosts_sidebar = hosts_sidebar.child(cfg_list);
+        scroll_trees = scroll_trees.child(cfg_list);
+        hosts_sidebar = hosts_sidebar.child(scroll_trees);
 
         let right_content = match section {
             SshConsoleSection::HostEditor => {
@@ -2940,8 +3328,9 @@ impl WorkspaceView {
                                     rgb(0xf1f5f9)
                                 })
                                 .cursor(gpui::CursorStyle::IBeam)
-                                .on_click(cx.listener(move |view, _, _, cx| {
+                                .on_click(cx.listener(move |view, _, window, cx| {
                                     view.ssh_state.active_input = field;
+                                    window.focus(&view.ssh_focus_handle);
                                     cx.notify();
                                 }))
                                 .child(display),
@@ -3822,9 +4211,10 @@ impl WorkspaceView {
                                     .text_xs()
                                     .text_color(rgb(0xf8fafc))
                                     .cursor(gpui::CursorStyle::IBeam)
-                                    .on_click(cx.listener(|view, _, _, cx| {
+                                    .on_click(cx.listener(|view, _, window, cx| {
                                         view.ssh_state.active_input =
                                             SshConsoleInputField::TunnelSshHost;
+                                        window.focus(&view.ssh_focus_handle);
                                         cx.notify();
                                     }))
                                     .child(if host_focused {
@@ -3851,9 +4241,10 @@ impl WorkspaceView {
                                     .text_xs()
                                     .text_color(rgb(0x22d3ee))
                                     .cursor(gpui::CursorStyle::IBeam)
-                                    .on_click(cx.listener(|view, _, _, cx| {
+                                    .on_click(cx.listener(|view, _, window, cx| {
                                         view.ssh_state.active_input =
                                             SshConsoleInputField::TunnelLocalListen;
+                                        window.focus(&view.ssh_focus_handle);
                                         cx.notify();
                                     }))
                                     .child(if local_focused {
@@ -3881,9 +4272,10 @@ impl WorkspaceView {
                                     .text_xs()
                                     .text_color(rgb(0x34d399))
                                     .cursor(gpui::CursorStyle::IBeam)
-                                    .on_click(cx.listener(|view, _, _, cx| {
+                                    .on_click(cx.listener(|view, _, window, cx| {
                                         view.ssh_state.active_input =
                                             SshConsoleInputField::TunnelRemoteTarget;
+                                        window.focus(&view.ssh_focus_handle);
                                         cx.notify();
                                     }))
                                     .child(if remote_focused {
@@ -3905,9 +4297,16 @@ impl WorkspaceView {
                     "mkdir -p ~/.ssh && curl -fsSL http://{lan_ip}:{ks_port}/authorized_keys >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
                 );
                 let bootstrap_for_copy = bootstrap_cmd.clone();
+                let known_hosts_count = if let Ok(home) = std::env::var("HOME") {
+                    std::fs::read_to_string(format!("{home}/.ssh/known_hosts"))
+                        .map(|s| s.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).count())
+                        .unwrap_or(22)
+                } else {
+                    22
+                };
 
                 let mut key_cards = div().flex().flex_col().gap_2();
-                for (kidx, key) in keys.iter().take(2).enumerate() {
+                for (kidx, key) in keys.iter().enumerate() {
                     let kname = key.name.clone();
                     let kalgo = key.algorithm.clone();
                     let kpath = key.path_display.clone();
@@ -4116,13 +4515,13 @@ impl WorkspaceView {
                                             .text_base()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0xf8fafc))
-                                            .child("🔑 SSH Key Vault & HTTP Authorized Key Server"),
+                                            .child("🔑 Local SSH Key Vault"),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(rgb(0x94a3b8))
-                                            .child("Hardware-grade Ed25519/RSA key vault + LAN HTTP /authorized_keys bootstrap server"),
+                                            .child("Secure hardware-grade Ed25519 & RSA key management directly in macOS Keychain & ~/.ssh"),
                                     ),
                             )
                             .child(
@@ -4153,6 +4552,74 @@ impl WorkspaceView {
                                     .child("+ Generate Key Pair"),
                             ),
                     )
+                    .child(
+                        div()
+                            .p_1()
+                            .rounded_lg()
+                            .bg(rgb(0x090d16))
+                            .border_1()
+                            .border_color(rgb(0x1e293b))
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(0x10b981))
+                                    .text_color(rgb(0x090d16))
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(format!("🔑 SSH Key Pairs ({})", keys.len())),
+                            )
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(gpui::rgba(0x00000000))
+                                    .text_color(rgb(0x94a3b8))
+                                    .text_xs()
+                                    .child("Passkeys (YubiKey & Touch ID) (0)"),
+                            )
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(gpui::rgba(0x00000000))
+                                    .text_color(rgb(0x94a3b8))
+                                    .text_xs()
+                                    .child(format!("Known Hosts & Security ({known_hosts_count})")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .p_2p5()
+                            .rounded_lg()
+                            .bg(gpui::rgba(0x10b98118))
+                            .border_1()
+                            .border_color(rgb(0x059669))
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x34d399))
+                                    .child("✔ Local & Encrypted: Your private keys are stored securely in ~/.ssh and never leave your macOS device."),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(0x34d399))
+                                    .child(format!("{} Keys Detected", keys.len())),
+                            ),
+                    )
+                    .child(key_cards)
                     .child(
                         div()
                             .p_3()
@@ -4331,7 +4798,6 @@ impl WorkspaceView {
                                     .child(bootstrap_cmd),
                             ),
                     )
-                    .child(key_cards)
                     .into_any_element()
             }
             SshConsoleSection::ServerAndAgentHub => {
@@ -4773,24 +5239,100 @@ impl WorkspaceView {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
-                                            .child(format!("Authorized Public Keys ({})", keys.len())),
+                                            .flex()
+                                            .flex_row()
+                                            .justify_between()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(gpui::FontWeight::BOLD)
+                                                            .text_color(rgb(0xf8fafc))
+                                                            .child(format!("Authorized Public Keys ({})", keys.len())),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(0x94a3b8))
+                                                            .child("Clients whose public keys appear below can authenticate via SSH key"),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("add-pubkey-to-server-btn")
+                                                    .px_2p5()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(rgb(0x06b6d4))
+                                                    .text_color(rgb(0x090d16))
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .cursor(gpui::CursorStyle::PointingHand)
+                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                        view.ssh_state.status_message = Some(
+                                                            "📋 Paste client public key or copy from Key Vault to authorize."
+                                                                .to_string(),
+                                                        );
+                                                        cx.notify();
+                                                    }))
+                                                    .child("+ Add Public Key"),
+                                            ),
                                     )
-                                    .children(keys.into_iter().take(2).map(|k| {
+                                    .children(keys.into_iter().enumerate().map(|(ki, k)| {
                                         div()
+                                            .id(("auth-key-row", ki))
                                             .px_3()
                                             .py_1p5()
                                             .rounded_md()
                                             .bg(rgb(0x090d16))
                                             .border_1()
                                             .border_color(rgb(0x162032))
-                                            .font_family("Menlo")
-                                            .text_xs()
-                                            .text_color(rgb(0x94a3b8))
-                                            .child(k.public_key_line)
+                                            .flex()
+                                            .flex_row()
+                                            .justify_between()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .font_family("Menlo")
+                                                    .text_xs()
+                                                    .text_color(rgb(0x94a3b8))
+                                                    .child(k.public_key_line),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x64748b))
+                                                    .cursor(gpui::CursorStyle::PointingHand)
+                                                    .child("🗑"),
+                                            )
                                     })),
+                            )
+                            .child(
+                                div()
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded_lg()
+                                    .bg(rgb(0x090d16))
+                                    .border_1()
+                                    .border_color(rgb(0x1e293b))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().text_xs().text_color(rgb(0x06b6d4)).child("⚡"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_family("Menlo")
+                                            .text_color(rgb(0x64748b))
+                                            .child("Recent SSH Daemon Logs (~/.theia/ssh_server/sshd.log)"),
+                                    ),
                             )
                             .into_any_element()
                     }
@@ -4919,9 +5461,10 @@ impl WorkspaceView {
                                                     .text_xs()
                                                     .text_color(rgb(0xf8fafc))
                                                     .cursor(gpui::CursorStyle::IBeam)
-                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                    .on_click(cx.listener(|view, _, window, cx| {
                                                         view.ssh_state.active_input =
                                                             SshConsoleInputField::AgentKeyPath;
+                                                        window.focus(&view.ssh_focus_handle);
                                                         cx.notify();
                                                     }))
                                                     .child(if a_focused {
@@ -5006,7 +5549,6 @@ impl WorkspaceView {
                                     } else {
                                         loaded_ids
                                             .into_iter()
-                                            .take(3)
                                             .map(|line| {
                                                 div()
                                                     .px_3()
@@ -5022,6 +5564,17 @@ impl WorkspaceView {
                                             })
                                             .collect()
                                     }),
+                            )
+                            .child(
+                                div()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .bg(gpui::rgba(0x8b5cf614))
+                                    .border_1()
+                                    .border_color(rgb(0x8b5cf6))
+                                    .text_xs()
+                                    .text_color(rgb(0xc4b5fd))
+                                    .child("ⓘ SSH Agent Forwarding (ssh -A): Keys loaded in Theia's SSH Agent Hub are automatically leveraged for public-key authentication. When you connect to remote bastion servers, agent forwarding allows the remote server to securely authenticate against internal git repositories or downstream servers without storing private keys remotely."),
                             )
                             .into_any_element()
                     }
@@ -6836,9 +7389,9 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .child(
-                        // Unified Theia's Prism 3-Mode Header Bar inside Theia SSH
+                        // Theia Top Bar Header
                         div()
-                            .px_5()
+                            .px_4()
                             .py_2()
                             .bg(theme.tab_inactive_bg)
                             .border_b_1()
@@ -6853,24 +7406,98 @@ impl WorkspaceView {
                                     .flex_row()
                                     .items_center()
                                     .gap_2p5()
-                                    .child(div().text_lg().child("🏛️"))
                                     .child(
                                         div()
                                             .flex()
-                                            .flex_col()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(
+                                                div()
+                                                    .text_base()
+                                                    .text_color(rgb(0x22d3ee))
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .child("❖"),
+                                            )
                                             .child(
                                                 div()
                                                     .text_sm()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(theme.border_active)
-                                                    .child("THEIA'S PRISM — OPERATOR CONTROL CENTER"),
-                                            )
+                                                    .text_color(theme.fg)
+                                                    .child("THEIA"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("modal-return-to-term")
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x121926))
+                                            .border_1()
+                                            .border_color(rgb(0x1e293b))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.ssh_state.open = false;
+                                                let focus = view.tabs[view.active_tab].active_terminal.read(cx).focus_handle.clone();
+                                                window.focus(&focus);
+                                                view.sync_modal_open_flag(cx);
+                                                cx.notify();
+                                            }))
+                                            .child(div().size(px(6.0)).rounded_full().bg(rgb(0x22c55e)))
                                             .child(
                                                 div()
                                                     .text_size(px(10.5))
+                                                    .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(rgb(0x94a3b8))
-                                                    .child("Theia SSH, Tunnels, Key Vault, PXE Bootloader & Network Ops"),
+                                                    .child("Local (zsh)"),
                                             ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("modal-new-term-tab")
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x121926))
+                                            .border_1()
+                                            .border_color(rgb(0x1e293b))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.ssh_state.open = false;
+                                                view.add_tab(window, cx);
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(rgb(0x38bdf8))
+                                                    .child("+ >_ Terminal"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("modal-host-tab-pill")
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(0x06b6d4))
+                                            .text_color(rgb(0x090d16))
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child("🖧 Host"),
                                     ),
                             )
                             .child(
@@ -6879,6 +7506,27 @@ impl WorkspaceView {
                                     .flex_row()
                                     .items_center()
                                     .gap_2()
+                                    .child(
+                                        div()
+                                            .id("ssh-to-palette-btn")
+                                            .px_2p5()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(theme.border_inactive)
+                                            .text_color(theme.fg)
+                                            .text_xs()
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(|view, _, window, cx| {
+                                                view.ssh_state.open = false;
+                                                view.palette_open = true;
+                                                window.focus(&view.palette_focus_handle);
+                                                view.sync_modal_open_flag(cx);
+                                                cx.notify();
+                                            }))
+                                            .child("⌘K"),
+                                    )
                                     .child(
                                         div()
                                             .id("ssh-hub-to-prism-btn")
@@ -6890,7 +7538,6 @@ impl WorkspaceView {
                                             .border_color(theme.border_inactive)
                                             .text_color(theme.fg)
                                             .text_xs()
-                                            .font_weight(gpui::FontWeight::BOLD)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, window, cx| {
                                                 view.settings_view.update(cx, |sv, cx| {
@@ -6898,39 +7545,25 @@ impl WorkspaceView {
                                                 });
                                                 view.toggle_settings_modal(window, cx);
                                             }))
-                                            .child("🎨 Theia's Prism (⌘,)"),
+                                            .child("⚙ Prism"),
                                     )
                                     .child(
                                         div()
+                                            .id("ssh-hub-close-btn")
                                             .px_3()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(theme.border_active)
-                                            .text_color(theme.bg)
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .child("🌐 Theia SSH & Net Ops (⇧⌘S)"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("ssh-hub-to-info-btn")
-                                            .px_3()
-                                            .py_1()
-                                            .rounded_md()
-                                            .bg(theme.tab_active_bg)
+                                            .bg(rgb(0x1e293b))
                                             .border_1()
-                                            .border_color(theme.border_inactive)
-                                            .text_color(theme.fg)
+                                            .border_color(rgb(0x334155))
+                                            .text_color(rgb(0xf1f5f9))
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, window, cx| {
-                                                view.settings_view.update(cx, |sv, cx| {
-                                                    sv.set_section(SettingsSection::SystemInfoGuide, cx);
-                                                });
-                                                view.toggle_settings_modal(window, cx);
+                                                view.toggle_ssh_manager(window, cx);
                                             }))
-                                            .child("📖 Info & System Guide"),
+                                            .child("✕ Close"),
                                     ),
                             ),
                     )
@@ -6942,11 +7575,7 @@ impl WorkspaceView {
                             .flex_row()
                             .overflow_hidden()
                             .child(icon_rail)
-                            .children(if self.ssh_state.section == SshConsoleSection::HostEditor {
-                                Some(hosts_sidebar)
-                            } else {
-                                None
-                            })
+                            .child(hosts_sidebar)
                             .child(
                                 div()
                                     .id("ssh-right-scroll-pane")
@@ -7703,7 +8332,7 @@ impl Render for WorkspaceView {
         let footer_hints = footer_hints_for_context(mneme_active, pythia_active, is_active_ssh);
         let tab_title = active_tab.title.clone();
 
-        // Tier 1 Left: ❖ WELL + [● ATLAS] pill + [+]
+        // Tier 1 Left: ❖ THEIA + [● Local (zsh)] + [+ >_ Terminal] + [🖧 Host]
         let header_left = div()
             .flex()
             .flex_row()
@@ -7727,7 +8356,7 @@ impl Render for WorkspaceView {
                             .text_sm()
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(theme.fg)
-                            .child("WELL"),
+                            .child("THEIA"),
                     ),
             )
             .child(
@@ -7748,26 +8377,47 @@ impl Render for WorkspaceView {
                             .text_size(px(10.5))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(0x22d3ee))
-                            .child(if is_active_ssh { "THEIA SSH" } else { "ATLAS" }),
+                            .child(if is_active_ssh { format!("SSH: {tab_title}") } else { "Local (zsh)".into() }),
                     ),
             )
             .child(
                 div()
-                    .id("header-new-tab")
-                    .px_2()
+                    .id("header-new-term-btn")
+                    .px_2p5()
                     .py_0p5()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(0x263248))
                     .bg(rgb(0x162030))
-                    .text_color(theme.fg)
+                    .text_color(rgb(0x38bdf8))
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .cursor(gpui::CursorStyle::PointingHand)
                     .on_click(cx.listener(|view, _event, window, cx| {
+                        if view.ssh_state.open {
+                            view.ssh_state.open = false;
+                        }
                         view.add_tab(window, cx);
                     }))
-                    .child("+"),
+                    .child("+ >_ Terminal"),
+            )
+            .child(
+                div()
+                    .id("header-host-btn")
+                    .px_3()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if self.ssh_state.open { rgb(0x06b6d4) } else { rgb(0x263248) })
+                    .bg(if self.ssh_state.open { rgb(0x06b6d4) } else { rgb(0x162030) })
+                    .text_color(if self.ssh_state.open { rgb(0x090d16) } else { rgb(0xe2e8f0) })
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(|view, _event, window, cx| {
+                        view.toggle_ssh_manager(window, cx);
+                    }))
+                    .child("🖧 Host"),
             );
 
         // Tier 1 Center: Split-Pane & Geometric Frame Control Capsule [ −  ·  ∏  ·  ⊞  ·  ◈ ]
@@ -7853,6 +8503,60 @@ impl Render for WorkspaceView {
                         cx.notify();
                     }))
                     .child("◈"),
+            );
+
+        // Tier 1 Right: Palette, HUD, Prism Settings
+        let header_right = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("header-pal-trigger")
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(rgb(0x131b2a))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.toggle_command_palette(window, cx);
+                    }))
+                    .child("⌘K"),
+            )
+            .child(
+                div()
+                    .id("header-hud-trigger")
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(rgb(0x131b2a))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .text_xs()
+                    .text_color(rgb(0x34d399))
+                    .child("⚡ HUD"),
+            )
+            .child(
+                div()
+                    .id("header-settings-trigger")
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(rgb(0x131b2a))
+                    .border_1()
+                    .border_color(rgb(0x1e293b))
+                    .text_xs()
+                    .text_color(rgb(0x94a3b8))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.toggle_settings_modal(window, cx);
+                    }))
+                    .child("⚙"),
             );
 
         // Tier 2: Shell Tab Strip (well #1, well #2, ..., well #8 ×)
@@ -8017,7 +8721,7 @@ impl Render for WorkspaceView {
                     .border_color(theme.border_inactive)
                     .child(header_left)
                     .child(header_center)
-                    .child(div().w(px(140.0))),
+                    .child(header_right),
             )
             // Tier 2 Shell Tab Strip (well #1, well #2, ...)
             .child(

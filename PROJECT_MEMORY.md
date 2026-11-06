@@ -912,3 +912,24 @@ Completed all three tracks of Iteration 22 across `well-gpui`, `well-editor`, `w
   - Updated [`SettingsModalView::render_appearance_prism`](file:///Users/yocan/Desktop/well/crates/well-gpui/src/settings_view.rs#L653-L820) in [`crates/well-gpui/src/settings_view.rs`](file:///Users/yocan/Desktop/well/crates/well-gpui/src/settings_view.rs) to provide 6 quick-pick swatches per color token with high-contrast `1px` borders (`0xffffff` when selected, `0x64748b` otherwise) so dark swatches remain visible against dark cards.
 - **Installed New GPUI Build to `/Applications/Well.app`**:
   - Replaced the legacy Sep 22 `/Applications/Well.app` bundle with the newly built and ad-hoc signed GPUI `dist/Well.app` bundle.
+
+### Session Update: 2026-11-05T20:12:00-05:00 (Terminal Scrollback, Metis Predictions & Theia SSH Console Alignment)
+- **Terminal Scrollback & Page Navigation (`crates/well-gpui/src/main.rs`)**:
+  - Added `.on_scroll_wheel(...)` listener with high-DPI sub-pixel and line scrolling support to `TerminalView`.
+  - Intelligently routes mouse wheel events between SGR tracking mode (`\x1b[<64...M`), alternate screen cursor up/down (`\x1b[A` / `\x1b[B` for pager/editor TUIs like `less`, `vim`, `htop`), and viewport history scrollback with `set_scrollback(n)`.
+  - Added full keyboard scrollback navigation (`PageUp`, `PageDown`, `Home`, `End`), auto-reset on command typing / `Enter` / `Escape`, visual HUD scrollback pill `[⏱ SCROLLBACK: -{} lines (Jump to Present ↵)]`, and interactive right-edge scrollbar track & thumb.
+- **Metis Ghost Command Predictions (`crates/well-gpui/src/main.rs`)**:
+  - Connected `MetisHistory` trie to active keystrokes and real-time command input buffer.
+  - Renders inline ghost text suggestions in luminous cyan italic (`0x38bdf888`) immediately following the active prompt cursor column.
+  - Acceptance with `Tab`, unshifted `Right Arrow`, or `Ctrl+F` (full completion) and `Alt+Right Arrow` (word-by-word token completion).
+- **Theia SSH & NetOps Console Visual Alignment (`crates/well-gpui/src/main.rs`, `crates/well-gpui/src/settings_view.rs`)**:
+  - **Tier 1 Header Integration**: Added `[🖧 Host]` and `[+ >_ Terminal]` buttons directly into the top window header bar alongside `[❖ THEIA]` and active terminal pill. Clicking `[🖧 Host]` instantly opens the console; clicking `[+ >_ Terminal]` returns immediately to the shell.
+  - **Header Utility Capsule**: Added `[⌘K]` (Palette), `[⚡ HUD]`, and `[⚙]` (Prism Settings) to the top right header bar.
+  - **Persistent SERVERS & CLUSTERS Sidebar**: Made `hosts_sidebar` persistent across all 7 console sections (`HostEditor`, `SmbShares`, `PortForwarding`, `PxeAndBootloader`, `KeyVault`, `ServerAndAgentHub`, `NetworkTools`), matching the 3-column architecture in design screenshots.
+  - **Full Catalog Visibility**: Removed arbitrary `.take(2)`, `.take(4)`, and `.take(5)` limits across `KeyVault` detected keys, `ServerAndAgentHub` authorized public keys, `hosts_sidebar` saved & OpenSSH config profiles, and `loaded_ids`, and enabled smooth `overflow_y_scroll()`.
+  - **Reliable Input Field Focus**: Ensured every text input in the console explicitly focuses `ssh_focus_handle` on click for immediate, lag-free keystroke input.
+- **Verification & Deployment**:
+  - `cargo test -p well-gpui --locked`: **All 23 unit tests passing**.
+  - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
+  - Built optimized release binary `well-gpui` in 1m 24s.
+  - Updated, sanitized, and ad-hoc codesigned `/Applications/Well.app` and `dist/Well.app`.
