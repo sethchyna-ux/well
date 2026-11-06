@@ -160,7 +160,7 @@ impl TerminalSettings {
         if let Ok(path) = well_config::ConfigStore::default_path() {
             if let Ok((_, prefs)) = well_config::ConfigStore::load(path) {
                 if !prefs.appearance.font_family.is_empty() {
-                    font_family = prefs.appearance.font_family;
+                    font_family = well_render::canonical_font_family(&prefs.appearance.font_family).to_string();
                 }
                 font_size = prefs.appearance.font_size;
             }
@@ -179,7 +179,7 @@ impl TerminalSettings {
                         Theme::get(persisted.theme_id)
                     };
                     return Self {
-                        font_family: persisted.font_family,
+                        font_family: well_render::canonical_font_family(&persisted.font_family).to_string(),
                         font_size: persisted.font_size,
                         theme,
                         custom_theme,
@@ -989,6 +989,7 @@ impl Render for SettingsView {
 
                 let font_families = [
                     "OpenDyslexic Nerd Font",
+                    "OpenDyslexicM Nerd Font Mono",
                     "Menlo",
                     "SF Mono",
                     "JetBrains Mono",
@@ -996,7 +997,8 @@ impl Render for SettingsView {
                 ];
                 let mut font_pills = div().flex().flex_row().items_center().gap_1p5();
                 for (f_idx, f_name) in font_families.into_iter().enumerate() {
-                    let is_font_sel = font_family == f_name;
+                    let is_font_sel = font_family == f_name
+                        || well_render::canonical_font_family(&font_family) == f_name;
                     let sm_font = settings_entity.clone();
                     font_pills = font_pills.child(
                         div()
@@ -1015,6 +1017,7 @@ impl Render for SettingsView {
                             } else {
                                 theme.bg
                             })
+                            .font_family(f_name)
                             .text_size(px(10.0))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(if is_font_sel { theme.bg } else { theme.fg })

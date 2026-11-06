@@ -9163,6 +9163,11 @@ fn main() {
     });
 
     Application::new().run(move |cx: &mut App| {
+        // Register embedded OpenDyslexic accessibility font assets into GPUI text system
+        if let Err(err) = cx.text_system().add_fonts(well_render::embedded_opendyslexic_fonts()) {
+            eprintln!("[WARN] Failed to load embedded OpenDyslexic fonts into GPUI text system: {err}");
+        }
+
         let settings_model = cx.new(|_| TerminalSettings::new());
         cx.bind_keys([
             KeyBinding::new("cmd-,", OpenSettings, None),

@@ -4,16 +4,51 @@ use fontdb::{Database, Family, Query, Style, Weight, ID};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const EMBEDDED_OPENDYSLEXIC_MONO: &[u8] =
+pub const EMBEDDED_OPENDYSLEXIC_MONO: &[u8] =
     include_bytes!("../assets/fonts/OpenDyslexicMNerdFontMono-Regular.otf");
-const EMBEDDED_OPENDYSLEXIC_REG: &[u8] =
+pub const EMBEDDED_OPENDYSLEXIC_M_REG: &[u8] =
+    include_bytes!("../assets/fonts/OpenDyslexicMNerdFont-Regular.otf");
+pub const EMBEDDED_OPENDYSLEXIC_REG: &[u8] =
     include_bytes!("../assets/fonts/OpenDyslexicNerdFont-Regular.otf");
-const EMBEDDED_OPENDYSLEXIC_BOLD: &[u8] =
+pub const EMBEDDED_OPENDYSLEXIC_BOLD: &[u8] =
     include_bytes!("../assets/fonts/OpenDyslexicNerdFont-Bold.otf");
-const EMBEDDED_OPENDYSLEXIC_ITALIC: &[u8] =
+pub const EMBEDDED_OPENDYSLEXIC_ITALIC: &[u8] =
     include_bytes!("../assets/fonts/OpenDyslexicNerdFont-Italic.otf");
-const EMBEDDED_OPENDYSLEXIC_BOLD_ITALIC: &[u8] =
+pub const EMBEDDED_OPENDYSLEXIC_BOLD_ITALIC: &[u8] =
     include_bytes!("../assets/fonts/OpenDyslexicNerdFont-BoldItalic.otf");
+
+/// Return all embedded OpenDyslexic font assets as static borrowed byte slices
+/// suitable for direct registration in GPUI `cx.text_system().add_fonts(...)`.
+pub fn embedded_opendyslexic_fonts() -> Vec<std::borrow::Cow<'static, [u8]>> {
+    vec![
+        std::borrow::Cow::Borrowed(EMBEDDED_OPENDYSLEXIC_MONO),
+        std::borrow::Cow::Borrowed(EMBEDDED_OPENDYSLEXIC_M_REG),
+        std::borrow::Cow::Borrowed(EMBEDDED_OPENDYSLEXIC_REG),
+        std::borrow::Cow::Borrowed(EMBEDDED_OPENDYSLEXIC_BOLD),
+        std::borrow::Cow::Borrowed(EMBEDDED_OPENDYSLEXIC_ITALIC),
+        std::borrow::Cow::Borrowed(EMBEDDED_OPENDYSLEXIC_BOLD_ITALIC),
+    ]
+}
+
+/// Normalizes font family names and aliases to canonical names recognized by GPUI and CoreText.
+pub fn canonical_font_family(family: &str) -> &'static str {
+    let lower = family.to_ascii_lowercase();
+    if (lower.contains("mono") || lower.contains("mnerd")) && (lower.contains("opendyslexic") || lower.contains("dyslexic")) {
+        "OpenDyslexicM Nerd Font Mono"
+    } else if lower.contains("opendyslexic") || lower.contains("dyslexic") {
+        "OpenDyslexic Nerd Font"
+    } else if lower.contains("jetbrains") {
+        "JetBrains Mono"
+    } else if lower.contains("sf mono") || lower == "sfmono" {
+        "SF Mono"
+    } else if lower.contains("monaco") {
+        "Monaco"
+    } else if lower.contains("menlo") {
+        "Menlo"
+    } else {
+        "OpenDyslexic Nerd Font"
+    }
+}
 
 #[derive(Clone)]
 pub struct FontCatalog(Arc<Database>);
@@ -21,6 +56,7 @@ impl Default for FontCatalog {
     fn default() -> Self {
         let mut db = Database::new();
         db.load_font_data(EMBEDDED_OPENDYSLEXIC_MONO.to_vec());
+        db.load_font_data(EMBEDDED_OPENDYSLEXIC_M_REG.to_vec());
         db.load_font_data(EMBEDDED_OPENDYSLEXIC_REG.to_vec());
         db.load_font_data(EMBEDDED_OPENDYSLEXIC_BOLD.to_vec());
         db.load_font_data(EMBEDDED_OPENDYSLEXIC_ITALIC.to_vec());
