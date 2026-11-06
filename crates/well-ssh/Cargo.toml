@@ -9,6 +9,6 @@ license.workspace = true
 async-trait = "0.1"
 keyring = "4.2.0"
 ring = "0.17"
-russh = "0.64.1"
+russh = "0.65.0"
 thiserror = "1.0"
 tokio = "1.53.1"
