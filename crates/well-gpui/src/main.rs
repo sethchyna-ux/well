@@ -3365,7 +3365,7 @@ impl WorkspaceView {
                     .child(
                         div()
                             .text_xs()
-                            .font_family("Menlo")
+                            .font_family("OpenDyslexic Nerd Font")
                             .text_color(rgb(0x64748b))
                             .child(subline),
                     ),
@@ -3523,7 +3523,7 @@ impl WorkspaceView {
                     .child(
                         div()
                             .text_xs()
-                            .font_family("Menlo")
+                            .font_family("OpenDyslexic Nerd Font")
                             .text_color(rgb(0x64748b))
                             .child(subline),
                     ),
@@ -3577,7 +3577,7 @@ impl WorkspaceView {
                                 } else {
                                     rgb(0x1e293b)
                                 })
-                                .font_family("Menlo")
+                                .font_family("OpenDyslexic Nerd Font")
                                 .text_xs()
                                 .text_color(if val.is_empty() && !focused {
                                     rgb(0x475569)
@@ -4194,7 +4194,7 @@ impl WorkspaceView {
                                         )
                                         .child(
                                             div()
-                                                .font_family("Menlo")
+                                                .font_family("OpenDyslexic Nerd Font")
                                                 .text_xs()
                                                 .font_weight(gpui::FontWeight::BOLD)
                                                 .text_color(rgb(0x22d3ee))
@@ -4215,7 +4215,7 @@ impl WorkspaceView {
                                         )
                                         .child(
                                             div()
-                                                .font_family("Menlo")
+                                                .font_family("OpenDyslexic Nerd Font")
                                                 .text_xs()
                                                 .font_weight(gpui::FontWeight::BOLD)
                                                 .text_color(rgb(0x34d399))
@@ -4233,7 +4233,7 @@ impl WorkspaceView {
                                     div()
                                         .id(("copy-tunnel-cmd", tidx))
                                         .text_xs()
-                                        .font_family("Menlo")
+                                        .font_family("OpenDyslexic Nerd Font")
                                         .text_color(rgb(0x94a3b8))
                                         .cursor(gpui::CursorStyle::PointingHand)
                                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -4464,7 +4464,7 @@ impl WorkspaceView {
                                     } else {
                                         rgb(0x1e293b)
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0xf8fafc))
                                     .cursor(gpui::CursorStyle::IBeam)
@@ -4494,7 +4494,7 @@ impl WorkspaceView {
                                     } else {
                                         rgb(0x1e293b)
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0x22d3ee))
                                     .cursor(gpui::CursorStyle::IBeam)
@@ -4525,7 +4525,7 @@ impl WorkspaceView {
                                     } else {
                                         rgb(0x1e293b)
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0x34d399))
                                     .cursor(gpui::CursorStyle::IBeam)
@@ -4643,7 +4643,7 @@ impl WorkspaceView {
                                                     )
                                                     .child(
                                                         div()
-                                                            .font_family("Menlo")
+                                                            .font_family("OpenDyslexic Nerd Font")
                                                             .text_xs()
                                                             .text_color(rgb(0x64748b))
                                                             .child(kpath),
@@ -4733,7 +4733,7 @@ impl WorkspaceView {
                             .child(
                                 div()
                                     .text_xs()
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_color(rgb(0x94a3b8))
                                     .child(format!("Fingerprint:  {kfp}")),
                             )
@@ -4745,7 +4745,7 @@ impl WorkspaceView {
                                     .bg(rgb(0x090d16))
                                     .border_1()
                                     .border_color(rgb(0x162032))
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0x94a3b8))
                                     .child(kpub),
@@ -4999,8 +4999,8 @@ impl WorkspaceView {
                                                     ),
                                             ),
                                     )
-                                    .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(pk_path))
-                                    .child(div().font_family("Menlo").text_xs().text_color(rgb(0x94a3b8)).child(format!("Fingerprint:  {}", pk.fingerprint))),
+                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(pk_path))
+                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x94a3b8)).child(format!("Fingerprint:  {}", pk.fingerprint))),
                             );
                         }
                         Some(col.into_any_element())
@@ -5063,10 +5063,10 @@ impl WorkspaceView {
                                             .gap_3()
                                             .items_center()
                                             .min_w_0()
-                                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(format!("L{}", kh.line_number)))
+                                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(format!("L{}", kh.line_number)))
                                             .child(
                                                 div()
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(rgb(0x22d3ee))
@@ -5076,8 +5076,8 @@ impl WorkspaceView {
                                                         kh.host_pattern.chars().take(48).collect::<String>()
                                                     }),
                                             )
-                                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0xa855f7)).child(kh.key_type.clone()))
-                                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(kh.fingerprint.clone())),
+                                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0xa855f7)).child(kh.key_type.clone()))
+                                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(kh.fingerprint.clone())),
                                     )
                                     .child(
                                         div()
@@ -5395,7 +5395,7 @@ impl WorkspaceView {
                                     .bg(rgb(0x090d16))
                                     .border_1()
                                     .border_color(rgb(0x162032))
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0x22d3ee))
                                     .child(bootstrap_cmd),
@@ -5683,7 +5683,7 @@ impl WorkspaceView {
                                                     } else {
                                                         rgb(0x1e293b)
                                                     })
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .text_color(rgb(0xf8fafc))
                                                     .cursor(gpui::CursorStyle::IBeam)
@@ -5721,7 +5721,7 @@ impl WorkspaceView {
                                                             rgb(0x1e293b)
                                                         },
                                                     )
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .text_color(rgb(0xf8fafc))
                                                     .cursor(gpui::CursorStyle::IBeam)
@@ -5793,7 +5793,7 @@ impl WorkspaceView {
                                             )
                                             .child(
                                                 div()
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .text_color(rgb(0x38bdf8))
                                                     .child("ED25519 (~/.theia/ssh_server/ssh_host_ed25519_key)"),
@@ -5812,7 +5812,7 @@ impl WorkspaceView {
                                                     .bg(rgb(0x090d16))
                                                     .border_1()
                                                     .border_color(rgb(0x1e293b))
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .text_color(rgb(0xe2e8f0))
                                                     .child("SHA256:2MxNZ+ew0X6C0j3bs3z6K4Xj9j++N+AECkI9t2NcasY"),
@@ -5902,7 +5902,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .flex_1()
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .text_color(rgb(0x94a3b8))
                                                     .child(k.public_key_line),
@@ -5932,7 +5932,7 @@ impl WorkspaceView {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .font_family("Menlo")
+                                            .font_family("OpenDyslexic Nerd Font")
                                             .text_color(rgb(0x64748b))
                                             .child("Recent SSH Daemon Logs (~/.theia/ssh_server/sshd.log)"),
                                     ),
@@ -5993,7 +5993,7 @@ impl WorkspaceView {
                                             )
                                             .child(
                                                 div()
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .text_color(rgb(0x64748b))
                                                     .child(sock),
@@ -6060,7 +6060,7 @@ impl WorkspaceView {
                                                     } else {
                                                         rgb(0x1e293b)
                                                     })
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .text_color(rgb(0xf8fafc))
                                                     .cursor(gpui::CursorStyle::IBeam)
@@ -6138,7 +6138,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_color(rgb(0x64748b))
                                                     .child("Queried via ssh-add -l"),
                                             ),
@@ -6160,7 +6160,7 @@ impl WorkspaceView {
                                                     .bg(rgb(0x090d16))
                                                     .border_1()
                                                     .border_color(rgb(0x162032))
-                                                    .font_family("Menlo")
+                                                    .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
                                                     .text_color(rgb(0x34d399))
                                                     .child(line)
@@ -6723,7 +6723,7 @@ impl WorkspaceView {
                                         } else {
                                             rgb(0x1e293b)
                                         })
-                                        .font_family("Menlo")
+                                        .font_family("OpenDyslexic Nerd Font")
                                         .text_xs()
                                         .text_color(rgb(0x22d3ee))
                                         .cursor(gpui::CursorStyle::IBeam)
@@ -6751,7 +6751,7 @@ impl WorkspaceView {
                                         } else {
                                             rgb(0x1e293b)
                                         })
-                                        .font_family("Menlo")
+                                        .font_family("OpenDyslexic Nerd Font")
                                         .text_xs()
                                         .text_color(rgb(0xf8fafc))
                                         .cursor(gpui::CursorStyle::IBeam)
@@ -6779,7 +6779,7 @@ impl WorkspaceView {
                                         } else {
                                             rgb(0x1e293b)
                                         })
-                                        .font_family("Menlo")
+                                        .font_family("OpenDyslexic Nerd Font")
                                         .text_xs()
                                         .text_color(rgb(0x34d399))
                                         .cursor(gpui::CursorStyle::IBeam)
@@ -6821,7 +6821,7 @@ impl WorkspaceView {
                                         .child(
                                             div()
                                                 .text_xs()
-                                                .font_family("Menlo")
+                                                .font_family("OpenDyslexic Nerd Font")
                                                 .text_color(rgb(0x34d399))
                                                 .child(if pxe_mode == PxeServerMode::ProxyDhcp {
                                                     "yiaddr: 0.0.0.0 • Opt 60: PXEClient • Opt 1/3/51 Excluded • Opt 54 Guard".to_string()
@@ -6838,7 +6838,7 @@ impl WorkspaceView {
                                         .bg(rgb(0x090d16))
                                         .border_1()
                                         .border_color(rgb(0x162032))
-                                        .font_family("Menlo")
+                                        .font_family("OpenDyslexic Nerd Font")
                                         .text_xs()
                                         .text_color(rgb(0x22d3ee))
                                         .child(opt43_hex),
@@ -6942,7 +6942,7 @@ impl WorkspaceView {
                                         .bg(rgb(0x090d16))
                                         .border_1()
                                         .border_color(rgb(0x162032))
-                                        .font_family("Menlo")
+                                        .font_family("OpenDyslexic Nerd Font")
                                         .text_xs()
                                         .text_color(rgb(0xe2e8f0))
                                         .child(ipxe_script),
@@ -7151,7 +7151,7 @@ impl WorkspaceView {
                                         .bg(rgb(0x090d16))
                                         .border_1()
                                         .border_color(rgb(0x162032))
-                                        .font_family("Menlo")
+                                        .font_family("OpenDyslexic Nerd Font")
                                         .text_xs()
                                         .text_color(rgb(0x22d3ee))
                                         .child(qemu_cmd),
@@ -7267,7 +7267,7 @@ impl WorkspaceView {
                                             .bg(rgb(0x090d16))
                                             .border_1()
                                             .border_color(rgb(0x162032))
-                                            .font_family("Menlo")
+                                            .font_family("OpenDyslexic Nerd Font")
                                             .text_xs()
                                             .text_color(rgb(0x22d3ee))
                                             .child(url),
@@ -7442,7 +7442,7 @@ impl WorkspaceView {
                                     } else {
                                         rgb(0x1e293b)
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0x22d3ee))
                                     .cursor(gpui::CursorStyle::IBeam)
@@ -7471,7 +7471,7 @@ impl WorkspaceView {
                                     } else {
                                         rgb(0x1e293b)
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0x34d399))
                                     .cursor(gpui::CursorStyle::IBeam)
@@ -7499,7 +7499,7 @@ impl WorkspaceView {
                                     } else {
                                         rgb(0x1e293b)
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0xf8fafc))
                                     .cursor(gpui::CursorStyle::IBeam)
@@ -7571,7 +7571,7 @@ impl WorkspaceView {
                         .child(div().text_size(px(10.0)).text_color(rgb(0x64748b)).child(label))
                         .child(
                             div()
-                                .font_family("Menlo")
+                                .font_family("OpenDyslexic Nerd Font")
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .text_color(rgb(color))
@@ -7616,7 +7616,7 @@ impl WorkspaceView {
                             .bg(gpui::rgba(0x06b6d41a))
                             .border_1()
                             .border_color(rgb(0x0e7490))
-                            .font_family("Menlo")
+                            .font_family("OpenDyslexic Nerd Font")
                             .text_xs()
                             .text_color(rgb(0x67e8f9))
                             .cursor(gpui::CursorStyle::PointingHand)
@@ -7715,7 +7715,7 @@ impl WorkspaceView {
                                     .flex_row()
                                     .justify_between()
                                     .items_center()
-                                    .child(div().font_family("Menlo").text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0xf8fafc)).child(ifc.name.clone()))
+                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0xf8fafc)).child(ifc.name.clone()))
                                     .child(
                                         div()
                                             .text_size(px(10.0))
@@ -7724,9 +7724,9 @@ impl WorkspaceView {
                                             .child(if ifc.is_up { "● UP" } else { "○ DOWN" }),
                                     ),
                             )
-                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0x22d3ee)).child(format!("inet {}", ifc.ip)))
-                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(format!("mask {}", ifc.netmask)))
-                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0xa855f7)).child(format!("ether {}", ifc.mac))),
+                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x22d3ee)).child(format!("inet {}", ifc.ip)))
+                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(format!("mask {}", ifc.netmask)))
+                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0xa855f7)).child(format!("ether {}", ifc.mac))),
                     );
                 }
                 let net_ifaces_panel = card()
@@ -7798,10 +7798,10 @@ impl WorkspaceView {
                                     .flex_row()
                                     .gap_3()
                                     .items_center()
-                                    .child(div().w(px(64.0)).font_family("Menlo").text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0x34d399)).child(format!(":{port}")))
-                                    .child(div().w(px(40.0)).font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(sock.protocol.clone()))
-                                    .child(div().font_family("Menlo").text_xs().text_color(rgb(0xf8fafc)).child(sock.process_name.clone()))
-                                    .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(format!("pid {}", sock.pid))),
+                                    .child(div().w(px(64.0)).font_family("OpenDyslexic Nerd Font").text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0x34d399)).child(format!(":{port}")))
+                                    .child(div().w(px(40.0)).font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(sock.protocol.clone()))
+                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0xf8fafc)).child(sock.process_name.clone()))
+                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(format!("pid {}", sock.pid))),
                             )
                             .child(
                                 div()
@@ -7898,7 +7898,7 @@ impl WorkspaceView {
                                 } else {
                                     rgb(0x1e293b)
                                 })
-                                .font_family("Menlo")
+                                .font_family("OpenDyslexic Nerd Font")
                                 .text_xs()
                                 .text_color(if res.open {
                                     rgb(0x34d399)
@@ -7945,7 +7945,7 @@ impl WorkspaceView {
                                     .gap_3()
                                     .child(
                                         div()
-                                            .font_family("Menlo")
+                                            .font_family("OpenDyslexic Nerd Font")
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0x22d3ee))
@@ -7953,7 +7953,7 @@ impl WorkspaceView {
                                     )
                                     .child(
                                         div()
-                                            .font_family("Menlo")
+                                            .font_family("OpenDyslexic Nerd Font")
                                             .text_xs()
                                             .text_color(rgb(0xa855f7))
                                             .child(nmac),
@@ -8131,7 +8131,7 @@ impl WorkspaceView {
                                     } else {
                                         rgb(0x1e293b)
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0x22d3ee))
                                     .cursor(gpui::CursorStyle::IBeam)
@@ -8183,7 +8183,7 @@ impl WorkspaceView {
                                     } else {
                                         rgb(0x1e293b)
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0xfbbf24))
                                     .cursor(gpui::CursorStyle::IBeam)
@@ -10187,7 +10187,8 @@ fn main() {
     });
 
     Application::new().run(move |cx: &mut App| {
-        // Register embedded OpenDyslexic accessibility font assets into GPUI text system
+        // Ensure OpenDyslexic OTF files exist in ~/Library/Fonts and register into GPUI text system
+        well_render::ensure_opendyslexic_user_fonts_installed();
         if let Err(err) = cx.text_system().add_fonts(well_render::embedded_opendyslexic_fonts()) {
             eprintln!("[WARN] Failed to load embedded OpenDyslexic fonts into GPUI text system: {err}");
         }

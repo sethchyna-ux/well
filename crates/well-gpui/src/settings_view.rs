@@ -44,6 +44,8 @@ pub struct PersistedOperatorSettings {
     #[serde(default)]
     pub custom_theme: Option<CustomThemeHex>,
     pub font_family: String,
+    #[serde(default)]
+    pub user_selected_non_dyslexic_font: bool,
     pub font_size: f32,
     pub per_host_ssh_theme: bool,
     pub kitty_graphics_enabled: bool,
@@ -73,6 +75,7 @@ pub struct PersistedOperatorSettings {
 
 pub struct TerminalSettings {
     pub font_family: String,
+    pub user_selected_non_dyslexic_font: bool,
     pub font_size: f32,
     pub theme: Theme,
     pub custom_theme: CustomThemeHex,
@@ -155,19 +158,21 @@ impl TerminalSettings {
     }
 
     pub fn new() -> Self {
-        let mut font_family = "OpenDyslexic Nerd Font".into();
+        let mut font_family: String = "OpenDyslexic Nerd Font".into();
+        let user_selected_non_dyslexic_font = false;
         let mut font_size = 14.0;
-        if let Ok(path) = well_config::ConfigStore::default_path() {
-            if let Ok((_, prefs)) = well_config::ConfigStore::load(path) {
-                if !prefs.appearance.font_family.is_empty() {
-                    font_family = well_render::canonical_font_family(&prefs.appearance.font_family).to_string();
-                }
-                font_size = prefs.appearance.font_size;
-            }
-        }
-
         let op_path = Self::operator_settings_path();
         if !cfg!(test) {
+            well_render::ensure_opendyslexic_user_fonts_installed();
+            if let Ok(path) = well_config::ConfigStore::default_path() {
+                if let Ok((_, prefs)) = well_config::ConfigStore::load(path) {
+                    if prefs.appearance.font_family.contains("OpenDyslexic") {
+                        font_family = well_render::canonical_font_family(&prefs.appearance.font_family).to_string();
+                    }
+                    font_size = prefs.appearance.font_size;
+                }
+            }
+
             if let Ok(raw) = std::fs::read_to_string(&op_path) {
                 if let Ok(persisted) = serde_json::from_str::<PersistedOperatorSettings>(&raw) {
                     let custom_theme = persisted
@@ -178,8 +183,17 @@ impl TerminalSettings {
                     } else {
                         Theme::get(persisted.theme_id)
                     };
-                    return Self {
-                        font_family: well_render::canonical_font_family(&persisted.font_family).to_string(),
+                    let resolved_font = if persisted.user_selected_non_dyslexic_font
+                        || persisted.font_family.contains("OpenDyslexic")
+                    {
+                        well_render::canonical_font_family(&persisted.font_family).to_string()
+                    } else {
+                        "OpenDyslexic Nerd Font".to_string()
+                    };
+                    let mut loaded = Self {
+                        font_family: resolved_font.clone(),
+                        user_selected_non_dyslexic_font: persisted.user_selected_non_dyslexic_font
+                            && !resolved_font.contains("OpenDyslexic"),
                         font_size: persisted.font_size,
                         theme,
                         custom_theme,
@@ -218,6 +232,10 @@ impl TerminalSettings {
                         requested_hub_switch: None,
                         requested_snippet_insert: None,
                     };
+                    if persisted.font_family != loaded.font_family {
+                        let _ = loaded.save_to_disk();
+                    }
+                    return loaded;
                 }
             }
         }
@@ -254,6 +272,7 @@ impl TerminalSettings {
         let default_theme = Theme::get(0);
         Self {
             font_family,
+            user_selected_non_dyslexic_font,
             font_size,
             custom_theme: CustomThemeHex::from_theme(&default_theme),
             theme: default_theme,
@@ -285,6 +304,9 @@ impl TerminalSettings {
     /// Persist all operator settings atomically to `~/.config/well/operator_settings.json`
     /// and sync typography to `well-config::ConfigStore` (`settings.toml`).
     pub fn save_to_disk(&mut self) -> Result<String, String> {
+        if cfg!(test) {
+            return Ok("Skipped disk save in test".into());
+        }
         if let Ok(path) = well_config::ConfigStore::default_path() {
             if let Ok((mut store, mut prefs)) = well_config::ConfigStore::load(path) {
                 prefs.appearance.font_family = self.font_family.clone();
@@ -303,6 +325,7 @@ impl TerminalSettings {
             theme_id: self.theme.id,
             custom_theme: Some(self.custom_theme.clone()),
             font_family: self.font_family.clone(),
+            user_selected_non_dyslexic_font: self.user_selected_non_dyslexic_font,
             font_size: self.font_size,
             per_host_ssh_theme: self.per_host_ssh_theme,
             kitty_graphics_enabled: self.kitty_graphics_enabled,
@@ -923,7 +946,7 @@ impl Render for SettingsView {
                                             theme.border_inactive
                                         })
                                         .cursor(gpui::CursorStyle::IBeam)
-                                        .font_family("Menlo")
+                                        .font_family("OpenDyslexic Nerd Font")
                                         .text_size(px(10.5))
                                         .font_weight(gpui::FontWeight::BOLD)
                                         .text_color(if is_editing {
@@ -1025,6 +1048,7 @@ impl Render for SettingsView {
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 sm_font.update(cx, |s, cx| {
                                     s.font_family = f_name.to_string();
+                                    s.user_selected_non_dyslexic_font = !f_name.contains("OpenDyslexic");
                                     let _ = s.save_to_disk();
                                     cx.notify();
                                 });
@@ -2115,7 +2139,7 @@ impl Render for SettingsView {
                                     )
                                     .child(
                                         div()
-                                            .font_family("Menlo")
+                                            .font_family("OpenDyslexic Nerd Font")
                                             .text_xs()
                                             .overflow_hidden()
                                             .text_color(rgb(0x8ec07c))
@@ -2507,7 +2531,7 @@ impl Render for SettingsView {
                                     } else {
                                         theme.border_inactive
                                     })
-                                    .font_family("Menlo")
+                                    .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
                                     .text_color(rgb(0x8ec07c))
                                     .cursor(gpui::CursorStyle::IBeam)

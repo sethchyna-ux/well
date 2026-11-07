@@ -30,6 +30,37 @@ pub fn embedded_opendyslexic_fonts() -> Vec<std::borrow::Cow<'static, [u8]>> {
     ]
 }
 
+/// Ensure all embedded OpenDyslexic Nerd Font `.otf` files are installed in
+/// `~/Library/Fonts` on macOS so CoreText and GPUI resolve `"OpenDyslexic Nerd Font"`
+/// and `"OpenDyslexicM Nerd Font Mono"` across every window and text run.
+pub fn ensure_opendyslexic_user_fonts_installed() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let fonts_dir = std::path::PathBuf::from(home).join("Library").join("Fonts");
+    if std::fs::create_dir_all(&fonts_dir).is_err() {
+        return;
+    };
+    let assets: &[(&str, &[u8])] = &[
+        ("OpenDyslexicMNerdFontMono-Regular.otf", EMBEDDED_OPENDYSLEXIC_MONO),
+        ("OpenDyslexicMNerdFont-Regular.otf", EMBEDDED_OPENDYSLEXIC_M_REG),
+        ("OpenDyslexicNerdFont-Regular.otf", EMBEDDED_OPENDYSLEXIC_REG),
+        ("OpenDyslexicNerdFont-Bold.otf", EMBEDDED_OPENDYSLEXIC_BOLD),
+        ("OpenDyslexicNerdFont-Italic.otf", EMBEDDED_OPENDYSLEXIC_ITALIC),
+        ("OpenDyslexicNerdFont-BoldItalic.otf", EMBEDDED_OPENDYSLEXIC_BOLD_ITALIC),
+    ];
+    for (filename, bytes) in assets {
+        let dest = fonts_dir.join(filename);
+        let needs_write = match std::fs::metadata(&dest) {
+            Ok(meta) => meta.len() != bytes.len() as u64,
+            Err(_) => true,
+        };
+        if needs_write {
+            let _ = std::fs::write(&dest, bytes);
+        }
+    }
+}
+
 /// Normalizes font family names and aliases to canonical names recognized by GPUI and CoreText.
 pub fn canonical_font_family(family: &str) -> &'static str {
     let lower = family.to_ascii_lowercase();
