@@ -397,4 +397,59 @@ mod tests {
         assert_eq!(toggle_action.default_keybind, "⌥L");
         assert_eq!(toggle_action.category, ActionCategory::Terminal);
     }
+
+    #[test]
+    fn test_dynamic_terminal_line_numbers_calculation() {
+        // 1. Initial terminal screen: 24 rows, no scrollback history
+        let rows = 24u16;
+        let mut max_scroll = 0usize;
+        let mut scrollback = 0usize;
+        let is_alt_screen = false;
+
+        let base_line = if is_alt_screen {
+            0
+        } else {
+            max_scroll.saturating_sub(scrollback)
+        };
+        assert_eq!(base_line, 0);
+        assert_eq!(base_line + 0 + 1, 1); // Row 0 is line 1
+        assert_eq!(base_line + (rows as usize - 1) + 1, 24); // Bottom row is line 24
+
+        // 2. Output generated: 50 lines scrolled off screen into scrollback buffer
+        max_scroll = 50;
+        scrollback = 0; // At live present
+        let base_line_scrolled = if is_alt_screen {
+            0
+        } else {
+            max_scroll.saturating_sub(scrollback)
+        };
+        assert_eq!(base_line_scrolled, 50);
+        // Line numbers moved up by 50!
+        assert_eq!(base_line_scrolled + 0 + 1, 51); // Top row is now line 51
+        assert_eq!(base_line_scrolled + (rows as usize - 1) + 1, 74); // Bottom row is now line 74
+
+        // 3. User scrolls back up into history by 20 lines
+        scrollback = 20;
+        let base_line_history = if is_alt_screen {
+            0
+        } else {
+            max_scroll.saturating_sub(scrollback)
+        };
+        assert_eq!(base_line_history, 30);
+        assert_eq!(base_line_history + 0 + 1, 31);
+        assert_eq!(base_line_history + (rows as usize - 1) + 1, 54);
+
+        // 4. Gutter digit formatting
+        let total_lines = max_scroll + rows as usize;
+        let gutter_digits = total_lines.max(1).to_string().len().max(3);
+        assert_eq!(gutter_digits, 3);
+        assert_eq!(format!("{:>width$} │ ", 51, width = gutter_digits), " 51 │ ");
+
+        // 5. High-volume output (>1000 lines) expands gutter width cleanly
+        let big_scroll = 1500usize;
+        let big_total_lines = big_scroll + rows as usize;
+        let big_digits = big_total_lines.to_string().len().max(3);
+        assert_eq!(big_digits, 4);
+        assert_eq!(format!("{:>width$} │ ", 1524, width = big_digits), "1524 │ ");
+    }
 }

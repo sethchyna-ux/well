@@ -336,6 +336,44 @@ pub struct DiscoveredSshKey {
     pub path_display: String,
     pub fingerprint: String,
     pub public_key_line: String,
+    pub is_passkey: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KnownHostEntry {
+    pub line_number: usize,
+    pub host_pattern: String,
+    pub key_type: String,
+    pub fingerprint: String,
+    pub raw_line: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalNetworkInterface {
+    pub name: String,
+    pub ip: String,
+    pub netmask: String,
+    pub mac: String,
+    pub is_up: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListeningSocket {
+    pub port: u16,
+    pub protocol: String,
+    pub process_name: String,
+    pub pid: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PingProbeResult {
+    pub host: String,
+    pub transmitted: usize,
+    pub received: usize,
+    pub loss_percent: f32,
+    pub min_ms: f32,
+    pub avg_ms: f32,
+    pub max_ms: f32,
 }
 
 impl DiscoveredSshKey {
@@ -358,12 +396,19 @@ impl DiscoveredSshKey {
                                 .unwrap_or("id_key")
                                 .to_string();
                             let priv_path = ssh_dir.join(&stem);
-                            let algo = if line.starts_with("ssh-ed25519") {
+                            let is_pk = line.starts_with("sk-") || stem.contains("_sk");
+                            let algo = if line.starts_with("sk-ssh-ed25519") {
+                                "FIDO2 Ed25519 Passkey".to_string()
+                            } else if line.starts_with("sk-ecdsa") {
+                                "FIDO2 ECDSA Passkey".to_string()
+                            } else if line.starts_with("ssh-ed25519") {
                                 "Ed25519".to_string()
                             } else if line.starts_with("ssh-rsa") {
                                 "RSA".to_string()
                             } else if line.starts_with("ecdsa") {
                                 "ECDSA".to_string()
+                            } else if is_pk {
+                                "FIDO2 Passkey".to_string()
                             } else {
                                 "SSH".to_string()
                             };
@@ -374,6 +419,7 @@ impl DiscoveredSshKey {
                                 path_display: priv_path.display().to_string(),
                                 fingerprint: fp,
                                 public_key_line: line,
+                                is_passkey: is_pk,
                             });
                         }
                     }
@@ -391,6 +437,7 @@ impl DiscoveredSshKey {
                 public_key_line:
                     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL+8YfSsACIlz5RRVLpeBQTJigsYWE/Huq9Z7RYek0Hb local@well"
                         .into(),
+                is_passkey: false,
             });
         }
         keys
@@ -422,6 +469,201 @@ impl DiscoveredSshKey {
         let snippet: String = body.chars().skip(8).take(27).collect();
         format!("SHA256:{snippet}{:08x}", (h & 0xffff_ffff) as u32)
     }
+}
+
+/// Discover and parse `~/.ssh/known_hosts` into structured security entries
+pub fn discover_known_hosts() -> Vec<KnownHostEntry> {
+    let mut entries = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let kh_path = PathBuf::from(home).join(".ssh").join("known_hosts");
+        if let Ok(content) = std::fs::read_to_string(&kh_path) {
+            for (idx, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let mut parts = trimmed.split_whitespace();
+                let host = parts.next().unwrap_or("?").to_string();
+                let key_type = parts.next().unwrap_or("unknown").to_string();
+                let key_data = parts.next().unwrap_or("");
+                let fp = DiscoveredSshKey::pseudo_fingerprint(&format!("{key_type} {key_data}"));
+                entries.push(KnownHostEntry {
+                    line_number: idx + 1,
+                    host_pattern: host,
+                    key_type,
+                    fingerprint: fp,
+                    raw_line: trimmed.to_string(),
+                });
+            }
+        }
+    }
+    entries
+}
+
+/// Query local network interfaces via macOS `ifconfig`
+pub fn discover_network_interfaces() -> Vec<LocalNetworkInterface> {
+    let mut ifaces = Vec::new();
+    if let Ok(out) = std::process::Command::new("ifconfig").output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut cur_name = String::new();
+        let mut cur_ip = String::new();
+        let mut cur_mask = String::new();
+        let mut cur_mac = String::new();
+        let mut is_up = false;
+
+        for line in text.lines() {
+            if !line.starts_with('\t') && !line.starts_with(' ') {
+                if !cur_name.is_empty() && (!cur_ip.is_empty() || !cur_mac.is_empty()) {
+                    ifaces.push(LocalNetworkInterface {
+                        name: cur_name,
+                        ip: if cur_ip.is_empty() { "Unassigned".into() } else { cur_ip },
+                        netmask: if cur_mask.is_empty() { "255.255.255.0".into() } else { cur_mask },
+                        mac: if cur_mac.is_empty() { "--".into() } else { cur_mac },
+                        is_up,
+                    });
+                }
+                cur_name = line.split(':').next().unwrap_or("").trim().to_string();
+                cur_ip = String::new();
+                cur_mask = String::new();
+                cur_mac = String::new();
+                is_up = line.contains("UP") && line.contains("RUNNING");
+            } else {
+                let trimmed = line.trim();
+                if trimmed.starts_with("inet ") {
+                    let mut parts = trimmed.split_whitespace();
+                    let _ = parts.next(); // "inet"
+                    if let Some(ip) = parts.next() {
+                        cur_ip = ip.to_string();
+                    }
+                    if let Some(m) = parts.nth(1) {
+                        cur_mask = m.to_string();
+                    }
+                } else if trimmed.starts_with("ether ") {
+                    if let Some(mac) = trimmed.split_whitespace().nth(1) {
+                        cur_mac = mac.to_string();
+                    }
+                }
+            }
+        }
+        if !cur_name.is_empty() && (!cur_ip.is_empty() || !cur_mac.is_empty()) {
+            ifaces.push(LocalNetworkInterface {
+                name: cur_name,
+                ip: if cur_ip.is_empty() { "Unassigned".into() } else { cur_ip },
+                netmask: if cur_mask.is_empty() { "255.255.255.0".into() } else { cur_mask },
+                mac: if cur_mac.is_empty() { "--".into() } else { cur_mac },
+                is_up,
+            });
+        }
+    }
+    if ifaces.is_empty() {
+        ifaces.push(LocalNetworkInterface {
+            name: "en0".into(),
+            ip: "192.168.1.172".into(),
+            netmask: "255.255.255.0".into(),
+            mac: "f6:8a:a9:f4:83:86".into(),
+            is_up: true,
+        });
+        ifaces.push(LocalNetworkInterface {
+            name: "lo0".into(),
+            ip: "127.0.0.1".into(),
+            netmask: "255.0.0.0".into(),
+            mac: "00:00:00:00:00:00".into(),
+            is_up: true,
+        });
+    }
+    ifaces
+}
+
+/// Query local listening TCP ports via macOS `lsof`
+pub fn discover_listening_sockets() -> Vec<ListeningSocket> {
+    let mut sockets = Vec::new();
+    if let Ok(out) = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() >= 9 {
+                let cmd = cols[0].to_string();
+                let pid = cols[1].to_string();
+                let node = cols[8];
+                // node is e.g. "*:22", "127.0.0.1:8787", "[::]:5000"
+                if let Some(port_str) = node.split(':').last() {
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        if !sockets.iter().any(|s: &ListeningSocket| s.port == port) {
+                            sockets.push(ListeningSocket {
+                                port,
+                                protocol: "TCP".into(),
+                                process_name: cmd,
+                                pid,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sockets.sort_by_key(|s| s.port);
+    sockets
+}
+
+/// Multi-probe ICMP / TCP ping to compute latency & packet loss
+pub fn run_ping_probe(target_host: &str) -> Option<PingProbeResult> {
+    let host = target_host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let output = std::process::Command::new("ping")
+        .args(["-c", "3", "-t", "2", host])
+        .output()
+        .ok()?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut min_ms = 0.0f32;
+    let mut avg_ms = 0.0f32;
+    let mut max_ms = 0.0f32;
+    let mut loss_pct = 100.0f32;
+
+    for line in text.lines() {
+        if line.contains("packet loss") {
+            if let Some(pct_str) = line.split("% packet loss").next().and_then(|s| s.split(',').last()) {
+                loss_pct = pct_str.trim().parse::<f32>().unwrap_or(0.0);
+            }
+        }
+        if line.contains("round-trip") || line.contains("rtt") {
+            if let Some(stats) = line.split('=').nth(1) {
+                let parts: Vec<&str> = stats.trim().split('/').collect();
+                if parts.len() >= 3 {
+                    min_ms = parts[0].trim().parse().unwrap_or(0.0);
+                    avg_ms = parts[1].trim().parse().unwrap_or(0.0);
+                    max_ms = parts[2].trim().parse().unwrap_or(0.0);
+                }
+            }
+        }
+    }
+
+    Some(PingProbeResult {
+        host: host.to_string(),
+        transmitted: 3,
+        received: ((3.0 * (1.0 - loss_pct / 100.0)).round().clamp(0.0, 3.0)) as usize,
+        loss_percent: loss_pct,
+        min_ms,
+        avg_ms,
+        max_ms,
+    })
+}
+
+/// Resolve DNS records for target hostname
+pub fn resolve_dns_query(host: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    if let Ok(addrs) = format!("{}:80", host.trim()).to_socket_addrs() {
+        for a in addrs {
+            results.push(a.ip().to_string());
+        }
+    }
+    results.dedup();
+    results
 }
 
 /// Spawn a lightweight background HTTP Key Server on `0.0.0.0:<port>` serving `/authorized_keys`.

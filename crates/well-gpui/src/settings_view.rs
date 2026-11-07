@@ -2355,6 +2355,75 @@ impl Render for SettingsView {
                                                         }
                                                     }))
                                                     .child("💾 Save Snippet (↵)"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("paste-snippet-tpl-btn")
+                                                    .px_2p5()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(theme.tab_active_bg)
+                                                    .border_1()
+                                                    .border_color(theme.border_inactive)
+                                                    .text_color(theme.fg)
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .cursor(gpui::CursorStyle::PointingHand)
+                                                    .on_click(cx.listener(|view, _, window, cx| {
+                                                        if let Some(item) = cx.read_from_clipboard() {
+                                                            if let Some(text) = item.text() {
+                                                                view.new_snippet_template.push_str(&text);
+                                                                view.active_input = ActiveFormInput::SnippetTemplate;
+                                                                window.focus(&view.focus_handle);
+                                                                view.status_msg = Some("📋 Pasted from clipboard into template".into());
+                                                                cx.notify();
+                                                            }
+                                                        }
+                                                    }))
+                                                    .child("📋 Paste Template"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("copy-snippet-tpl-btn")
+                                                    .px_2p5()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(theme.tab_active_bg)
+                                                    .border_1()
+                                                    .border_color(theme.border_inactive)
+                                                    .text_color(theme.fg)
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .cursor(gpui::CursorStyle::PointingHand)
+                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                        if !view.new_snippet_template.is_empty() {
+                                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(view.new_snippet_template.clone()));
+                                                            view.status_msg = Some("📋 Copied template to clipboard".into());
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .child("📋 Copy"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("clear-snippet-fields-btn")
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .bg(theme.bg)
+                                                    .border_1()
+                                                    .border_color(theme.border_inactive)
+                                                    .text_color(rgb(0xf87171))
+                                                    .text_xs()
+                                                    .cursor(gpui::CursorStyle::PointingHand)
+                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                        view.new_snippet_trigger.clear();
+                                                        view.new_snippet_label.clear();
+                                                        view.new_snippet_template.clear();
+                                                        view.status_msg = Some("✕ Cleared snippet form".into());
+                                                        cx.notify();
+                                                    }))
+                                                    .child("✕ Clear"),
                                             ),
                                     ),
                             )
@@ -3505,6 +3574,105 @@ impl Render for SettingsView {
 
                 if target_input != ActiveFormInput::None {
                     let key = event.keystroke.key.as_str();
+                    let mods = event.keystroke.modifiers;
+
+                    // Handle ⌘V / Ctrl+V Paste
+                    if (mods.platform || mods.control) && key.eq_ignore_ascii_case("v") {
+                        if let Some(item) = cx.read_from_clipboard() {
+                            if let Some(text) = item.text() {
+                                match target_input {
+                                    ActiveFormInput::SnippetTrigger => {
+                                        view.new_snippet_trigger.push_str(text.trim());
+                                    }
+                                    ActiveFormInput::SnippetLabel => {
+                                        view.new_snippet_label.push_str(text.trim());
+                                    }
+                                    ActiveFormInput::SnippetTemplate => {
+                                        view.new_snippet_template.push_str(&text);
+                                    }
+                                    ActiveFormInput::ShortcutsFilter => {
+                                        view.shortcuts_filter.push_str(text.trim());
+                                        view.shortcuts_page = 0;
+                                    }
+                                    ActiveFormInput::SshName => {
+                                        view.ssh_draft.name.push_str(text.trim());
+                                    }
+                                    ActiveFormInput::SshHostname => {
+                                        view.ssh_draft.hostname.push_str(text.trim());
+                                    }
+                                    ActiveFormInput::SshUser => {
+                                        view.ssh_draft.user.push_str(text.trim());
+                                    }
+                                    ActiveFormInput::SshPort => {
+                                        for c in text.chars().filter(|c| c.is_ascii_digit()) {
+                                            if view.ssh_draft.port.len() < 5 {
+                                                view.ssh_draft.port.push(c);
+                                            }
+                                        }
+                                    }
+                                    ActiveFormInput::SshIdentityFile => {
+                                        view.ssh_draft.identity_file.push_str(text.trim());
+                                    }
+                                    ActiveFormInput::SshProxyJump => {
+                                        view.ssh_draft.proxy_jump.push_str(text.trim());
+                                    }
+                                    _ => {}
+                                }
+                                view.status_msg = Some("📋 Pasted from clipboard".into());
+                                cx.notify();
+                                return;
+                            }
+                        }
+                    }
+
+                    // Handle ⌘C / Ctrl+C Copy
+                    if (mods.platform || mods.control) && key.eq_ignore_ascii_case("c") {
+                        let text_to_copy = match target_input {
+                            ActiveFormInput::SnippetTrigger => Some(view.new_snippet_trigger.clone()),
+                            ActiveFormInput::SnippetLabel => Some(view.new_snippet_label.clone()),
+                            ActiveFormInput::SnippetTemplate => Some(view.new_snippet_template.clone()),
+                            ActiveFormInput::ShortcutsFilter => Some(view.shortcuts_filter.clone()),
+                            ActiveFormInput::SshName => Some(view.ssh_draft.name.clone()),
+                            ActiveFormInput::SshHostname => Some(view.ssh_draft.hostname.clone()),
+                            ActiveFormInput::SshUser => Some(view.ssh_draft.user.clone()),
+                            ActiveFormInput::SshPort => Some(view.ssh_draft.port.clone()),
+                            ActiveFormInput::SshIdentityFile => Some(view.ssh_draft.identity_file.clone()),
+                            ActiveFormInput::SshProxyJump => Some(view.ssh_draft.proxy_jump.clone()),
+                            _ => None,
+                        };
+                        if let Some(t) = text_to_copy {
+                            if !t.is_empty() {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(t));
+                                view.status_msg = Some("📋 Copied field to clipboard".into());
+                                cx.notify();
+                                return;
+                            }
+                        }
+                    }
+
+                    // Handle ⌘A / Ctrl+A Clear / Select-all
+                    if (mods.platform || mods.control) && key.eq_ignore_ascii_case("a") {
+                        match target_input {
+                            ActiveFormInput::SnippetTrigger => view.new_snippet_trigger.clear(),
+                            ActiveFormInput::SnippetLabel => view.new_snippet_label.clear(),
+                            ActiveFormInput::SnippetTemplate => view.new_snippet_template.clear(),
+                            ActiveFormInput::ShortcutsFilter => {
+                                view.shortcuts_filter.clear();
+                                view.shortcuts_page = 0;
+                            }
+                            ActiveFormInput::SshName => view.ssh_draft.name.clear(),
+                            ActiveFormInput::SshHostname => view.ssh_draft.hostname.clear(),
+                            ActiveFormInput::SshUser => view.ssh_draft.user.clear(),
+                            ActiveFormInput::SshPort => view.ssh_draft.port.clear(),
+                            ActiveFormInput::SshIdentityFile => view.ssh_draft.identity_file.clear(),
+                            ActiveFormInput::SshProxyJump => view.ssh_draft.proxy_jump.clear(),
+                            _ => {}
+                        }
+                        view.status_msg = Some("✕ Cleared field".into());
+                        cx.notify();
+                        return;
+                    }
+
                     match key {
                         "tab" => {
                             view.active_input = match target_input {

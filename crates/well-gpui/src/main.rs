@@ -1,4 +1,5 @@
 use gpui::*;
+use gpui::prelude::FluentBuilder as _;
 
 mod actions;
 mod diagnostics;
@@ -15,11 +16,14 @@ use settings_view::{CursorShape, SettingsSection, SettingsView, TerminalSettings
 use ssh_console::{
     build_legacy_bios_option43, build_qemu_uefi_test_command, build_standalone_dns_option6,
     classify_chainload_payload, detect_primary_lan_ip, discover_arp_neighbors,
-    generate_strict_ipxe_script, is_ipxe_stage2_client, run_fast_port_scan,
-    send_wol_magic_packet, start_http_key_server, start_pxe_http_boot_server, ArpNeighborEntry,
-    ChainloadTargetKind, ClientArch, DiscoveredSshKey, PortScanResult, PxeBootSubtab,
-    PxeServerMode, ServerHubSubtab, SmbShareEntry, SshConsoleInputField, SshConsoleSection,
-    SshHostEditorDraft, SshTunnelEntry, SshTunnelKind, TftpAction,
+    discover_known_hosts, discover_listening_sockets, discover_network_interfaces,
+    generate_strict_ipxe_script, is_ipxe_stage2_client, resolve_dns_query,
+    run_fast_port_scan, run_ping_probe, send_wol_magic_packet, start_http_key_server,
+    start_pxe_http_boot_server, ArpNeighborEntry, ChainloadTargetKind, ClientArch,
+    DiscoveredSshKey, KnownHostEntry, ListeningSocket, LocalNetworkInterface,
+    PingProbeResult, PortScanResult, PxeBootSubtab, PxeServerMode, ServerHubSubtab,
+    SmbShareEntry, SshConsoleInputField, SshConsoleSection, SshHostEditorDraft,
+    SshTunnelEntry, SshTunnelKind, TftpAction,
 };
 use well_shell::ssh::{SshEngine, SshHostConfig, SshTarget};
 use well_shell::theia_ssh::TheiaSshProfile;
@@ -1072,6 +1076,14 @@ impl Render for TerminalView {
 
         let mut parser = self.pty.parser.lock().unwrap();
         let scrollback = parser.screen().scrollback();
+        let max_scroll = {
+            let screen_mut = parser.screen_mut();
+            screen_mut.set_scrollback(usize::MAX);
+            let max = screen_mut.scrollback();
+            screen_mut.set_scrollback(scrollback);
+            max
+        };
+        let is_alt_screen = parser.screen().alternate_screen();
         let size = parser.screen().size();
         let (cursor_row, cursor_col) = parser.screen().cursor_position();
         let show_vt_cursor = !parser.screen().hide_cursor() && !self.mneme_active && scrollback == 0;
@@ -1082,11 +1094,28 @@ impl Render for TerminalView {
         };
         let ghost_len = active_ghost.map(|g| g.chars().count() as u16).unwrap_or(0);
 
+        let base_line = if is_alt_screen {
+            0
+        } else {
+            max_scroll.saturating_sub(scrollback)
+        };
+        let total_lines = if is_alt_screen {
+            size.0 as usize
+        } else {
+            max_scroll + size.0 as usize
+        };
+        let gutter_digits = total_lines.max(1).to_string().len().max(3);
+        let gutter_chars = if show_line_numbers {
+            (gutter_digits + 3) as f32
+        } else {
+            0.0
+        };
+
         let mut row_elements = Vec::new();
         for row in 0..size.0 {
             let mut col_elements = Vec::new();
             if show_line_numbers {
-                let line_no = row + 1;
+                let line_no = base_line + row as usize + 1;
                 let is_current_line = show_vt_cursor && row == cursor_row;
                 let gutter_color = if is_current_line {
                     if is_focused {
@@ -1106,7 +1135,7 @@ impl Render for TerminalView {
                         } else {
                             gpui::FontWeight::NORMAL
                         })
-                        .child(format!("{:>3} │ ", line_no)),
+                        .child(format!("{:>width$} │ ", line_no, width = gutter_digits)),
                 );
             }
             for col in 0..size.1 {
@@ -1221,14 +1250,6 @@ impl Render for TerminalView {
             row_elements.push(div().flex().flex_row().children(col_elements));
         }
 
-        let max_scroll = {
-            let cur = parser.screen().scrollback();
-            let screen_mut = parser.screen_mut();
-            screen_mut.set_scrollback(usize::MAX);
-            let max = screen_mut.scrollback();
-            screen_mut.set_scrollback(cur);
-            max
-        };
         drop(parser);
 
         let (pane_bg, pane_border) = if let Some(prof) = &self.ssh_profile {
@@ -1661,12 +1682,13 @@ impl Render for TerminalView {
                 let last_size = self.last_size.clone();
                 let font_size = self.settings.read(cx).font_size;
                 let show_line_numbers = self.settings.read(cx).show_line_numbers;
+                let gutter_chars_captured = gutter_chars;
                 canvas(
                     move |bounds, _window, _cx| {
                         let total_width = f32::from(bounds.size.width);
                         let char_width = (font_size * 0.6).max(1.0);
                         let effective_width = if show_line_numbers {
-                            (total_width - (char_width * 6.0)).max(char_width)
+                            (total_width - (char_width * gutter_chars_captured)).max(char_width)
                         } else {
                             total_width
                         };
@@ -1692,7 +1714,7 @@ impl Render for TerminalView {
                 self.kitty_images.iter().map(|img_overlay| {
                     let char_width = self.settings.read(cx).font_size * 0.6;
                     let line_height = self.settings.read(cx).font_size * 1.25;
-                    let gutter_offset = if show_line_numbers { char_width * 6.0 } else { 0.0 };
+                    let gutter_offset = if show_line_numbers { char_width * gutter_chars } else { 0.0 };
 
                     let top = img_overlay.cursor_row as f32 * line_height;
                     let left = img_overlay.cursor_col as f32 * char_width + gutter_offset;
@@ -2130,12 +2152,34 @@ struct WorkspaceTab {
     ssh_target: Option<SshTarget>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetProbeKind {
+    Ping,
+    Dns,
+    Refresh,
+}
+
+enum NetProbeOutcome {
+    Ping(Option<PingProbeResult>),
+    Dns(Vec<String>),
+    Refresh(Vec<LocalNetworkInterface>, Vec<ListeningSocket>, Vec<ArpNeighborEntry>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum KeyVaultSubtab {
+    #[default]
+    KeyPairs,
+    Passkeys,
+    KnownHosts,
+}
+
 #[derive(Clone, Debug)]
 struct TheiaSshState {
     open: bool,
     section: SshConsoleSection,
     server_subtab: ServerHubSubtab,
     pxe_subtab: PxeBootSubtab,
+    key_vault_subtab: KeyVaultSubtab,
     active_input: SshConsoleInputField,
     search_filter: String,
     host_draft: SshHostEditorDraft,
@@ -2167,6 +2211,11 @@ struct TheiaSshState {
     net_target_mac: String,
     net_port_scan: Vec<PortScanResult>,
     net_arp_entries: Vec<ArpNeighborEntry>,
+    net_interfaces: Vec<LocalNetworkInterface>,
+    net_listening_sockets: Vec<ListeningSocket>,
+    net_ping_result: Option<PingProbeResult>,
+    net_dns_results: Vec<String>,
+    net_busy: bool,
     status_message: Option<String>,
     forward_caduceus_ipc: bool,
 }
@@ -2179,6 +2228,7 @@ impl Default for TheiaSshState {
             section: SshConsoleSection::HostEditor,
             server_subtab: ServerHubSubtab::ServerHosting,
             pxe_subtab: PxeBootSubtab::PxeServer,
+            key_vault_subtab: KeyVaultSubtab::KeyPairs,
             active_input: SshConsoleInputField::SidebarSearch,
             search_filter: String::new(),
             host_draft: SshHostEditorDraft::default(),
@@ -2210,8 +2260,108 @@ impl Default for TheiaSshState {
             net_target_mac: "a8:a1:59:2c:41:0e".into(),
             net_port_scan: Vec::new(),
             net_arp_entries: discover_arp_neighbors(),
+            net_interfaces: Vec::new(),
+            net_listening_sockets: Vec::new(),
+            net_ping_result: None,
+            net_dns_results: Vec::new(),
+            net_busy: false,
             status_message: None,
             forward_caduceus_ipc: true,
+        }
+    }
+}
+
+impl TheiaSshState {
+    pub fn active_input_value(&self) -> String {
+        match self.active_input {
+            SshConsoleInputField::SidebarSearch => self.search_filter.clone(),
+            SshConsoleInputField::HostName => self.host_draft.name.clone(),
+            SshConsoleInputField::HostHostname => self.host_draft.hostname.clone(),
+            SshConsoleInputField::HostUser => self.host_draft.user.clone(),
+            SshConsoleInputField::HostPort => self.host_draft.port.clone(),
+            SshConsoleInputField::HostIdentityFile => self.host_draft.identity_file.clone(),
+            SshConsoleInputField::HostProxyJump => self.host_draft.proxy_jump.clone(),
+            SshConsoleInputField::TunnelLocalListen => self.tunnel_draft_local.clone(),
+            SshConsoleInputField::TunnelRemoteTarget => self.tunnel_draft_remote.clone(),
+            SshConsoleInputField::ServerPort => self.server_port.clone(),
+            SshConsoleInputField::ServerListenAddr => self.server_listen_addr.clone(),
+            SshConsoleInputField::AgentKeyPath => self.agent_key_path.clone(),
+            SshConsoleInputField::TunnelSshHost => self.tunnel_ssh_host.clone(),
+            SshConsoleInputField::KeyServerPort => self.key_server_port.clone(),
+            SshConsoleInputField::PxeServerIp => self.pxe_server_ip.clone(),
+            SshConsoleInputField::PxeHttpPort => self.pxe_http_port.clone(),
+            SshConsoleInputField::PxeBootFile => self.pxe_bootfile.clone(),
+            SshConsoleInputField::SmbServerHost => self.smb_draft_host.clone(),
+            SshConsoleInputField::SmbShareName => self.smb_draft_share.clone(),
+            SshConsoleInputField::SmbUsername => self.smb_draft_user.clone(),
+            SshConsoleInputField::NetTargetHost => self.net_target_host.clone(),
+            SshConsoleInputField::NetTargetMac => self.net_target_mac.clone(),
+        }
+    }
+
+    pub fn append_to_active_input(&mut self, text: &str) {
+        match self.active_input {
+            SshConsoleInputField::SidebarSearch => self.search_filter.push_str(text),
+            SshConsoleInputField::HostName => self.host_draft.name.push_str(text),
+            SshConsoleInputField::HostHostname => self.host_draft.hostname.push_str(text),
+            SshConsoleInputField::HostUser => self.host_draft.user.push_str(text),
+            SshConsoleInputField::HostPort => {
+                let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+                self.host_draft.port.push_str(&digits);
+            }
+            SshConsoleInputField::HostIdentityFile => self.host_draft.identity_file.push_str(text),
+            SshConsoleInputField::HostProxyJump => self.host_draft.proxy_jump.push_str(text),
+            SshConsoleInputField::TunnelLocalListen => self.tunnel_draft_local.push_str(text),
+            SshConsoleInputField::TunnelRemoteTarget => self.tunnel_draft_remote.push_str(text),
+            SshConsoleInputField::ServerPort => {
+                let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+                self.server_port.push_str(&digits);
+            }
+            SshConsoleInputField::ServerListenAddr => self.server_listen_addr.push_str(text),
+            SshConsoleInputField::AgentKeyPath => self.agent_key_path.push_str(text),
+            SshConsoleInputField::TunnelSshHost => self.tunnel_ssh_host.push_str(text),
+            SshConsoleInputField::KeyServerPort => {
+                let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+                self.key_server_port.push_str(&digits);
+            }
+            SshConsoleInputField::PxeServerIp => self.pxe_server_ip.push_str(text),
+            SshConsoleInputField::PxeHttpPort => {
+                let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+                self.pxe_http_port.push_str(&digits);
+            }
+            SshConsoleInputField::PxeBootFile => self.pxe_bootfile.push_str(text),
+            SshConsoleInputField::SmbServerHost => self.smb_draft_host.push_str(text),
+            SshConsoleInputField::SmbShareName => self.smb_draft_share.push_str(text),
+            SshConsoleInputField::SmbUsername => self.smb_draft_user.push_str(text),
+            SshConsoleInputField::NetTargetHost => self.net_target_host.push_str(text),
+            SshConsoleInputField::NetTargetMac => self.net_target_mac.push_str(text),
+        }
+    }
+
+    pub fn clear_active_input(&mut self) {
+        match self.active_input {
+            SshConsoleInputField::SidebarSearch => self.search_filter.clear(),
+            SshConsoleInputField::HostName => self.host_draft.name.clear(),
+            SshConsoleInputField::HostHostname => self.host_draft.hostname.clear(),
+            SshConsoleInputField::HostUser => self.host_draft.user.clear(),
+            SshConsoleInputField::HostPort => self.host_draft.port.clear(),
+            SshConsoleInputField::HostIdentityFile => self.host_draft.identity_file.clear(),
+            SshConsoleInputField::HostProxyJump => self.host_draft.proxy_jump.clear(),
+            SshConsoleInputField::TunnelLocalListen => self.tunnel_draft_local.clear(),
+            SshConsoleInputField::TunnelRemoteTarget => self.tunnel_draft_remote.clear(),
+            SshConsoleInputField::ServerPort => self.server_port.clear(),
+            SshConsoleInputField::ServerListenAddr => self.server_listen_addr.clear(),
+            SshConsoleInputField::AgentKeyPath => self.agent_key_path.clear(),
+            SshConsoleInputField::TunnelSshHost => self.tunnel_ssh_host.clear(),
+            SshConsoleInputField::KeyServerPort => self.key_server_port.clear(),
+            SshConsoleInputField::PxeServerIp => self.pxe_server_ip.clear(),
+            SshConsoleInputField::PxeHttpPort => self.pxe_http_port.clear(),
+            SshConsoleInputField::PxeBootFile => self.pxe_bootfile.clear(),
+            SshConsoleInputField::SmbServerHost => self.smb_draft_host.clear(),
+            SshConsoleInputField::SmbShareName => self.smb_draft_share.clear(),
+            SshConsoleInputField::SmbUsername => self.smb_draft_user.clear(),
+            SshConsoleInputField::NetTargetHost => self.net_target_host.clear(),
+            SshConsoleInputField::NetTargetMac => self.net_target_mac.clear(),
         }
     }
 }
@@ -2431,6 +2581,7 @@ impl WorkspaceView {
             "theia::OpenNetworkTools" => {
                 self.ssh_state.section = SshConsoleSection::NetworkTools;
                 self.ssh_state.open = true;
+                self.spawn_net_probe(NetProbeKind::Refresh, cx);
                 window.focus(&self.ssh_focus_handle);
                 self.sync_modal_open_flag(cx);
             }
@@ -2884,6 +3035,9 @@ impl WorkspaceView {
                     .font_weight(gpui::FontWeight::BOLD)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.ssh_state.section = sec;
+                        if sec == SshConsoleSection::NetworkTools {
+                            view.spawn_net_probe(NetProbeKind::Refresh, cx);
+                        }
                         window.focus(&view.ssh_focus_handle);
                         cx.notify();
                     }))
@@ -3075,7 +3229,9 @@ impl WorkspaceView {
             let is_editing = self.ssh_state.host_draft.editing_index == Some(idx_val)
                 && section == SshConsoleSection::HostEditor;
             let prof_edit = prof.clone();
+            let prof_card = prof.clone();
             let prof_connect = prof.clone();
+            let prof_split = prof.clone();
 
             saved_list = saved_list.child(
                 div()
@@ -3093,6 +3249,17 @@ impl WorkspaceView {
                     } else {
                         rgb(0x1e293b)
                     })
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.ssh_state.section = SshConsoleSection::HostEditor;
+                        view.ssh_state.host_draft = SshHostEditorDraft::from_profile(
+                            Some(idx_val),
+                            &prof_card,
+                        );
+                        view.ssh_state.active_input = SshConsoleInputField::HostHostname;
+                        window.focus(&view.ssh_focus_handle);
+                        cx.notify();
+                    }))
                     .flex()
                     .flex_col()
                     .gap_0p5()
@@ -3156,8 +3323,32 @@ impl WorkspaceView {
                                     )
                                     .child(
                                         div()
+                                            .id(("split-saved-ssh", idx_val))
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(rgb(0x1e293b))
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(0x38bdf8))
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                let p = prof_split.clone();
+                                                let base = view.ssh_engine.resolve_target(&p.host.hostname);
+                                                let target = p.build_target(base);
+                                                view.connect_ssh_with_mode(target, Some(p), Some(SplitDirection::Horizontal), window, cx);
+                                            }))
+                                            .child("◫ Split"),
+                                    )
+                                    .child(
+                                        div()
                                             .id(("conn-saved-ssh", idx_val))
-                                            .text_xs()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(gpui::rgba(0x06b6d422))
+                                            .border_1()
+                                            .border_color(rgb(0x06b6d4))
+                                            .text_size(px(10.0))
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0x22d3ee))
                                             .cursor(gpui::CursorStyle::PointingHand)
@@ -3167,7 +3358,7 @@ impl WorkspaceView {
                                                 let target = p.build_target(base);
                                                 view.connect_ssh_with_mode(target, Some(p), None, window, cx);
                                             }))
-                                            .child("↗"),
+                                            .child("↗ Connect"),
                                     ),
                             ),
                     )
@@ -3211,7 +3402,9 @@ impl WorkspaceView {
             let user_str = prof.host.user.clone().unwrap_or_else(|| "user".to_string());
             let subline = format!("{}@{}:{}", user_str, prof.host.hostname, prof.host.port);
             let prof_edit = prof.clone();
+            let prof_card = prof.clone();
             let prof_conn = prof.clone();
+            let prof_split = prof.clone();
 
             cfg_list = cfg_list.child(
                 div()
@@ -3221,6 +3414,16 @@ impl WorkspaceView {
                     .bg(rgb(0x131b2c))
                     .border_1()
                     .border_color(rgb(0x1e293b))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.ssh_state.section = SshConsoleSection::HostEditor;
+                        view.ssh_state.host_draft =
+                            SshHostEditorDraft::from_profile(None, &prof_card);
+                        view.ssh_state.active_input =
+                            SshConsoleInputField::HostHostname;
+                        window.focus(&view.ssh_focus_handle);
+                        cx.notify();
+                    }))
                     .flex()
                     .flex_col()
                     .gap_0p5()
@@ -3278,8 +3481,32 @@ impl WorkspaceView {
                                     )
                                     .child(
                                         div()
+                                            .id(("split-cfg-ssh", cidx))
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(rgb(0x1e293b))
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(0x38bdf8))
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                let p = prof_split.clone();
+                                                let base = view.ssh_engine.resolve_target(&p.host.name);
+                                                let target = p.build_target(base);
+                                                view.connect_ssh_with_mode(target, Some(p), Some(SplitDirection::Horizontal), window, cx);
+                                            }))
+                                            .child("◫ Split"),
+                                    )
+                                    .child(
+                                        div()
                                             .id(("conn-cfg-ssh", cidx))
-                                            .text_xs()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(gpui::rgba(0x06b6d422))
+                                            .border_1()
+                                            .border_color(rgb(0x06b6d4))
+                                            .text_size(px(10.0))
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0x22d3ee))
                                             .cursor(gpui::CursorStyle::PointingHand)
@@ -3289,7 +3516,7 @@ impl WorkspaceView {
                                                 let target = p.build_target(base);
                                                 view.connect_ssh_with_mode(target, Some(p), None, window, cx);
                                             }))
-                                            .child("↗"),
+                                            .child("↗ Connect"),
                                     ),
                             ),
                     )
@@ -4319,7 +4546,14 @@ impl WorkspaceView {
                     .into_any_element()
             }
             SshConsoleSection::KeyVault => {
-                let keys = DiscoveredSshKey::discover_local_keys();
+                let all_keys = DiscoveredSshKey::discover_local_keys();
+                let passkeys: Vec<DiscoveredSshKey> =
+                    all_keys.iter().filter(|k| k.is_passkey).cloned().collect();
+                let keys: Vec<DiscoveredSshKey> =
+                    all_keys.into_iter().filter(|k| !k.is_passkey).collect();
+                let known_hosts_list: Vec<KnownHostEntry> = discover_known_hosts();
+                let vault_tab = self.ssh_state.key_vault_subtab;
+                let is_kp = vault_tab == KeyVaultSubtab::KeyPairs;
                 let ks_running = self.ssh_state.key_server_running;
                 let ks_port = self.ssh_state.key_server_port.clone();
                 let lan_ip = self.ssh_state.pxe_server_ip.clone();
@@ -4327,13 +4561,7 @@ impl WorkspaceView {
                     "mkdir -p ~/.ssh && curl -fsSL http://{lan_ip}:{ks_port}/authorized_keys >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
                 );
                 let bootstrap_for_copy = bootstrap_cmd.clone();
-                let known_hosts_count = if let Ok(home) = std::env::var("HOME") {
-                    std::fs::read_to_string(format!("{home}/.ssh/known_hosts"))
-                        .map(|s| s.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).count())
-                        .unwrap_or(22)
-                } else {
-                    22
-                };
+                let known_hosts_count = known_hosts_list.len();
 
                 let mut key_cards = div().flex().flex_col().gap_2();
                 for (kidx, key) in keys.iter().enumerate() {
@@ -4525,6 +4753,378 @@ impl WorkspaceView {
                     );
                 }
 
+                let vault_pill = |id: &'static str, label: String, active: bool| {
+                    div()
+                        .id(id)
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .bg(if active { rgb(0x10b981) } else { rgb(0x090d16) })
+                        .text_color(if active { rgb(0x090d16) } else { rgb(0x94a3b8) })
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .hover(|st| st.text_color(rgb(0xf8fafc)))
+                        .child(label)
+                };
+                let vault_pill_kp = vault_pill(
+                    "vault-tab-keypairs",
+                    format!("🔑 SSH Key Pairs ({})", keys.len()),
+                    vault_tab == KeyVaultSubtab::KeyPairs,
+                )
+                .on_click(cx.listener(|view, _, _, cx| {
+                    view.ssh_state.key_vault_subtab = KeyVaultSubtab::KeyPairs;
+                    cx.notify();
+                }));
+                let vault_pill_pk = vault_pill(
+                    "vault-tab-passkeys",
+                    format!("🔐 Passkeys (YubiKey & Touch ID) ({})", passkeys.len()),
+                    vault_tab == KeyVaultSubtab::Passkeys,
+                )
+                .on_click(cx.listener(|view, _, _, cx| {
+                    view.ssh_state.key_vault_subtab = KeyVaultSubtab::Passkeys;
+                    cx.notify();
+                }));
+                let vault_pill_kh = vault_pill(
+                    "vault-tab-knownhosts",
+                    format!("🛡 Known Hosts & Security ({known_hosts_count})"),
+                    vault_tab == KeyVaultSubtab::KnownHosts,
+                )
+                .on_click(cx.listener(|view, _, _, cx| {
+                    view.ssh_state.key_vault_subtab = KeyVaultSubtab::KnownHosts;
+                    cx.notify();
+                }));
+
+                let vault_btn = |id: SharedString, label: &'static str, fg: u32, border: u32| {
+                    div()
+                        .id(id)
+                        .px_2p5()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(0x161f33))
+                        .border_1()
+                        .border_color(rgb(border))
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(fg))
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .child(label)
+                };
+
+                let vault_extra_panel: Option<AnyElement> = match vault_tab {
+                    KeyVaultSubtab::KeyPairs => None,
+                    KeyVaultSubtab::Passkeys => {
+                        let mut col = div().flex().flex_col().gap_2();
+                        // Action bar: generate / probe hardware authenticators
+                        col = col.child(
+                            div()
+                                .p_3()
+                                .rounded_xl()
+                                .bg(rgb(0x111726))
+                                .border_1()
+                                .border_color(rgb(0x7c3aed))
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child("🔐 FIDO2 Hardware Passkeys (sk-ssh-ed25519@openssh.com / sk-ecdsa-sha2-nistp256)"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x94a3b8))
+                                        .child("Private key material never leaves the authenticator. Each SSH login requires a physical touch on the YubiKey (or Touch ID via a FIDO2 provider)."),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .child(
+                                            vault_btn("pk-gen-ed25519".into(), "🔑 Generate ed25519-sk Passkey", 0xc4b5fd, 0x7c3aed)
+                                                .on_click(cx.listener(|view, _, window, cx| {
+                                                    view.dispatch_command_to_split_pane(
+                                                        "ssh-keygen -t ed25519-sk -O resident -O verify-required -C \"well-passkey@$(hostname -s)\" -f ~/.ssh/id_ed25519_sk",
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    view.ssh_state.status_message = Some(
+                                                        "🔑 Touch your security key in the split pane to mint a resident ed25519-sk passkey".into(),
+                                                    );
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            vault_btn("pk-gen-ecdsa".into(), "🔑 Generate ecdsa-sk Passkey", 0xc4b5fd, 0x7c3aed)
+                                                .on_click(cx.listener(|view, _, window, cx| {
+                                                    view.dispatch_command_to_split_pane(
+                                                        "ssh-keygen -t ecdsa-sk -C \"well-passkey@$(hostname -s)\" -f ~/.ssh/id_ecdsa_sk",
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            vault_btn("pk-import-resident".into(), "⤓ Import Resident Keys (-K)", 0x38bdf8, 0x0284c7)
+                                                .on_click(cx.listener(|view, _, window, cx| {
+                                                    view.dispatch_command_to_split_pane(
+                                                        "cd ~/.ssh && ssh-keygen -K",
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            vault_btn("pk-test-presence".into(), "⚡ Test Security Key Presence", 0x34d399, 0x10b981)
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    let ids = DiscoveredSshKey::query_loaded_agent_identities();
+                                                    let sk_loaded = ids
+                                                        .iter()
+                                                        .filter(|l| l.contains("SK") || l.contains("sk-"))
+                                                        .count();
+                                                    let usb = std::process::Command::new("ioreg")
+                                                        .args(["-p", "IOUSB", "-l", "-w", "0"])
+                                                        .output()
+                                                        .map(|o| {
+                                                            let t = String::from_utf8_lossy(&o.stdout).to_lowercase();
+                                                            t.contains("yubikey") || t.contains("fido") || t.contains("security key")
+                                                        })
+                                                        .unwrap_or(false);
+                                                    view.ssh_state.status_message = Some(format!(
+                                                        "{} USB FIDO2 authenticator {} · {} sk-key(s) loaded in ssh-agent",
+                                                        if usb { "🟢" } else { "⚪" },
+                                                        if usb { "detected" } else { "not detected" },
+                                                        sk_loaded
+                                                    ));
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                ),
+                        );
+
+                        if passkeys.is_empty() {
+                            col = col.child(
+                                div()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .bg(rgb(0x090d16))
+                                    .border_1()
+                                    .border_color(rgb(0x1e293b))
+                                    .text_xs()
+                                    .text_color(rgb(0x64748b))
+                                    .child("No *_sk passkeys found in ~/.ssh yet. Plug in a YubiKey and click “Generate ed25519-sk Passkey”, or “Import Resident Keys” to pull existing credentials off the device."),
+                            );
+                        }
+                        for (pidx, pk) in passkeys.iter().enumerate() {
+                            let pk_pub = pk.public_key_line.clone();
+                            let pk_path = pk.path_display.clone();
+                            let pk_path_use = pk_path.clone();
+                            let pk_path_agent = pk_path.clone();
+                            col = col.child(
+                                div()
+                                    .id(("passkey-card", pidx))
+                                    .p_3()
+                                    .rounded_xl()
+                                    .bg(rgb(0x111726))
+                                    .border_1()
+                                    .border_color(rgb(0x4c1d95))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1p5()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .justify_between()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(div().text_sm().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0xf8fafc)).child(pk.name.clone()))
+                                                    .child(
+                                                        div()
+                                                            .px_1p5()
+                                                            .py_0p5()
+                                                            .rounded_sm()
+                                                            .bg(rgb(0x2e1065))
+                                                            .text_color(rgb(0xc4b5fd))
+                                                            .text_xs()
+                                                            .font_weight(gpui::FontWeight::BOLD)
+                                                            .child(pk.algorithm.clone()),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .gap_2()
+                                                    .child(
+                                                        vault_btn(format!("pk-agent-{pidx}").into(), "🛡 Add to Agent", 0xe2e8f0, 0x26324d)
+                                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                                view.dispatch_command_to_split_pane(
+                                                                    &format!("ssh-add {pk_path_agent}"),
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            })),
+                                                    )
+                                                    .child(
+                                                        vault_btn(format!("pk-use-{pidx}").into(), "✎ Use in Host Editor", 0x38bdf8, 0x0284c7)
+                                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                                view.ssh_state.host_draft.identity_file = pk_path_use.clone();
+                                                                view.ssh_state.section = SshConsoleSection::HostEditor;
+                                                                view.ssh_state.active_input = SshConsoleInputField::HostIdentityFile;
+                                                                window.focus(&view.ssh_focus_handle);
+                                                                cx.notify();
+                                                            })),
+                                                    )
+                                                    .child(
+                                                        vault_btn(format!("pk-copy-{pidx}").into(), "📋 Copy Passkey", 0x22d3ee, 0x06b6d4)
+                                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(pk_pub.clone()));
+                                                                view.ssh_state.status_message =
+                                                                    Some("📋 Copied passkey public key".into());
+                                                                cx.notify();
+                                                            })),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(pk_path))
+                                    .child(div().font_family("Menlo").text_xs().text_color(rgb(0x94a3b8)).child(format!("Fingerprint:  {}", pk.fingerprint))),
+                            );
+                        }
+                        Some(col.into_any_element())
+                    }
+                    KeyVaultSubtab::KnownHosts => {
+                        let mut col = div().flex().flex_col().gap_1p5();
+                        col = col.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .justify_between()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(0xf8fafc))
+                                        .child(format!("~/.ssh/known_hosts — {} trusted host keys", known_hosts_list.len())),
+                                )
+                                .child(
+                                    vault_btn("kh-hash".into(), "# Hash Hostnames (-H)", 0xfbbf24, 0xf59e0b)
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.dispatch_command_to_split_pane("ssh-keygen -H -f ~/.ssh/known_hosts", window, cx);
+                                        })),
+                                ),
+                        );
+                        if known_hosts_list.is_empty() {
+                            col = col.child(
+                                div().text_xs().text_color(rgb(0x64748b)).child("No known_hosts entries yet."),
+                            );
+                        }
+                        for (hidx, kh) in known_hosts_list.iter().enumerate() {
+                            let raw = kh.raw_line.clone();
+                            let host_first = kh
+                                .host_pattern
+                                .split(',')
+                                .next()
+                                .unwrap_or("")
+                                .to_string();
+                            let host_forget = host_first.clone();
+                            let host_scan = host_first.clone();
+                            col = col.child(
+                                div()
+                                    .id(("known-host-row", hidx))
+                                    .px_3()
+                                    .py_1p5()
+                                    .rounded_lg()
+                                    .bg(rgb(0x090d16))
+                                    .border_1()
+                                    .border_color(rgb(0x162032))
+                                    .flex()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .gap_3()
+                                            .items_center()
+                                            .min_w_0()
+                                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(format!("L{}", kh.line_number)))
+                                            .child(
+                                                div()
+                                                    .font_family("Menlo")
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(rgb(0x22d3ee))
+                                                    .child(if kh.host_pattern.starts_with("|1|") {
+                                                        "‹hashed host›".to_string()
+                                                    } else {
+                                                        kh.host_pattern.chars().take(48).collect::<String>()
+                                                    }),
+                                            )
+                                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0xa855f7)).child(kh.key_type.clone()))
+                                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(kh.fingerprint.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .gap_2()
+                                            .child(
+                                                vault_btn(format!("kh-scan-{hidx}").into(), "↻ Re-scan", 0x38bdf8, 0x0284c7)
+                                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                                        view.dispatch_command_to_split_pane(
+                                                            &format!("ssh-keyscan -T 3 {host_scan} | ssh-keygen -lf -"),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    })),
+                                            )
+                                            .child(
+                                                vault_btn(format!("kh-copy-{hidx}").into(), "📋 Copy", 0x22d3ee, 0x06b6d4)
+                                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(raw.clone()));
+                                                        view.ssh_state.status_message = Some("📋 Copied known_hosts entry".into());
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                vault_btn(format!("kh-forget-{hidx}").into(), "✕ Forget", 0xf87171, 0x7f1d1d)
+                                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                                        let out = std::process::Command::new("ssh-keygen")
+                                                            .args(["-R", &host_forget])
+                                                            .output();
+                                                        view.ssh_state.status_message = Some(match out {
+                                                            Ok(o) if o.status.success() => {
+                                                                format!("✕ Removed {host_forget} from known_hosts (backup: known_hosts.old)")
+                                                            }
+                                                            Ok(o) => format!("⚠ {}", String::from_utf8_lossy(&o.stderr).trim()),
+                                                            Err(e) => format!("⚠ {e}"),
+                                                        });
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    ),
+                            );
+                        }
+                        Some(col.into_any_element())
+                    }
+                };
+
                 div()
                     .flex_1()
                     .flex()
@@ -4592,39 +5192,12 @@ impl WorkspaceView {
                             .flex()
                             .flex_row()
                             .gap_1()
-                            .child(
-                                div()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(rgb(0x10b981))
-                                    .text_color(rgb(0x090d16))
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .child(format!("🔑 SSH Key Pairs ({})", keys.len())),
-                            )
-                            .child(
-                                div()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(gpui::rgba(0x00000000))
-                                    .text_color(rgb(0x94a3b8))
-                                    .text_xs()
-                                    .child("Passkeys (YubiKey & Touch ID) (0)"),
-                            )
-                            .child(
-                                div()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(gpui::rgba(0x00000000))
-                                    .text_color(rgb(0x94a3b8))
-                                    .text_xs()
-                                    .child(format!("Known Hosts & Security ({known_hosts_count})")),
-                            ),
+                            .child(vault_pill_kp)
+                            .child(vault_pill_pk)
+                            .child(vault_pill_kh),
                     )
-                    .child(
+                    .children(vault_extra_panel)
+                    .when(is_kp, |d| d.child(
                         div()
                             .p_2p5()
                             .rounded_lg()
@@ -4648,9 +5221,9 @@ impl WorkspaceView {
                                     .text_color(rgb(0x34d399))
                                     .child(format!("{} Keys Detected", keys.len())),
                             ),
-                    )
-                    .child(key_cards)
-                    .child(
+                    ))
+                    .when(is_kp, |d| d.child(key_cards))
+                    .when(is_kp, |d| d.child(
                         div()
                             .p_3()
                             .rounded_xl()
@@ -4827,7 +5400,7 @@ impl WorkspaceView {
                                     .text_color(rgb(0x22d3ee))
                                     .child(bootstrap_cmd),
                             ),
-                    )
+                    ))
                     .into_any_element()
             }
             SshConsoleSection::ServerAndAgentHub => {
@@ -6952,6 +7525,352 @@ impl WorkspaceView {
                 let mac_foc = active_input == SshConsoleInputField::NetTargetMac;
                 let scan_results = self.ssh_state.net_port_scan.clone();
                 let arp_list = self.ssh_state.net_arp_entries.clone();
+                let busy = self.ssh_state.net_busy;
+                let ifaces = self.ssh_state.net_interfaces.clone();
+                let sockets = self.ssh_state.net_listening_sockets.clone();
+                let ping = self.ssh_state.net_ping_result.clone();
+                let dns = self.ssh_state.net_dns_results.clone();
+
+                let net_btn = |id: &'static str, label: &'static str, fg: u32, border: u32| {
+                    div()
+                        .id(id)
+                        .px_2p5()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(0x161f33))
+                        .border_1()
+                        .border_color(rgb(border))
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(fg))
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .hover(|st| st.bg(rgb(0x1e293b)))
+                        .child(label)
+                };
+                let card = || {
+                    div()
+                        .p_3()
+                        .rounded_xl()
+                        .bg(rgb(0x111726))
+                        .border_1()
+                        .border_color(rgb(0x1e293b))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                };
+                let stat = |label: &'static str, value: String, color: u32| {
+                    div()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_lg()
+                        .bg(rgb(0x090d16))
+                        .border_1()
+                        .border_color(rgb(0x162032))
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(px(10.0)).text_color(rgb(0x64748b)).child(label))
+                        .child(
+                            div()
+                                .font_family("Menlo")
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgb(color))
+                                .child(value),
+                        )
+                };
+
+                // ── Latency / DNS diagnostics ────────────────────────────────
+                let mut diag_stats = div().flex().flex_row().flex_wrap().gap_2();
+                if let Some(p) = &ping {
+                    let loss_color = if p.loss_percent <= 0.0 {
+                        0x34d399
+                    } else if p.loss_percent < 100.0 {
+                        0xfbbf24
+                    } else {
+                        0xf87171
+                    };
+                    diag_stats = diag_stats
+                        .child(stat("REPLIES", format!("{}/{}", p.received, p.transmitted), 0x22d3ee))
+                        .child(stat("LOSS", format!("{:.0}%", p.loss_percent), loss_color))
+                        .child(stat("MIN", format!("{:.2} ms", p.min_ms), 0x34d399))
+                        .child(stat("AVG", format!("{:.2} ms", p.avg_ms), 0x38bdf8))
+                        .child(stat("MAX", format!("{:.2} ms", p.max_ms), 0xa855f7))
+                        .child(stat("JITTER", format!("{:.2} ms", (p.max_ms - p.min_ms).max(0.0)), 0xfbbf24));
+                } else {
+                    diag_stats = diag_stats.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x64748b))
+                            .child("Run '🏓 Probe Latency' to measure ICMP round-trip, loss and jitter to the target host."),
+                    );
+                }
+                let mut dns_row = div().flex().flex_row().flex_wrap().gap_1p5();
+                for (didx, addr) in dns.iter().enumerate() {
+                    let a = addr.clone();
+                    dns_row = dns_row.child(
+                        div()
+                            .id(("dns-addr", didx))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_sm()
+                            .bg(gpui::rgba(0x06b6d41a))
+                            .border_1()
+                            .border_color(rgb(0x0e7490))
+                            .font_family("Menlo")
+                            .text_xs()
+                            .text_color(rgb(0x67e8f9))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.ssh_state.net_target_host = a.clone();
+                                cx.notify();
+                            }))
+                            .child(addr.clone()),
+                    );
+                }
+                let net_diag_panel = card()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(0xf8fafc))
+                                    .child(format!(
+                                        "Latency & DNS Diagnostics — {n_host}{}",
+                                        if busy { "  ⏳" } else { "" }
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(net_btn("net-ping-probe-btn", "🏓 Probe Latency", 0x34d399, 0x10b981).on_click(
+                                        cx.listener(|view, _, _, cx| view.spawn_net_probe(NetProbeKind::Ping, cx)),
+                                    ))
+                                    .child(net_btn("net-dns-btn", "🔎 Resolve DNS", 0x38bdf8, 0x0284c7).on_click(
+                                        cx.listener(|view, _, _, cx| view.spawn_net_probe(NetProbeKind::Dns, cx)),
+                                    ))
+                                    .child(net_btn("net-trace-btn", "🛰 Traceroute", 0xc084fc, 0xa855f7).on_click(
+                                        cx.listener(|view, _, window, cx| {
+                                            let h = view.ssh_state.net_target_host.clone();
+                                            view.dispatch_command_to_split_pane(&format!("traceroute -w 2 -q 1 {h}"), window, cx);
+                                        }),
+                                    ))
+                                    .child(net_btn("net-mtr-btn", "📈 Path MTU", 0xfbbf24, 0xf59e0b).on_click(
+                                        cx.listener(|view, _, window, cx| {
+                                            let h = view.ssh_state.net_target_host.clone();
+                                            view.dispatch_command_to_split_pane(
+                                                &format!("for s in 1472 1464 1400 1200; do ping -D -c1 -t2 -s $s {h} >/dev/null 2>&1 && echo \"MTU ok @ $((s+28)) bytes\" && break || echo \"frag @ $((s+28))\"; done"),
+                                                window,
+                                                cx,
+                                            );
+                                        }),
+                                    )),
+                            ),
+                    )
+                    .child(diag_stats)
+                    .children((!dns.is_empty()).then(|| dns_row));
+
+                // ── Local interfaces ─────────────────────────────────────────
+                let mut iface_grid = div().flex().flex_row().flex_wrap().gap_2();
+                if ifaces.is_empty() {
+                    iface_grid = iface_grid.child(
+                        div().text_xs().text_color(rgb(0x64748b)).child(if busy {
+                            "Discovering interfaces…"
+                        } else {
+                            "Click '↻ Refresh All' to enumerate interfaces via ifconfig."
+                        }),
+                    );
+                }
+                for (iidx, ifc) in ifaces.iter().enumerate() {
+                    let ip_copy = ifc.ip.clone();
+                    let assigned = ifc.ip != "Unassigned";
+                    iface_grid = iface_grid.child(
+                        div()
+                            .id(("net-iface", iidx))
+                            .min_w(px(210.0))
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(0x090d16))
+                            .border_1()
+                            .border_color(if ifc.is_up && assigned { rgb(0x10b981) } else { rgb(0x1e293b) })
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(ip_copy.clone()));
+                                view.ssh_state.status_message = Some(format!("📋 Copied {ip_copy}"));
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(div().font_family("Menlo").text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0xf8fafc)).child(ifc.name.clone()))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(if ifc.is_up { rgb(0x34d399) } else { rgb(0xf87171) })
+                                            .child(if ifc.is_up { "● UP" } else { "○ DOWN" }),
+                                    ),
+                            )
+                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0x22d3ee)).child(format!("inet {}", ifc.ip)))
+                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(format!("mask {}", ifc.netmask)))
+                            .child(div().font_family("Menlo").text_xs().text_color(rgb(0xa855f7)).child(format!("ether {}", ifc.mac))),
+                    );
+                }
+                let net_ifaces_panel = card()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(0xf8fafc))
+                                    .child(format!("Local Network Interfaces ({}) — click to copy IP", ifaces.len())),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(net_btn("net-routes-btn", "🧭 Routing Table", 0x38bdf8, 0x0284c7).on_click(
+                                        cx.listener(|view, _, window, cx| {
+                                            view.dispatch_command_to_split_pane("netstat -rn -f inet", window, cx);
+                                        }),
+                                    ))
+                                    .child(net_btn("net-dnscfg-btn", "🌐 DNS Config", 0x38bdf8, 0x0284c7).on_click(
+                                        cx.listener(|view, _, window, cx| {
+                                            view.dispatch_command_to_split_pane("scutil --dns | grep -E 'nameserver|search domain' | sort -u", window, cx);
+                                        }),
+                                    ))
+                                    .child(net_btn("net-refresh-all-btn", "↻ Refresh All", 0x94a3b8, 0x26324d).on_click(
+                                        cx.listener(|view, _, _, cx| view.spawn_net_probe(NetProbeKind::Refresh, cx)),
+                                    )),
+                            ),
+                    )
+                    .child(iface_grid);
+
+                // ── Listening sockets ────────────────────────────────────────
+                let mut sock_rows = div().flex().flex_col().gap_1();
+                if sockets.is_empty() {
+                    sock_rows = sock_rows.child(
+                        div().text_xs().text_color(rgb(0x64748b)).child(if busy {
+                            "Querying lsof…"
+                        } else {
+                            "No listening TCP sockets discovered (or lsof unavailable)."
+                        }),
+                    );
+                }
+                for (sidx, sock) in sockets.iter().enumerate() {
+                    let port = sock.port;
+                    let pid = sock.pid.clone();
+                    sock_rows = sock_rows.child(
+                        div()
+                            .id(("net-sock-row", sidx))
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(0x090d16))
+                            .border_1()
+                            .border_color(rgb(0x162032))
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_3()
+                                    .items_center()
+                                    .child(div().w(px(64.0)).font_family("Menlo").text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0x34d399)).child(format!(":{port}")))
+                                    .child(div().w(px(40.0)).font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(sock.protocol.clone()))
+                                    .child(div().font_family("Menlo").text_xs().text_color(rgb(0xf8fafc)).child(sock.process_name.clone()))
+                                    .child(div().font_family("Menlo").text_xs().text_color(rgb(0x64748b)).child(format!("pid {}", sock.pid))),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id(("net-sock-open", sidx))
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(rgb(0x161f33))
+                                            .text_xs()
+                                            .text_color(rgb(0x38bdf8))
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                let _ = std::process::Command::new("open")
+                                                    .arg(format!("http://127.0.0.1:{port}"))
+                                                    .spawn();
+                                                view.ssh_state.status_message = Some(format!("🌐 Opened http://127.0.0.1:{port}"));
+                                                cx.notify();
+                                            }))
+                                            .child("🌐 Open"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("net-sock-inspect", sidx))
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(rgb(0x161f33))
+                                            .text_xs()
+                                            .text_color(rgb(0xc084fc))
+                                            .cursor(gpui::CursorStyle::PointingHand)
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.dispatch_command_to_split_pane(
+                                                    &format!("lsof -nP -p {pid} -a -i"),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }))
+                                            .child("🔍 Connections"),
+                                    ),
+                            ),
+                    );
+                }
+                let net_sockets_panel = card()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(0xf8fafc))
+                                    .child(format!("Listening TCP Sockets on this Mac ({})", sockets.len())),
+                            )
+                            .child(net_btn("net-established-btn", "⇄ Established Conns", 0x38bdf8, 0x0284c7).on_click(
+                                cx.listener(|view, _, window, cx| {
+                                    view.dispatch_command_to_split_pane("lsof -nP -iTCP -sTCP:ESTABLISHED", window, cx);
+                                }),
+                            )),
+                    )
+                    .child(sock_rows);
+
 
                 let mut port_badges = div().flex().flex_row().flex_wrap().gap_1p5();
                 if scan_results.is_empty() {
@@ -6997,7 +7916,7 @@ impl WorkspaceView {
                 }
 
                 let mut arp_rows = div().flex().flex_col().gap_1p5();
-                for (aidx, neighbor) in arp_list.iter().take(4).enumerate() {
+                for (aidx, neighbor) in arp_list.iter().enumerate() {
                     let nip = neighbor.ip.clone();
                     let nip_scan = nip.clone();
                     let nmac = neighbor.mac.clone();
@@ -7125,13 +8044,13 @@ impl WorkspaceView {
                                             .text_base()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0xf8fafc))
-                                            .child("📡 Networking Tools: Port Scanner, ARP Table, Wake-on-LAN & Packet Sniffer"),
+                                            .child("📡 Networking Tools: Interfaces, Latency, DNS, Sockets, Port Scan, ARP & WoL"),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(rgb(0x94a3b8))
-                                            .child("Probe L4 services, inspect L2 MAC neighbors, broadcast 102-byte WoL magic packets, or sniff PXE traffic"),
+                                            .child("Live L2–L4 diagnostics: ifconfig interfaces, ICMP latency/jitter, DNS resolution, lsof listening sockets, TCP port probes, full ARP table, WoL & PXE sniffing"),
                                     ),
                             )
                             .child(
@@ -7327,6 +8246,9 @@ impl WorkspaceView {
                             )
                             .child(port_badges),
                     )
+                    .child(net_diag_panel)
+                    .child(net_ifaces_panel)
+                    .child(net_sockets_panel)
                     .child(
                         div()
                             .p_3()
@@ -7383,7 +8305,7 @@ impl WorkspaceView {
             .id("theia-ssh-backdrop")
             .absolute()
             .inset_0()
-            .bg(gpui::rgba(0x000000dd))
+            .bg(gpui::rgba(0x0000004d))
             .flex()
             .items_center()
             .justify_center()
@@ -7642,7 +8564,7 @@ impl WorkspaceView {
             .id("theia-prism-modal-backdrop")
             .absolute()
             .inset_0()
-            .bg(gpui::rgba(0x000000dd))
+            .bg(gpui::rgba(0x0000004d))
             .flex()
             .items_center()
             .justify_center()
@@ -7686,7 +8608,7 @@ impl WorkspaceView {
             self.palette_selected_idx.min(total - 1)
         };
 
-        let page_size = 5usize;
+        let page_size = 7usize;
         let page_start = if total <= page_size {
             0
         } else {
@@ -7824,7 +8746,7 @@ impl WorkspaceView {
             .id("command-palette-backdrop")
             .absolute()
             .inset_0()
-            .bg(gpui::rgba(0x000000dd))
+            .bg(gpui::rgba(0x0000004d))
             .flex()
             .items_center()
             .justify_center()
@@ -7843,7 +8765,7 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("command-palette-box")
-                    .w(px(740.0))
+                    .w(px(900.0))
                     .overflow_hidden()
                     .bg(theme.bg)
                     .border_2()
@@ -8106,6 +9028,85 @@ impl WorkspaceView {
         }
     }
 
+    /// Run a blocking network diagnostic on the background executor and apply the
+    /// result on the UI thread, so `ping`/`lsof`/`ifconfig`/DNS never stall a frame.
+    fn spawn_net_probe(&mut self, kind: NetProbeKind, cx: &mut Context<Self>) {
+        if self.ssh_state.net_busy {
+            return;
+        }
+        self.ssh_state.net_busy = true;
+        let host = self.ssh_state.net_target_host.trim().to_string();
+        self.ssh_state.status_message = Some(match kind {
+            NetProbeKind::Ping => format!("🏓 Pinging {host} (3 probes)…"),
+            NetProbeKind::Dns => format!("🔎 Resolving {host}…"),
+            NetProbeKind::Refresh => "↻ Refreshing interfaces, sockets & ARP…".to_string(),
+        });
+        cx.notify();
+
+        cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let job_host = host.clone();
+                let outcome = cx
+                    .background_executor()
+                    .spawn(async move {
+                        match kind {
+                            NetProbeKind::Ping => NetProbeOutcome::Ping(run_ping_probe(&job_host)),
+                            NetProbeKind::Dns => NetProbeOutcome::Dns(resolve_dns_query(&job_host)),
+                            NetProbeKind::Refresh => NetProbeOutcome::Refresh(
+                                discover_network_interfaces(),
+                                discover_listening_sockets(),
+                                discover_arp_neighbors(),
+                            ),
+                        }
+                    })
+                    .await;
+                let _ = cx.update(|cx| {
+                    if let Some(view) = this.upgrade() {
+                        view.update(cx, |view, cx| {
+                            let st = &mut view.ssh_state;
+                            st.net_busy = false;
+                            match outcome {
+                                NetProbeOutcome::Ping(Some(r)) => {
+                                    st.status_message = Some(format!(
+                                        "🏓 {}: {}/{} replies · {:.0}% loss · min/avg/max {:.2}/{:.2}/{:.2} ms",
+                                        r.host, r.received, r.transmitted, r.loss_percent, r.min_ms, r.avg_ms, r.max_ms
+                                    ));
+                                    st.net_ping_result = Some(r);
+                                }
+                                NetProbeOutcome::Ping(None) => {
+                                    st.status_message = Some(format!("⚠ Ping to '{host}' failed to run"));
+                                    st.net_ping_result = None;
+                                }
+                                NetProbeOutcome::Dns(addrs) => {
+                                    st.status_message = Some(if addrs.is_empty() {
+                                        format!("⚠ DNS: no A/AAAA records for {host}")
+                                    } else {
+                                        format!("🔎 {host} → {}", addrs.join(", "))
+                                    });
+                                    st.net_dns_results = addrs;
+                                }
+                                NetProbeOutcome::Refresh(ifs, socks, arp) => {
+                                    st.status_message = Some(format!(
+                                        "↻ {} interfaces · {} listening sockets · {} ARP neighbors",
+                                        ifs.len(),
+                                        socks.len(),
+                                        arp.len()
+                                    ));
+                                    st.net_interfaces = ifs;
+                                    st.net_listening_sockets = socks;
+                                    st.net_arp_entries = arp;
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     fn handle_ssh_key_down(
         &mut self,
         event: &gpui::KeyDownEvent,
@@ -8116,6 +9117,29 @@ impl WorkspaceView {
         let mods = event.keystroke.modifiers;
         if (mods.platform || mods.control) && key.eq_ignore_ascii_case("s") {
             self.save_current_ssh_draft(cx);
+            return;
+        }
+        if (mods.platform || mods.control) && key.eq_ignore_ascii_case("v") {
+            if let Some(item) = cx.read_from_clipboard() {
+                if let Some(text) = item.text() {
+                    self.ssh_state.append_to_active_input(&text);
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        if (mods.platform || mods.control) && key.eq_ignore_ascii_case("c") {
+            let val = self.ssh_state.active_input_value();
+            if !val.is_empty() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(val));
+                self.ssh_state.status_message = Some("📋 Copied field to clipboard".into());
+                cx.notify();
+            }
+            return;
+        }
+        if (mods.platform || mods.control) && key.eq_ignore_ascii_case("a") {
+            self.ssh_state.clear_active_input();
+            cx.notify();
             return;
         }
         match key {
