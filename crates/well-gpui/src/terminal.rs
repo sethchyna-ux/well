@@ -11,11 +11,44 @@ pub fn convert_color(color: Color, default: Rgba, theme: &Theme) -> Rgba {
 }
 
 /// Computes terminal (cols, rows) from viewport dimensions and font metrics with clamped boundaries.
+#[allow(dead_code)]
 pub fn calculate_grid_dimensions(width: f32, height: f32, font_size: f32) -> (u16, u16) {
     let char_width = (font_size * 0.6).max(1.0);
     let line_height = (font_size * 1.25).max(1.0);
     let cols = (width / char_width).clamp(1.0, 500.0) as u16;
     let rows = (height / line_height).clamp(1.0, 200.0) as u16;
+    (cols, rows)
+}
+
+/// Returns fixed cell `(char_width, line_height)` in logical pixels for a given font family and size.
+/// OpenDyslexic has wider horizontal advance and taller ascenders/descenders than condensed monospace fonts,
+/// so we allocate a wider cell and integer-ceiled line height to prevent bottom overflow and horizontal drift.
+pub fn cell_metrics_for_font(font_family: &str, font_size: f32) -> (f32, f32) {
+    let is_dyslexic = font_family.to_ascii_lowercase().contains("dyslexic");
+    let char_width = if is_dyslexic {
+        (font_size * 0.68).max(1.0)
+    } else {
+        (font_size * 0.60).max(1.0)
+    };
+    let line_height = if is_dyslexic {
+        (font_size * 1.48).ceil().max(1.0)
+    } else {
+        (font_size * 1.28).ceil().max(1.0)
+    };
+    (char_width, line_height)
+}
+
+/// Computes terminal `(cols, rows)` using font-aware cell metrics so the PTY row count matches
+/// the exact number of fixed-height rows that fit inside the visible terminal pane.
+pub fn calculate_grid_dimensions_for_font(
+    width: f32,
+    height: f32,
+    font_family: &str,
+    font_size: f32,
+) -> (u16, u16) {
+    let (char_width, line_height) = cell_metrics_for_font(font_family, font_size);
+    let cols = (width / char_width).floor().clamp(1.0, 500.0) as u16;
+    let rows = (height / line_height).floor().clamp(1.0, 200.0) as u16;
     (cols, rows)
 }
 
@@ -46,6 +79,21 @@ mod tests {
         let (max_cols, max_rows) = calculate_grid_dimensions(100_000.0, 50_000.0, font_size);
         assert_eq!(max_cols, 500);
         assert_eq!(max_rows, 200);
+    }
+
+    #[test]
+    fn test_font_aware_grid_dimensions_never_overflow_viewport() {
+        for font_size in [13.5f32, 16.0, 21.0, 24.0] {
+            for family in ["OpenDyslexic Nerd Font", "JetBrains Mono"] {
+                let (cw, lh) = cell_metrics_for_font(family, font_size);
+                let usable_w = 1040.0f32;
+                let usable_h = 720.0f32;
+                let (cols, rows) =
+                    calculate_grid_dimensions_for_font(usable_w, usable_h, family, font_size);
+                assert!((cols as f32) * cw <= usable_w);
+                assert!((rows as f32) * lh <= usable_h);
+            }
+        }
     }
 
     #[test]

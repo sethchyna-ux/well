@@ -1094,6 +1094,10 @@ impl Render for TerminalView {
         };
         let ghost_len = active_ghost.map(|g| g.chars().count() as u16).unwrap_or(0);
 
+        let (char_width, line_height) = terminal::cell_metrics_for_font(&font_family, font_size);
+        let pad_x = 8.0f32;
+        let pad_y = 8.0f32;
+
         let base_line = if is_alt_screen {
             0
         } else {
@@ -1110,32 +1114,80 @@ impl Render for TerminalView {
         } else {
             0.0
         };
+        let gutter_px = if show_line_numbers {
+            (char_width * gutter_chars).ceil()
+        } else {
+            0.0
+        };
 
-        let mut row_elements = Vec::new();
+        // Determine the last active/written row in the viewport so line numbers advance live
+        // downward as commands execute, and increment upward once scrollback engages.
+        let mut last_active_row = cursor_row;
+        if !is_alt_screen && scrollback == 0 && max_scroll == 0 {
+            for r in (0..size.0).rev() {
+                let mut row_has_text = false;
+                for c in 0..size.1 {
+                    if let Some(cell) = parser.screen().cell(r, c) {
+                        if !cell.contents().trim().is_empty() {
+                            row_has_text = true;
+                            break;
+                        }
+                    }
+                }
+                if row_has_text {
+                    last_active_row = last_active_row.max(r);
+                    break;
+                }
+            }
+        } else {
+            last_active_row = size.0.saturating_sub(1);
+        }
+
+        let cell_w = px(char_width);
+        let cell_h = px(line_height);
+
+        let mut row_elements = Vec::with_capacity(size.0 as usize);
         for row in 0..size.0 {
-            let mut col_elements = Vec::new();
+            let mut col_elements = Vec::with_capacity(size.1 as usize + 1);
             if show_line_numbers {
                 let line_no = base_line + row as usize + 1;
                 let is_current_line = show_vt_cursor && row == cursor_row;
+                let is_written_line = is_alt_screen || scrollback > 0 || max_scroll > 0 || row <= last_active_row;
                 let gutter_color = if is_current_line {
                     if is_focused {
                         theme.border_active
                     } else {
                         theme.fg
                     }
-                } else {
+                } else if is_written_line {
                     theme.border_inactive
+                } else {
+                    gpui::rgba(0x64748b44)
+                };
+                let label = if is_written_line {
+                    format!("{:>width$} │ ", line_no, width = gutter_digits)
+                } else {
+                    format!("{:>width$} │ ", "·", width = gutter_digits)
                 };
                 col_elements.push(
                     div()
+                        .w(px(gutter_px))
+                        .h(cell_h)
+                        .line_height(cell_h)
                         .flex_shrink_0()
+                        .overflow_hidden()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_end()
+                        .pr_1()
                         .text_color(gutter_color)
                         .font_weight(if is_current_line {
                             gpui::FontWeight::BOLD
                         } else {
                             gpui::FontWeight::NORMAL
                         })
-                        .child(format!("{:>width$} │ ", line_no, width = gutter_digits)),
+                        .child(label),
                 );
             }
             for col in 0..size.1 {
@@ -1148,7 +1200,11 @@ impl Render for TerminalView {
                 if is_ghost_hint_cell {
                     col_elements.push(
                         div()
+                            .h(cell_h)
+                            .line_height(cell_h)
                             .flex_shrink_0()
+                            .flex()
+                            .items_center()
                             .px_1p5()
                             .py_0()
                             .ml_1()
@@ -1205,7 +1261,17 @@ impl Render for TerminalView {
                         fg = theme.bg;
                     }
 
-                    let mut el = div().bg(bg).text_color(fg).child(text);
+                    let mut el = div()
+                        .w(cell_w)
+                        .h(cell_h)
+                        .line_height(cell_h)
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(bg)
+                        .text_color(fg)
+                        .child(text);
 
                     if is_ghost_char {
                         el = el.italic();
@@ -1241,13 +1307,37 @@ impl Render for TerminalView {
                 } else {
                     col_elements.push(
                         div()
+                            .w(cell_w)
+                            .h(cell_h)
+                            .line_height(cell_h)
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .bg(rgba(0x00000000))
                             .text_color(rgba(0xffffffff))
                             .child(" "),
                     );
                 }
             }
-            row_elements.push(div().flex().flex_row().children(col_elements));
+            let is_active_cursor_row = show_vt_cursor && row == cursor_row;
+            row_elements.push(
+                div()
+                    .h(cell_h)
+                    .line_height(cell_h)
+                    .w_full()
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .bg(if is_active_cursor_row {
+                        gpui::rgba(0x38bdf80c)
+                    } else {
+                        gpui::rgba(0x00000000)
+                    })
+                    .children(col_elements),
+            );
         }
 
         drop(parser);
@@ -1281,18 +1371,22 @@ impl Render for TerminalView {
             .overflow_hidden()
             .shadow_sm()
             .border_color(pane_border)
-            .p_1()
             .size_full()
             .font_family(font_family.clone())
             .text_size(px(font_size))
+            .line_height(cell_h)
             .cursor(gpui::CursorStyle::Arrow)
             .track_focus(&self.focus_handle)
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
                 if this.settings.read(cx).modal_open {
                     return;
                 }
-                let font_size = this.settings.read(cx).font_size;
-                let line_height = (font_size * 1.25).max(12.0);
+                let (font_family, font_size) = {
+                    let s = this.settings.read(cx);
+                    (s.font_family.clone(), s.font_size)
+                };
+                let (_, line_height) = terminal::cell_metrics_for_font(&font_family, font_size);
+                let line_height = line_height.max(12.0);
 
                 let lines = match event.delta {
                     gpui::ScrollDelta::Lines(p) => {
@@ -1652,6 +1746,20 @@ impl Render for TerminalView {
                     }
                 }
 
+                if modifiers.platform {
+                    if key.eq_ignore_ascii_case("v") {
+                        if let Some(item) = cx.read_from_clipboard() {
+                            if let Some(text) = item.text() {
+                                use std::io::Write;
+                                let _ = writer.write_all(text.as_bytes());
+                                this.input_buffer.push_str(&text);
+                                cx.notify();
+                            }
+                        }
+                    }
+                    return;
+                }
+
                 let bytes: &[u8] = match key.as_str() {
                     "enter" => b"\r",
                     "backspace" => b"\x7f",
@@ -1680,21 +1788,24 @@ impl Render for TerminalView {
             .child({
                 let pty = self.pty.clone();
                 let last_size = self.last_size.clone();
-                let font_size = self.settings.read(cx).font_size;
-                let show_line_numbers = self.settings.read(cx).show_line_numbers;
-                let gutter_chars_captured = gutter_chars;
+                let (font_family_for_canvas, font_size, show_line_numbers) = {
+                    let s = self.settings.read(cx);
+                    (s.font_family.clone(), s.font_size, s.show_line_numbers)
+                };
+                let gutter_px_captured = gutter_px;
                 canvas(
-                    move |bounds, _window, _cx| {
-                        let total_width = f32::from(bounds.size.width);
-                        let char_width = (font_size * 0.6).max(1.0);
+                    move |bounds, window, _cx| {
+                        let usable_width = (f32::from(bounds.size.width) - pad_x * 2.0 - 6.0).max(char_width);
+                        let usable_height = (f32::from(bounds.size.height) - pad_y * 2.0 - 8.0).max(line_height);
                         let effective_width = if show_line_numbers {
-                            (total_width - (char_width * gutter_chars_captured)).max(char_width)
+                            (usable_width - gutter_px_captured).max(char_width)
                         } else {
-                            total_width
+                            usable_width
                         };
-                        let (cols, rows) = terminal::calculate_grid_dimensions(
+                        let (cols, rows) = terminal::calculate_grid_dimensions_for_font(
                             effective_width,
-                            f32::from(bounds.size.height),
+                            usable_height,
+                            &font_family_for_canvas,
                             font_size,
                         );
                         
@@ -1702,22 +1813,28 @@ impl Render for TerminalView {
                         if last_size.get() != current {
                             last_size.set(current);
                             pty.resize(rows, cols).ok();
+                            window.refresh();
                         }
                     },
                     |_bounds, _prepaint, _window, _cx| {}
-                ).absolute().size_full()
+                ).absolute().inset_0()
             })
             .child(
-                div().absolute().top_0().left_0().size_full().children(row_elements)
+                div()
+                    .absolute()
+                    .top(px(pad_y))
+                    .left(px(pad_x))
+                    .right(px(pad_x))
+                    .bottom(px(pad_y))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .children(row_elements),
             )
             .children(
                 self.kitty_images.iter().map(|img_overlay| {
-                    let char_width = self.settings.read(cx).font_size * 0.6;
-                    let line_height = self.settings.read(cx).font_size * 1.25;
-                    let gutter_offset = if show_line_numbers { char_width * gutter_chars } else { 0.0 };
-
-                    let top = img_overlay.cursor_row as f32 * line_height;
-                    let left = img_overlay.cursor_col as f32 * char_width + gutter_offset;
+                    let top = pad_y + img_overlay.cursor_row as f32 * line_height;
+                    let left = pad_x + img_overlay.cursor_col as f32 * char_width + gutter_px;
                     let mut el = gpui::img(img_overlay.image.clone());
                     
                     // Set width and height if available, otherwise just use natural size
@@ -2051,8 +2168,11 @@ impl PaneTree {
                 // To allow the terminal view to capture mouse down, we wrap it
                 let term_clone = terminal.clone();
                 div()
-                    .flex_grow()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
                     .size_full()
+                    .overflow_hidden()
                     .child(terminal.clone())
                     .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |view, _event, window, cx| {
                         if !view.palette_open && !view.ssh_state.open {
@@ -2062,7 +2182,13 @@ impl PaneTree {
                     .into_any_element()
             }
             PaneTree::Split { direction, first, second } => {
-                let mut container = div().flex_grow().size_full().flex();
+                let mut container = div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .size_full()
+                    .overflow_hidden()
+                    .flex();
                 if *direction == SplitDirection::Horizontal {
                     container = container.flex_row();
                 } else {
@@ -9361,7 +9487,7 @@ impl Render for WorkspaceView {
         let active_tab_idx = self.active_tab;
         let active_tab = &self.tabs[active_tab_idx];
         let is_active_ssh = active_tab.is_ssh;
-        let (git_branch, is_dirty, rows, cols, mneme_active, pythia_active) = {
+        let (git_branch, is_dirty, rows, cols, active_line_no, active_col_no, mneme_active, pythia_active) = {
             let active_term = active_tab.active_terminal.read(cx);
             let snap = active_term.astraea.read_snapshot();
             let branch = if !snap.git_branch.is_empty() {
@@ -9370,11 +9496,28 @@ impl Render for WorkspaceView {
                 "main".to_string()
             };
             let (r, c) = active_term.last_size.get().unwrap_or((24, 80));
+            let (line_no, col_no) = {
+                let mut parser = active_term.pty.parser.lock().unwrap();
+                let scrollback = parser.screen().scrollback();
+                let max_scroll = {
+                    let screen_mut = parser.screen_mut();
+                    screen_mut.set_scrollback(usize::MAX);
+                    let max = screen_mut.scrollback();
+                    screen_mut.set_scrollback(scrollback);
+                    max
+                };
+                let is_alt = parser.screen().alternate_screen();
+                let (crow, ccol) = parser.screen().cursor_position();
+                let base = if is_alt { 0 } else { max_scroll.saturating_sub(scrollback) };
+                (base + crow as usize + 1, ccol as usize + 1)
+            };
             (
                 branch,
                 snap.is_dirty,
                 r,
                 c,
+                line_no,
+                col_no,
                 active_term.mneme_active,
                 active_term.pythia.active,
             )
@@ -9857,7 +10000,13 @@ impl Render for WorkspaceView {
             .child(
                 div()
                     .relative()
-                    .flex_grow()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
                     .px(if geometric_border { px(13.0) } else { px(0.0) })
                     .pb(if geometric_border { px(13.0) } else { px(0.0) })
                     .child(self.tabs[self.active_tab].root.render(cx))
@@ -10119,9 +10268,9 @@ impl Render for WorkspaceView {
                                     })
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .child(if show_line_numbers {
-                                        "1│ln ON"
+                                        format!("Ln {active_line_no}:{active_col_no}│ln ON")
                                     } else {
-                                        "1│ln"
+                                        format!("Ln {active_line_no}:{active_col_no}│ln")
                                     })
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.execute_palette_action("terminal::ToggleLineNumbers", window, cx);
