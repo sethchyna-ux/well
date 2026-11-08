@@ -1794,9 +1794,9 @@ impl Render for TerminalView {
                 };
                 let gutter_px_captured = gutter_px;
                 canvas(
-                    move |bounds, window, _cx| {
+                    move |bounds, _window, _cx| {
                         let usable_width = (f32::from(bounds.size.width) - pad_x * 2.0 - 6.0).max(char_width);
-                        let usable_height = (f32::from(bounds.size.height) - pad_y * 2.0 - 8.0).max(line_height);
+                        let usable_height = (f32::from(bounds.size.height) - pad_y * 2.0 - 10.0).max(line_height);
                         let effective_width = if show_line_numbers {
                             (usable_width - gutter_px_captured).max(char_width)
                         } else {
@@ -1813,10 +1813,16 @@ impl Render for TerminalView {
                         if last_size.get() != current {
                             last_size.set(current);
                             pty.resize(rows, cols).ok();
-                            window.refresh();
+                            true
+                        } else {
+                            false
                         }
                     },
-                    |_bounds, _prepaint, _window, _cx| {}
+                    |_bounds, resized, window, _cx| {
+                        if resized {
+                            window.refresh();
+                        }
+                    }
                 ).absolute().inset_0()
             })
             .child(

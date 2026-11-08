@@ -31,9 +31,9 @@ pub fn cell_metrics_for_font(font_family: &str, font_size: f32) -> (f32, f32) {
         (font_size * 0.60).max(1.0)
     };
     let line_height = if is_dyslexic {
-        (font_size * 1.48).ceil().max(1.0)
+        (font_size * 1.52).ceil().max(1.0)
     } else {
-        (font_size * 1.28).ceil().max(1.0)
+        (font_size * 1.32).ceil().max(1.0)
     };
     (char_width, line_height)
 }
