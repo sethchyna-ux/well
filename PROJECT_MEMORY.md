@@ -1151,3 +1151,14 @@ Completed all three tracks of Iteration 22 across `well-gpui`, `well-editor`, `w
 - Correct screenshot shows visual crowding, not shortcut conflicts: host names, badges and action buttons shared a narrow row, and section controls were clipped.
 - Separated names and actions vertically in both saved/config host cards; separated section heading from Manage/Add controls, widened sidebar to 292px, constrained long names, and prevented card shrinking. Replaced hard-coded /home/chyna heading with Saved hosts.
 - GPUI strict Clippy passed; rebuilding the packaged app for delivery. Full visual confirmation remains dependent on an interactive window capture.
+
+### Session Update: 2026-11-19T09:00:00-05:00 (Git repository cleanup & origin/main sync)
+- **Root Causes Identified**:
+  - `.gitignore` used `/target/` (root-only), allowing 3,797 build artifacts under `crates/well-boot/target/` to be committed in `abd23710`.
+  - Local `main` was rooted at orphan commit `ce0da86d` with no common ancestor with `origin/main` (`316ff36a`) and had no upstream tracking branch configured, causing `git push` rejections.
+  - `.git/objects/pack/pack-f67d82b498de41baf1986cebc80db05f4cb69945 2.pack` existed without a corresponding `.idx` file.
+- **Implemented Fixes**:
+  - Updated `.gitignore` from `/target/` to `target/` so nested Cargo targets (such as `crates/well-boot/target/`) are ignored.
+  - Untracked `crates/well-boot/target` via `git rm -r --cached` and amended `abd23710` into `16e65fe4` (74 source/doc files).
+  - Removed the unindexed duplicate pack `.git/objects/pack/pack-f67d82b498de41baf1986cebc80db05f4cb69945 2.pack`.
+  - Force-pushed `main` to `origin/main` with `--force-with-lease` and set upstream tracking (`main -> origin/main`).
