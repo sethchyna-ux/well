@@ -101,10 +101,41 @@ impl TheiaSshProfile {
         tmp_candidate.exists()
     }
 
-    /// Build an `SshTarget` enriched with optional Caduceus IPC socket forwarding (`-R`)
-    /// and ControlMaster multiplexing flags.
+    /// Build an `SshTarget` enriched with the profile's explicit host settings,
+    /// optional Caduceus IPC socket forwarding (`-R`), ControlMaster multiplexing
+    /// flags, and a bounded connect timeout.
     pub fn build_target(&self, base_target: SshTarget) -> SshTarget {
         let mut target = base_target;
+        if !self.host.hostname.trim().is_empty() {
+            target.destination = self.host.hostname.trim().to_string();
+        }
+        if let Some(user) = &self.host.user {
+            if !user.trim().is_empty() {
+                target.user = Some(user.trim().to_string());
+            }
+        }
+        if self.host.port != 0 {
+            target.port = self.host.port;
+        }
+        if self.host.identity_file.is_some() {
+            target.identity_file = self.host.identity_file.clone();
+        }
+        if let Some(jump) = &self.host.proxy_jump {
+            if !jump.trim().is_empty() {
+                target.proxy_jump = Some(jump.trim().to_string());
+            }
+        }
+        if self.host.forward_agent {
+            target.forward_agent = true;
+        }
+        if !target
+            .extra_args
+            .iter()
+            .any(|arg| arg.contains("ConnectTimeout"))
+        {
+            target.extra_args.push("-o".into());
+            target.extra_args.push("ConnectTimeout=10".into());
+        }
         if self.forward_caduceus_ipc {
             target.extra_args.push("-R".into());
             target.extra_args.push(format!(
@@ -184,5 +215,43 @@ mod tests {
             "/tmp/well-caduceus.sock:{}",
             well_ipc::runtime::socket_path().display()
         )));
+    }
+
+    #[test]
+    fn test_build_target_preserves_profile_host_fields() {
+        let host = SshHostConfig {
+            name: "chyna".into(),
+            hostname: "10.77.0.2".into(),
+            user: Some("chyna".into()),
+            port: 2222,
+            identity_file: Some(PathBuf::from("~/.ssh/id_ed25519_custom")),
+            proxy_jump: Some("bastion.internal".into()),
+            forward_agent: true,
+            ..Default::default()
+        };
+        let profile = TheiaSshProfile::from_host(host);
+        let stale_base = SshTarget {
+            destination: "192.168.1.150".into(),
+            user: None,
+            port: 22,
+            ..Default::default()
+        };
+        let target = profile.build_target(stale_base);
+        assert_eq!(target.destination, "10.77.0.2");
+        assert_eq!(target.user.as_deref(), Some("chyna"));
+        assert_eq!(target.port, 2222);
+        assert_eq!(
+            target.identity_file,
+            Some(PathBuf::from("~/.ssh/id_ed25519_custom"))
+        );
+        assert_eq!(target.proxy_jump.as_deref(), Some("bastion.internal"));
+        assert!(target.forward_agent);
+        let args = target.to_command_args();
+        assert!(args.contains(&"ConnectTimeout=10".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("chyna@10.77.0.2"));
+        assert!(
+            !args.iter().any(|a| a.starts_with("~/")),
+            "tilde in identity_file must be expanded before passing to ssh: {args:?}"
+        );
     }
 }
