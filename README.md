@@ -1,6 +1,6 @@
 # Well
 
-Well is an experimental Rust terminal workspace. The current production target is a native macOS terminal app built around a real PTY session, `vt100` screen parsing, and a `wgpu` renderer.
+Well is an experimental Rust terminal workspace. The current production target is a native macOS terminal app built around a real PTY session, `vt100` screen parsing, and a GPUI frontend.
 
 The repository also contains exploratory subsystems for AI command assistance, mobile/Flutter wrappers, remote/headless execution, Firebase/Data Connect sync, WebAssembly plugins, SSH, and metrics. Those areas are not treated as production-ready unless explicitly called out in this README.
 
@@ -8,15 +8,15 @@ The repository also contains exploratory subsystems for AI command assistance, m
 
 The v1 path is intentionally narrow:
 
-- desktop terminal host in `src/`
+- desktop terminal host in `crates/well-gpui/` (the root `src/` renderer is legacy)
 - canonical interactive shell path through `crates/well-shell::pty::PtySession`
-- one interactive desktop terminal session with configurable startup scrollback
-- terminal cell rendering through `crates/well-render`
+- independent PTY sessions in tabs and split panes
+- terminal cell rendering through GPUI with shared parsing/font utilities
 - configuration/control-panel work through `crates/well-config`
 - IPC and server primitives through `crates/well-ipc` and `crates/well-server`
 
 Mobile, cloud/Kubernetes, image generation, and remote execution are experimental until the core desktop terminal is stable.
-Tabs/panes, Kitty image rendering, and sandbox replay are deferred rather than advertised as active desktop features.
+GPUI tabs/panes and Kitty image handling are implemented. Legacy-only features and experimental clients need separate verification. See [the implementation audit](docs/IMPLEMENTATION_AUDIT.md) for findings and current limits.
 
 ## Build
 
@@ -31,7 +31,7 @@ Common commands:
 ```bash
 cargo check --workspace
 cargo test --workspace
-cargo run --bin well
+cargo run -p well-gpui
 ```
 
 Package a local macOS app bundle:
@@ -58,6 +58,35 @@ notarized release. See [Homebrew distribution](docs/HOMEBREW.md) for the tap
 promotion and install path.
 
 For bundle metadata, Developer ID signing, notarization, CI artifacts, and the release checklist, see the canonical [release signing guide](docs/RELEASE_SIGNING.md).
+
+## AgentOS boot tools
+
+Well owns the x86_64 AgentOS EFI loader under `boot/agentos`; AgentOS owns its kernel
+and boot protocol. Zig 0.17.1 and a compatible AgentOS checkout are required to build
+firmware. QEMU with x86_64 EDK2 firmware is required for boot verification.
+
+```bash
+cargo build --manifest-path crates/well-boot/Cargo.toml --locked --target-dir target
+./target/debug/well-boot build --source /path/to/agent-os --output target/agentos-artifacts
+./target/debug/well-boot run --output target/agentos-artifacts
+```
+
+The native AgentOS panel is available through the command palette. Builds export
+an embedded-kernel EFI application, deterministic FAT ESP volume, checksums, and
+source manifest. Netboot uses a pinned existing PXE library; privileged service
+startup is an explicit `sudo` action in a terminal pane. Nothing starts DHCP during
+normal app startup or firmware builds.
+
+For QEMU firmware without a usable native PXE stack, provide a **full** x86_64 iPXE
+application through `--ipxe-bootstrap /path/to/ipxe.efi` at build time or
+`WELL_IPXE_BOOTSTRAP`. SNP-only firmware is not sufficient for all emulated NICs.
+The bootstrap image is checksummed in the export manifest. No bootstrap binary is
+committed to Well. See [the loader guide](boot/agentos/README.md).
+
+The companion is a separate Cargo workspace because the pinned PXE library's
+terminal UI dependencies conflict with GPUI's terminal Unicode dependency versions.
+It exposes protocol engines and artifact routes, not the PXE project's dashboard.
+Run its checks with `--manifest-path crates/well-boot/Cargo.toml`.
 
 ## Verification status
 

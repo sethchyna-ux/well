@@ -720,6 +720,14 @@ impl PtySession {
         }
         None
     }
+    /// Terminate this session's owned child without blocking the UI on cleanup.
+    /// Drop still performs the normal reader/writer shutdown and reap.
+    pub fn terminate(&self) -> io::Result<()> {
+        self.child
+            .lock()
+            .map_err(|_| io::Error::other("PTY child lock poisoned"))?
+            .kill()
+    }
     pub fn is_alive(&self) -> bool {
         self.child
             .lock()

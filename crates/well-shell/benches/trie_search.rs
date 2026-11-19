@@ -51,4 +51,3 @@ fn main() {
     let _ = fs::create_dir_all(&criterion_dir);
     let _ = fs::write(criterion_dir.join("summary.txt"), summary);
 }
-

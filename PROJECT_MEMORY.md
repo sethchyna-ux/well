@@ -1106,3 +1106,48 @@ Completed all three tracks of Iteration 22 across `well-gpui`, `well-editor`, `w
   - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
   - `cargo test -p well-gpui --locked`: **29 passed, 0 failed**.
   - `./package-app.sh --install`: built release binary in 1m 42s, verified and ad-hoc signed `dist/Well.app`, and installed verified `/Applications/Well.app`.
+
+### Session Update: 2026-11-14 (Approved implementation audit and AgentOS integration)
+- Started execution of the approved staged plan; preserve the six pre-existing staged changes.
+- Target: complete exposed GPUI features, consolidate shared behavior, retain futuristic Well UI, migrate AgentOS loader ownership into Well, and deliver verified x86_64 local/network boot artifacts.
+- Initial planning evidence: workspace check passed; formatting failed; IPC framing tests failed concurrently but passed serially; AgentOS Zig build succeeded, older custom-boot build failed.
+- No deployment, /Applications installation, physical network service activation, or disk writing authorized by this execution step beyond the approved explicit UI workflows.
+
+### Session Update: 2026-11-14T20:02:00Z (Implementation checkpoint)
+- Fixed real SHA256 public-key fingerprints, removed fabricated key/host defaults, full GPUI indexed colors, actual mount detection, private shared Hermes endpoint, surface-ID dispatch and PTY error propagation.
+- GPUI binary now imports library modules. Wasm hooks have fuel/memory budgets; regression tests pass.
+- Migrated AgentOS loader into boot/agentos; enforced embedded-kernel SHA384. Added well-boot companion build/export, deterministic FAT ESP, artifact manifest, QEMU launch and pinned PXE core integration. AgentOS build now exposes kernel-only target and consumes Well loader source.
+- Real disk firmware boot plus SHA256 applet verification passed (target/agentos-artifacts/qemu-disk.log). Network firmware test has not passed; current OVMF reaches shell without payload fetch. Do not claim PXE qualification.
+- Incoming russh SSH hosting now authenticates and bridges PTYs. OpenSSH integration test validates successful exec, rejected credentials and shutdown. Native Argus helper fails closed on unknown keys.
+- NetOps chrome uses selected Well tokens; AgentOS panel replaces descriptive mock firmware cards. Remaining: network boot qualification, full settings/action parity, service/payload lifecycle, packaging/visual verification, and final audit status updates.
+
+### Session Update: 2026-11-14T20:51:13Z (Resume final qualification)
+- Resumed after interruption; preserve all current source edits and the original six-file staged index.
+- Final workspace suite passed 233 tests with two ignored; formatting and strict Clippy passed. Shell startup and interactive-program smoke checks passed.
+- Packaged companion built AgentOS from outside the repository using bundled loader sources. Export is dist/AgentOS-x86_64; real disk, companion HTTP and companion TFTP firmware boots reached the kernel and returned the expected SHA256 applet result.
+- Finalizing the HTTP request counter regression, refreshed packaging, UI inspection and audit evidence. Physical DHCP/router behavior and public notarization remain unqualified.
+
+### Session Update: 2026-11-14 (Delivery verification)
+- Final package rebuilt after HTTP metrics fix; companion tests/Clippy, actual HTTP/TFTP transfer and firmware boot checks, signature/clean-state diagnostics, and GUI startup passed.
+- Deliverables: dist/Well.app, arm64 ZIP/checksum, and dist/AgentOS-x86_64 EFI, kernel, ESP/bootstrap images, checksums, provenance manifest and firmware transcripts.
+- Added versioned/stale-write-protected operator storage, bounded image history lifecycle and shared graphics interceptor, actual tunnels and SSH host, runtime action wiring, safety policy enforcement and bounded Wasm execution.
+- Settings and command palette visually inspected. Full AgentOS-panel and remapped-shortcut interactive qualification remains pending; automated key navigation was inconclusive. Do not equate startup smoke with full UI acceptance.
+- docs/IMPLEMENTATION_AUDIT.md records implemented features, evidence and remaining work. Original staged index preserved. No /Applications installation or public release performed.
+
+### Session Update: 2026-11-14 (Cursor flash regression)
+- User supplied a recording of whole-window flashing during cursor blink. Investigating the recorded frames and GPUI invalidation/render paths; preserve prior changes and staged index.
+
+### Cursor flash fix verification — 2026-11-14
+- Recording shows palette open while terminal focus styling oscillates. Root cause: WorkspaceView render tested modal-open AND not-focused in one if/else chain, so an already-focused palette/SSH modal fell through and focused the terminal. Next frame focused the modal again.
+- Fixed by selecting the modal/terminal focus owner first, then focusing only if needed. Terminal blink timer now skips notifications while a workspace modal is open.
+- GPUI 26 tests and strict all-target Clippy passed; rebuilt dist/Well.app and arm64 archive/checksum; release candidate diagnostics passed. Original staged index retained.
+- Runtime visual recheck was inconclusive: WindowServer captures returned a reduced thumbnail despite activation attempts. Do not claim screenshot-based confirmation of elimination; updated build is ready for interactive use.
+
+### Session Update: 2026-11-14 (UI and shortcut follow-through)
+- Proceeding with requested UI qualification and shortcut consistency work after the cursor-focus fix. Preserve existing user changes and staged index; verify real runtime interaction where host window access permits.
+- Saved shortcuts now drive runtime registration, palette search, footer hints, and visible shortcut labels. Fixed global aliases were removed; equivalent modifier spellings are detected as conflicts. GPUI tests passed and the package was rebuilt.
+
+### Session Update: 2026-11-14 (SSH sidebar layout collision)
+- Correct screenshot shows visual crowding, not shortcut conflicts: host names, badges and action buttons shared a narrow row, and section controls were clipped.
+- Separated names and actions vertically in both saved/config host cards; separated section heading from Manage/Add controls, widened sidebar to 292px, constrained long names, and prevented card shrinking. Replaced hard-coded /home/chyna heading with Saved hosts.
+- GPUI strict Clippy passed; rebuilding the packaged app for delivery. Full visual confirmation remains dependent on an interactive window capture.

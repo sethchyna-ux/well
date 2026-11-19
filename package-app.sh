@@ -210,7 +210,9 @@ generate_homebrew_cask() {
 echo -e "${INFO} Building ${APP_NAME} ${APP_VERSION} (${BUILD_NUMBER}) for ${ARCH}..."
 cd "${ROOT_DIR}"
 BINARY_NAME="${WELL_BINARY_NAME:-well-gpui}"
-MACOSX_DEPLOYMENT_TARGET="${MIN_MACOS_VERSION}" cargo build --release --locked -p "${BINARY_NAME}"
+BUILD_TARGET_DIR="${WELL_BUILD_TARGET_DIR:-${ROOT_DIR}/target}"
+MACOSX_DEPLOYMENT_TARGET="${MIN_MACOS_VERSION}" cargo build --release --locked -p "${BINARY_NAME}" --target-dir "${BUILD_TARGET_DIR}"
+MACOSX_DEPLOYMENT_TARGET="${MIN_MACOS_VERSION}" cargo build --release --locked --manifest-path crates/well-boot/Cargo.toml --target-dir "${BUILD_TARGET_DIR}"
 
 mkdir -p "${DIST_DIR}"
 STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/.well-package.XXXXXX")"
@@ -220,7 +222,11 @@ MACOS_DIR="${CONTENTS}/MacOS"
 RESOURCES_DIR="${CONTENTS}/Resources"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}/fonts"
 
-install -m 755 "${ROOT_DIR}/target/release/${BINARY_NAME}" "${MACOS_DIR}/${APP_NAME}"
+install -m 755 "${BUILD_TARGET_DIR}/release/${BINARY_NAME}" "${MACOS_DIR}/${APP_NAME}"
+install -m 755 "${BUILD_TARGET_DIR}/release/well-boot" "${MACOS_DIR}/well-boot"
+mkdir -p "${RESOURCES_DIR}/agentos-loader/src"
+install -m 644 "${ROOT_DIR}/boot/agentos/build.zig" "${RESOURCES_DIR}/agentos-loader/build.zig"
+install -m 644 "${ROOT_DIR}/boot/agentos/src/main.zig" "${RESOURCES_DIR}/agentos-loader/src/main.zig"
 install -m 644 "${ROOT_DIR}/assets/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
 install -m 644 "${ROOT_DIR}/assets/images/logo.png" "${RESOURCES_DIR}/logo.png"
 install -m 644 \

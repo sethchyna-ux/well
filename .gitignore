@@ -1,5 +1,5 @@
 # Rust build artifacts
-/target/
+target/
 **/*.rs.bk
 .zig-cache/
 zig-out/
@@ -44,3 +44,7 @@ build
 
 # Ignore Kotlin plugin data
 .kotlin
+
+# Local Zig boot products
+.zig-cache/
+zig-out/

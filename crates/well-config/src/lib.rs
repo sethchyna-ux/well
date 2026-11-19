@@ -1,4 +1,5 @@
 //! Validated user preferences with atomic persistence.
+pub mod operator;
 pub mod theia;
 pub use theia::{TheiaTelemetry, TheiasPrismPanel};
 

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use wasmi::{Caller, Engine, Func, Linker, Memory, MemoryType, Module, Store};
+use wasmi::{Caller, Config, Engine, Func, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 /// Metadata descriptor for a sandboxed terminal extension
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,11 +25,22 @@ struct LoadedPlugin {
 }
 
 /// Sandboxed WebAssembly execution host
-#[derive(Default)]
 pub struct WasmPluginHost {
     engine: Engine,
     loaded_plugins: HashMap<String, PluginDescriptor>,
     plugin_binaries: HashMap<String, LoadedPlugin>,
+}
+
+impl Default for WasmPluginHost {
+    fn default() -> Self {
+        let mut config = Config::default();
+        config.consume_fuel(true);
+        Self {
+            engine: Engine::new(&config),
+            loaded_plugins: HashMap::new(),
+            plugin_binaries: HashMap::new(),
+        }
+    }
 }
 
 impl WasmPluginHost {
@@ -117,14 +128,27 @@ impl WasmPluginHost {
         let module = Module::new(&self.engine, wasm_bytes)
             .map_err(|e| format!("Wasm compile error: {}", e))?;
 
-        let mut store = Store::new(&self.engine, ());
+        let mut store = Store::new(
+            &self.engine,
+            StoreLimitsBuilder::new()
+                .memory_size(4 * 1024 * 1024)
+                .table_elements(4096)
+                .instances(1)
+                .memories(1)
+                .tables(1)
+                .trap_on_grow_failure(true)
+                .build(),
+        );
+        store.limiter(|limits| limits);
+        store.set_fuel(100_000).map_err(|e| e.to_string())?;
+
         let mut linker = Linker::new(&self.engine);
 
         linker
             .define(
                 "host",
                 "log_i32",
-                Func::wrap(&mut store, |_caller: Caller<'_, ()>, val: i32| {
+                Func::wrap(&mut store, |_caller: Caller<'_, StoreLimits>, val: i32| {
                     let _ = val;
                 }),
             )
@@ -167,15 +191,27 @@ impl WasmPluginHost {
     ) -> Result<String, String> {
         let module = Module::new(&self.engine, wasm_bytes)
             .map_err(|e| format!("Wasm compile error: {}", e))?;
-        let mut store = Store::new(&self.engine, ());
+        let mut store = Store::new(
+            &self.engine,
+            StoreLimitsBuilder::new()
+                .memory_size(4 * 1024 * 1024)
+                .table_elements(4096)
+                .instances(1)
+                .memories(1)
+                .tables(1)
+                .trap_on_grow_failure(true)
+                .build(),
+        );
+        store.limiter(|limits| limits);
+        store.set_fuel(100_000).map_err(|e| e.to_string())?;
+
         let mut linker = Linker::new(&self.engine);
-        let _ = Memory::new(&mut store, MemoryType::new(1, Some(4)).map_err(|e| e.to_string())?);
 
         linker
             .define(
                 "host",
                 "log_i32",
-                Func::wrap(&mut store, |_caller: Caller<'_, ()>, val: i32| {
+                Func::wrap(&mut store, |_caller: Caller<'_, StoreLimits>, val: i32| {
                     let _ = val;
                 }),
             )
@@ -189,7 +225,12 @@ impl WasmPluginHost {
 
         let func = instance
             .get_typed_func::<i32, i32>(&store, "well_hook_prompt_filter")
-            .map_err(|e| format!("Exported function 'well_hook_prompt_filter' not found: {}", e))?;
+            .map_err(|e| {
+                format!(
+                    "Exported function 'well_hook_prompt_filter' not found: {}",
+                    e
+                )
+            })?;
 
         let tag = func
             .call(&mut store, prompt.len() as i32)
@@ -337,5 +378,34 @@ mod tests {
         // Collecting badges across all loaded plugins isolates the trap and returns the healthy badge
         let badges = host.collect_status_badges(7);
         assert_eq!(badges, vec!["[good-badge:107]".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod resource_regressions {
+    use super::*;
+    #[test]
+    fn infinite_hook_exhausts_fuel() {
+        // (module (func (export "run") (param i32) (result i32)
+        //   (loop (br 0)) (i32.const 0)))
+        let bytes = [
+            0, 97, 115, 109, 1, 0, 0, 0, 1, 6, 1, 96, 1, 127, 1, 127, 3, 2, 1, 0, 7, 7, 1, 3, 114,
+            117, 110, 0, 0, 10, 11, 1, 9, 0, 3, 64, 12, 0, 11, 65, 0, 11,
+        ];
+        let error = WasmPluginHost::new()
+            .execute_int_hook(&bytes, "run", 0)
+            .unwrap_err();
+        assert!(error.contains("fuel"), "{error}");
+    }
+    #[test]
+    fn oversized_initial_memory_is_rejected() {
+        let bytes = [
+            0, 97, 115, 109, 1, 0, 0, 0, 1, 6, 1, 96, 1, 127, 1, 127, 3, 2, 1, 0, 5, 3, 1, 0, 65,
+            7, 7, 1, 3, 114, 117, 110, 0, 0, 10, 6, 1, 4, 0, 65, 0, 11,
+        ];
+        assert!(WasmPluginHost::new()
+            .execute_int_hook(&bytes, "run", 0)
+            .unwrap_err()
+            .contains("Instantiation"));
     }
 }

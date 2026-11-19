@@ -3,6 +3,7 @@ pub mod bypass;
 pub mod mcp;
 pub mod ring_buffer;
 pub mod rpc;
+pub mod runtime;
 pub mod seqlock;
 pub mod ssh;
 

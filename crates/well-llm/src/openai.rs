@@ -174,8 +174,8 @@ mod tests {
             stream.flush().expect("flush response");
         });
 
-        let client = OpenAIClient::new("sk-test-openai-key")
-            .with_base_url(format!("http://{}/v1", addr));
+        let client =
+            OpenAIClient::new("sk-test-openai-key").with_base_url(format!("http://{}/v1", addr));
         let out = client
             .translate_query("find all rust files", "zsh", "/tmp")
             .expect("OpenAI translate succeeds");
@@ -185,4 +185,3 @@ mod tests {
         server.join().expect("server thread completes");
     }
 }
-

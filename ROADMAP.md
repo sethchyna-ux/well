@@ -1,5 +1,18 @@
 # Well production-readiness roadmap
 
+## Current qualification note — 2026-11-14
+
+The historical phase labels below are not evidence that every GPUI feature is complete.
+The packaged frontend is GPUI. Follow `docs/IMPLEMENTATION_AUDIT.md` for current findings.
+
+Implemented in this pass: private Hermes endpoint, accurate surface routing and errors,
+real fingerprints, indexed colors, runtime action bindings, bounded Wasm execution,
+authenticated SSH hosting, shared NetOps theme tokens, and canonical AgentOS loader/build/export.
+Disk and isolated network firmware boot plus real companion HTTP/TFTP delivery have
+been exercised against a real AgentOS kernel. Physical network/firmware compatibility,
+ARM64, hardware attestation, full legacy parity, and public release trust remain separate gates.
+
+
 ## Phase 1: repo and build hygiene
 
 Status: baseline complete; automated regression checks are active.

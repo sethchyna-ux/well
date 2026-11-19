@@ -57,7 +57,10 @@ impl Drop for RawTerminalGuard {
 }
 
 fn print_help() {
-    println!("well-cli {} — Sovereign AI Terminal CLI & Headless Runner", env!("CARGO_PKG_VERSION"));
+    println!(
+        "well-cli {} — Sovereign AI Terminal CLI & Headless Runner",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
     println!("USAGE:");
     println!("  well-cli [OPTIONS] [SUBCOMMAND]");

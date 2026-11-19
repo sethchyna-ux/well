@@ -5,6 +5,7 @@
 pub use well_ipc::ssh::{ActiveSshSessionInfo, SshHostConfig, SshTarget};
 
 use serde::{Deserialize, Serialize};
+pub use shell_words::quote as quote_argument;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;

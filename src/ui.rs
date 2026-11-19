@@ -280,6 +280,8 @@ impl Gui {
         }
         false
     }
+    // Legacy frontend API retained until GPUI parity is verified.
+    #[allow(clippy::too_many_arguments)]
     pub fn frame(
         &mut self,
         window: &Window,
@@ -807,7 +809,7 @@ impl Gui {
                             });
                         });
                         if let Some(destr) = self.editor.destructive_warning() {
-                            ui.colored_label(Color32::from_rgb(255, 75, 75), format!("{destr}"));
+                            ui.colored_label(Color32::from_rgb(255, 75, 75), destr.to_string());
                         }
                         if let Some(unclosed) = self.editor.unclosed_reason() {
                             ui.colored_label(Color32::from_rgb(255, 180, 50), format!("ℹ️ {unclosed}"));
@@ -976,6 +978,7 @@ fn egui_key(key: &Key) -> Option<egui::Key> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_with_capital_highlight(
     job: &mut egui::text::LayoutJob,
     text: &str,
@@ -1057,6 +1060,7 @@ fn append_with_capital_highlight(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mneme_syntax_layouter(
     ui: &egui::Ui,
     text: &str,

@@ -8,6 +8,7 @@ license = "MIT"
 [features]
 default = ["local-gguf"]
 local-gguf = []
+test-support = []
 
 [dependencies]
 well-core = { path = "../well-core" }
@@ -21,5 +22,6 @@ base64 = "0.21"
 keyring = "4.2.0"
 
 [dev-dependencies]
+tempfile = "3"
 image = { version = "0.25.10", features = ["png"] }
 

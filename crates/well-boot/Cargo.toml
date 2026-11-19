@@ -1,0 +1,16 @@
+[package]
+name = "well-boot"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+pxe = { git = "https://github.com/sethchyna-ux/pxe.git", rev = "b1e7bfb4658f5c6dce8ad8ab3893c45b141c0845" }
+
+[workspace]

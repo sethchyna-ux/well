@@ -6,9 +6,9 @@ This document describes the current implementation boundaries and architectural 
 
 ### Desktop host & Windowing
 
-The root `well` binary in `src/` owns the desktop event loop, windowing (`winit`), keyboard routing, clipboard integration, and native rendering. It coordinates:
+The GPUI app in `crates/well-gpui` owns the desktop event loop, windowing (`gpui`), keyboard routing, clipboard integration, and native rendering. It coordinates:
 
-- **`TabBar` & `PaneManager`** (`src/tab_bar.rs`, `src/pane_manager.rs`): Production-grade binary-tree tiling layout engine supporting arbitrary horizontal and vertical splits (`Cmd+D`, `Cmd+Shift+D`), multi-session tab lifecycle (`Cmd+T`, `Cmd+W`), tab navigation (`Cmd+[` / `Cmd+]`), pane hit-testing, and dynamic tree consolidation upon closing panes.
+- **`TabBar` & `PaneManager`** (`src/tab_bar.rs`, `src/pane_manager.rs`): Legacy binary-tree tiling layout engine supporting arbitrary horizontal and vertical splits (`Cmd+D`, `Cmd+Shift+D`), multi-session tab lifecycle (`Cmd+T`, `Cmd+W`), tab navigation (`Cmd+[` / `Cmd+]`), pane hit-testing, and dynamic tree consolidation upon closing panes.
 - **Active PTY Multiplexing**: Every leaf pane owns an independent `Arc<PtySession>` and scrollback matrix, multiplexed through `state.active_pty()`.
 - **Mneme Composition Overlay**: Inline multi-line editing buffer (`Ctrl+E` toggle) backed by `crates/well-editor`'s rope structure, capturing multi-line commands with `Ctrl+Enter` execution and `Esc` dismissal.
 
@@ -34,8 +34,8 @@ The root `well` binary in `src/` owns the desktop event loop, windowing (`winit`
 
 `crates/well-llm` implements opt-in AI command translation and image generation:
 
-- **OS Keychain Integration**: Credentials (`WELL_GEMINI_KEY`, `WELL_OPENAI_KEY`, `WELL_HF_TOKEN`) are securely stored in the macOS Keychain (`security-framework`) via `crates/well-llm/src/keychain.rs`.
-- **Destructive Command AST Gate**: All suggested shell commands undergo AST validation; destructive operations (`rm -rf`, `dd`, `mkfs`, fork bombs) are blocked behind mandatory typed confirmation modals.
+- **OS credential storage**: Credentials (`WELL_GEMINI_KEY`, `WELL_OPENAI_KEY`, `WELL_HF_TOKEN`) are securely stored in the macOS Keychain (`security-framework`) via `crates/well-llm/src/keychain.rs`.
+- **Destructive Command AST Gate**: The composer validates current text at submission. Commands classified as destructive by Pythia are routed through Mneme rather than executed directly. Mneme uses an explicit Shift+Enter override. These heuristics are warnings, not a shell sandbox.
 
 ### IPC, Server & Historical Replay
 
@@ -54,10 +54,30 @@ The experimental Flutter/Dart mobile FFI bridge (`app/` and FFI texture serializ
 1. **Zero-Copy Performance**: PTY output streams at gigabytes per second during heavy shell operations (e.g. `cat large.log`, `cmatrix`). Crossing cross-language FFI boundaries and copying RGBA texture buffers between Rust and Flutter introduced unacceptable latency, memory bandwidth pressure, and GC stutter.
 2. **Single-Ecosystem Simplicity**: Consolidating the GUI entirely within native Rust eliminates double-toolchain overhead (Dart SDK, Flutter engine, Gradle/CocoaPods) and ensures unified type safety and memory profiling.
 
-### Current Pipeline & Migration Path to GPUI
+### Current GPUI pipeline and retained legacy code
 
-- **Current Pipeline**: Unified single-binary architecture using `winit` + `wgpu` + `egui` + custom shaders. All UI chrome (tab bars, status lines, split dividers, settings modal, Mneme overlay) and the terminal grid share the same GPU device and swapchain.
-- **GPUI Roadmap**: For future major versions, Well is architected to transition its UI chrome to **GPUI** (the declarative GPU-accelerated UI framework developed by Zed). This provides native macOS look-and-feel, retained-mode declarative views, sub-millisecond layout passes, and seamless integration with our existing `wgpu`/PTY core.
+The packaged app runs `well-gpui`, with GPUI rendering and independent `PtySession`
+instances. Its binary imports the testable library modules. The root winit/wgpu/
+egui frontend remains in the workspace for compatibility and regression coverage;
+it is not the packaged production entry point. Parity must be verified before removal.
+
+### AgentOS boot ownership
+
+`boot/agentos` owns the x86_64 EFI loader migrated from AgentOS. AgentOS retains its
+kernel and canonical `microvm/boot/protocol.zig`. Its kernel-only build target feeds
+Well's loader; its full build also consumes Well's canonical loader source. The
+`well-boot` companion embeds that kernel, verifies SHA-384, exports a FAT ESP volume,
+and supervises QEMU or the existing pinned DHCP/TFTP engines. It serves only named
+artifacts and status over HTTP. Hash checks establish payload integrity, not hardware
+attestation. The GPUI boot panel dispatches visible commands into a terminal pane.
+
+### Incoming SSH hosting
+
+`well-ssh::server::SshHost` owns a dedicated worker/runtime and real listener. It
+uses a persisted private host key, authorized public keys, optional memory-only
+password verification, and PTY channel bridging. It runs as the local user; it is
+not a container or privilege sandbox. The GUI reports actual listener state and
+requires stopping the host before changing authentication settings.
 
 ## Execution Model Principles
 

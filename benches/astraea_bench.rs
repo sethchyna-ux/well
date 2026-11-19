@@ -2,13 +2,15 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use well_prompt::{AstraeaCompiler, AstraeaPreset, AstraeaSnapshot};
 
 fn bench_astraea_compilation(c: &mut Criterion) {
-    let mut snapshot = AstraeaSnapshot::default();
-    snapshot.cwd = "/Users/yocan/Desktop/well/crates/well-prompt".to_string();
-    snapshot.git_branch = "main".to_string();
-    snapshot.is_dirty = true;
-    snapshot.in_container = false;
-    snapshot.is_ssh = false;
-    snapshot.execution_time_ms = 42;
+    let snapshot = AstraeaSnapshot {
+        cwd: "/workspace/well/crates/well-prompt".to_string(),
+        git_branch: "main".to_string(),
+        is_dirty: true,
+        in_container: false,
+        is_ssh: false,
+        execution_time_ms: 42,
+        ..Default::default()
+    };
 
     let presets = [
         ("starship", AstraeaPreset::Starship),

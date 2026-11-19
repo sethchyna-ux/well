@@ -9,7 +9,7 @@ use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use well_editor::{SnippetScope, WellSnippet};
-use well_shell::ssh::{SshConfigFile, SshHostConfig};
+use well_shell::ssh::SshConfigFile;
 use well_shell::theia_ssh::TheiaSshProfile;
 
 fn default_true() -> bool {
@@ -40,6 +40,8 @@ impl CursorShape {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistedOperatorSettings {
+    #[serde(default)]
+    pub version: u32,
     pub theme_id: u32,
     #[serde(default)]
     pub custom_theme: Option<CustomThemeHex>,
@@ -74,6 +76,7 @@ pub struct PersistedOperatorSettings {
 }
 
 pub struct TerminalSettings {
+    operator_revision: Option<well_config::operator::Revision>,
     pub font_family: String,
     pub user_selected_non_dyslexic_font: bool,
     pub font_size: f32,
@@ -235,17 +238,22 @@ impl TerminalSettings {
             if let Ok(path) = well_config::ConfigStore::default_path() {
                 if let Ok((_, prefs)) = well_config::ConfigStore::load(path) {
                     if prefs.appearance.font_family.contains("OpenDyslexic") {
-                        font_family = well_render::canonical_font_family(&prefs.appearance.font_family).to_string();
+                        font_family =
+                            well_render::canonical_font_family(&prefs.appearance.font_family)
+                                .to_string();
                     }
                     font_size = prefs.appearance.font_size;
                 }
             }
 
-            if let Ok(raw) = std::fs::read_to_string(&op_path) {
-                if let Ok(persisted) = serde_json::from_str::<PersistedOperatorSettings>(&raw) {
-                    let custom_theme = persisted
-                        .custom_theme
-                        .unwrap_or_else(|| CustomThemeHex::from_theme(&Theme::get(persisted.theme_id)));
+            {
+                if let Ok((persisted, revision)) =
+                    well_config::operator::OperatorStore::new(&op_path)
+                        .load::<PersistedOperatorSettings>()
+                {
+                    let custom_theme = persisted.custom_theme.unwrap_or_else(|| {
+                        CustomThemeHex::from_theme(&Theme::get(persisted.theme_id))
+                    });
                     let theme = if persisted.theme_id == 5 {
                         custom_theme.to_theme()
                     } else {
@@ -259,6 +267,7 @@ impl TerminalSettings {
                         "OpenDyslexic Nerd Font".to_string()
                     };
                     let mut loaded = Self {
+                        operator_revision: Some(revision),
                         font_family: resolved_font.clone(),
                         user_selected_non_dyslexic_font: persisted.user_selected_non_dyslexic_font
                             && !resolved_font.contains("OpenDyslexic"),
@@ -279,16 +288,19 @@ impl TerminalSettings {
                             persisted.snippets
                         },
                         ssh_profiles: persisted.ssh_profiles,
-                        ssh_tunnels: if persisted.ssh_tunnels.is_empty() {
-                            SshTunnelEntry::default_catalog()
-                        } else {
-                            persisted.ssh_tunnels
-                        },
-                        custom_bindings: if persisted.custom_bindings.len() == WELL_ACTIONS.len() {
-                            persisted.custom_bindings
-                        } else {
-                            Self::default_bindings()
-                        },
+                        ssh_tunnels: persisted.ssh_tunnels,
+                        custom_bindings: WELL_ACTIONS
+                            .iter()
+                            .map(|action| {
+                                let display = persisted
+                                    .custom_bindings
+                                    .iter()
+                                    .find(|(id, _, _)| id == action.id)
+                                    .map(|(_, binding, _)| binding.clone())
+                                    .unwrap_or_else(|| action.default_keybind.into());
+                                (action.id.into(), display, action.key_context.into())
+                            })
+                            .collect(),
                         gate_rm_root: persisted.gate_rm_root,
                         gate_kubectl_delete: persisted.gate_kubectl_delete,
                         gate_git_force_push: persisted.gate_git_force_push,
@@ -309,36 +321,14 @@ impl TerminalSettings {
         }
 
         let ssh_cfg = SshConfigFile::load_default();
-        let mut ssh_profiles: Vec<TheiaSshProfile> = ssh_cfg
+        let ssh_profiles: Vec<TheiaSshProfile> = ssh_cfg
             .hosts
             .into_iter()
             .map(TheiaSshProfile::from_host)
             .collect();
-        if ssh_profiles.is_empty() {
-            ssh_profiles.push(TheiaSshProfile::from_host(SshHostConfig {
-                name: "Ended".into(),
-                hostname: "192.168.1.12".into(),
-                user: Some("chyna".into()),
-                port: 22,
-                identity_file: Some(PathBuf::from("~/.ssh/id_ed25519")),
-                proxy_jump: None,
-                forward_agent: true,
-                options: Default::default(),
-            }));
-            ssh_profiles.push(TheiaSshProfile::from_host(SshHostConfig {
-                name: "staging-worker-01".into(),
-                hostname: "10.240.1.25".into(),
-                user: Some("deploy".into()),
-                port: 2222,
-                identity_file: Some(PathBuf::from("~/.ssh/id_ed25519")),
-                proxy_jump: None,
-                forward_agent: false,
-                options: Default::default(),
-            }));
-        }
-
         let default_theme = Theme::get(0);
         Self {
+            operator_revision: None,
             font_family,
             user_selected_non_dyslexic_font,
             font_size,
@@ -354,7 +344,7 @@ impl TerminalSettings {
             show_line_numbers: false,
             snippets: WellSnippet::builtin_catalog(),
             ssh_profiles,
-            ssh_tunnels: SshTunnelEntry::default_catalog(),
+            ssh_tunnels: Vec::new(),
             custom_bindings: Self::default_bindings(),
             gate_rm_root: true,
             gate_kubectl_delete: true,
@@ -371,17 +361,49 @@ impl TerminalSettings {
 
     /// Persist all operator settings atomically to `~/.config/well/operator_settings.json`
     /// and sync typography to `well-config::ConfigStore` (`settings.toml`).
+    pub fn command_warning(&self, text: &str) -> Option<String> {
+        let warning = well_editor::validator::check_destructive_sync(
+            text,
+            well_editor::validator::SafetyPolicy {
+                root_removal: self.gate_rm_root,
+                cluster_delete: self.gate_kubectl_delete,
+                force_push: self.gate_git_force_push,
+                terraform_destroy: self.gate_terraform_destroy,
+            },
+        );
+        warning.or_else(|| {
+            if self.gate_rm_root
+                && self.gate_kubectl_delete
+                && self.gate_git_force_push
+                && self.gate_terraform_destroy
+                && well_core::ai::detect_destructive_command(text)
+            {
+                Some("Destructive shell command requires explicit override".into())
+            } else {
+                None
+            }
+        })
+    }
     pub fn save_to_disk(&mut self) -> Result<String, String> {
+        let result = self.persist_to_disk();
+        if let Err(error) = &result {
+            self.last_saved_status = Some(format!("Save failed: {error}"));
+        }
+        result
+    }
+
+    fn persist_to_disk(&mut self) -> Result<String, String> {
         if cfg!(test) {
             return Ok("Skipped disk save in test".into());
         }
-        if let Ok(path) = well_config::ConfigStore::default_path() {
-            if let Ok((mut store, mut prefs)) = well_config::ConfigStore::load(path) {
-                prefs.appearance.font_family = self.font_family.clone();
-                prefs.appearance.font_size = self.font_size;
-                prefs.appearance.geometric_border = self.geometric_border;
-                let _ = store.save(&prefs);
-            }
+        {
+            let path = well_config::ConfigStore::default_path().map_err(|e| e.to_string())?;
+            let (mut store, mut prefs) =
+                well_config::ConfigStore::load(path).map_err(|e| e.to_string())?;
+            prefs.appearance.font_family = self.font_family.clone();
+            prefs.appearance.font_size = self.font_size;
+            prefs.appearance.geometric_border = self.geometric_border;
+            store.save(&prefs).map_err(|e| e.to_string())?;
         }
 
         let op_path = Self::operator_settings_path();
@@ -390,6 +412,7 @@ impl TerminalSettings {
         }
 
         let payload = PersistedOperatorSettings {
+            version: well_config::operator::VERSION,
             theme_id: self.theme.id,
             custom_theme: Some(self.custom_theme.clone()),
             font_family: self.font_family.clone(),
@@ -414,10 +437,10 @@ impl TerminalSettings {
             metis_offline_cache_priority: self.metis_offline_cache_priority,
         };
 
-        let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
-        let tmp_path = op_path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp_path, &op_path).map_err(|e| e.to_string())?;
+        self.operator_revision = Some(
+            well_config::operator::OperatorStore::new(&op_path)
+                .save(&payload, self.operator_revision)?,
+        );
 
         let msg = format!("Saved all changes to {}", op_path.display());
         self.last_saved_status = Some(msg.clone());
@@ -466,7 +489,7 @@ impl SettingsSection {
             Self::SnippetsWorkflows => "Parameterized ${1:arg} tab-stop templates",
             Self::TheiaSshHosts => "Host profiles, redacted keys & IPC tunnel",
             Self::MnemeSafetyGates => "Tree-sitter AST destructive command gates",
-            Self::PythiaTelemetry => "Sub-2ms Metis cache & Caduceus IPC health",
+            Self::PythiaTelemetry => "Local Metis cache & Caduceus IPC health",
             Self::SystemInfoGuide => "Mythological names, subsystems & functions",
         }
     }
@@ -658,13 +681,19 @@ impl Render for SettingsView {
         }
         let active_section = self.active_section;
         let theme = self.settings.read(cx).theme.clone();
-        let status_msg = self
-            .status_msg
-            .clone()
-            .or_else(|| self.settings.read(cx).last_saved_status.clone())
-            .unwrap_or_else(|| {
-                "All changes auto-save & can be explicitly saved via ✓ Save & Close (⌘S)".into()
-            });
+        let last_save = self.settings.read(cx).last_saved_status.clone();
+        let status_msg = if last_save
+            .as_ref()
+            .is_some_and(|s| s.starts_with("Save failed:"))
+        {
+            last_save.unwrap()
+        } else {
+            self.status_msg
+                .clone()
+                .or(last_save)
+                .unwrap_or_else(|| "Changes auto-save. Save & Close: ⌘S".into())
+        };
+
         let settings_entity = self.settings.clone();
 
         // Left Sidebar Navigation (7 Clear Sections)
@@ -702,11 +731,7 @@ impl Render for SettingsView {
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(if is_active {
-                                theme.bg
-                            } else {
-                                theme.fg
-                            })
+                            .text_color(if is_active { theme.bg } else { theme.fg })
                             .child(section.title()),
                     )
                     .child(
@@ -724,7 +749,9 @@ impl Render for SettingsView {
 
         let sidebar = div()
             .id("settings-left-sidebar")
-            .w(px(238.0))
+            .w(relative(0.22))
+            .min_w(px(220.0))
+            .max_w(px(340.0))
             .h_full()
             .min_h_0()
             .flex_shrink_0()
@@ -767,7 +794,9 @@ impl Render for SettingsView {
                                     .flex_row()
                                     .gap_1()
                                     .child(div().size(px(7.0)).rounded_full().bg(theme.bg))
-                                    .child(div().size(px(7.0)).rounded_full().bg(theme.border_active))
+                                    .child(
+                                        div().size(px(7.0)).rounded_full().bg(theme.border_active),
+                                    )
                                     .child(div().size(px(7.0)).rounded_full().bg(rgb(0x22d3ee)))
                                     .child(div().size(px(7.0)).rounded_full().bg(rgb(0xa855f7)))
                                     .child(div().size(px(7.0)).rounded_full().bg(theme.fg)),
@@ -808,19 +837,11 @@ impl Render for SettingsView {
                 ];
 
                 let themes = [
-                    (
-                        0,
-                        "Theia's Prism",
-                        [0x1d2021, 0xfe8019, 0x8ec07c, 0xebdbb2],
-                    ),
+                    (0, "Theia's Prism", [0x1d2021, 0xfe8019, 0x8ec07c, 0xebdbb2]),
                     (1, "Cyber-Neon", [0x0a0a0f, 0x00ffff, 0xff003c, 0x39ff14]),
                     (2, "Tokyo Night", [0x1a1b26, 0x7aa2f7, 0xf7768e, 0x9ece6a]),
                     (3, "Dracula", [0x282a36, 0xbd93f9, 0x50fa7b, 0xff5555]),
-                    (
-                        4,
-                        "Crimson Prod",
-                        [0x221112, 0xfb4934, 0xcc241d, 0xfbf1c7],
-                    ),
+                    (4, "Crimson Prod", [0x221112, 0xfb4934, 0xcc241d, 0xfbf1c7]),
                     (5, "✨ Custom Theme", custom_preview),
                 ];
 
@@ -835,8 +856,16 @@ impl Render for SettingsView {
                             .py_1p5()
                             .rounded_lg()
                             .border_2()
-                            .border_color(if is_sel { theme.border_active } else { theme.border_inactive })
-                            .bg(if is_sel { theme.tab_active_bg } else { theme.bg })
+                            .border_color(if is_sel {
+                                theme.border_active
+                            } else {
+                                theme.border_inactive
+                            })
+                            .bg(if is_sel {
+                                theme.tab_active_bg
+                            } else {
+                                theme.bg
+                            })
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 let mut chosen = Theme::theia_prism();
@@ -852,7 +881,9 @@ impl Render for SettingsView {
                                 });
                                 view.sync_hex_inputs_from_theme(&chosen);
                                 view.active_input = ActiveFormInput::None;
-                                view.status_msg = Some(format!("✓ Active theme switched to '{name}' & saved to disk"));
+                                view.status_msg = Some(format!(
+                                    "✓ Active theme switched to '{name}' & saved to disk"
+                                ));
                                 cx.notify();
                             }))
                             .flex()
@@ -862,7 +893,11 @@ impl Render for SettingsView {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(if is_sel { theme.border_active } else { theme.fg })
+                                    .text_color(if is_sel {
+                                        theme.border_active
+                                    } else {
+                                        theme.fg
+                                    })
                                     .child(if is_sel {
                                         format!("✓ {name}")
                                     } else {
@@ -916,158 +951,193 @@ impl Render for SettingsView {
                     ),
                 ];
 
-                let build_slot_card = |slot_idx: usize,
-                                       slot_label: &'static str,
-                                       swatches: [u32; 6],
-                                       cx: &mut Context<Self>| {
-                    let raw_hex = hex_inputs[slot_idx].clone();
-                    let is_editing = active_in == ActiveFormInput::ThemeHex(slot_idx);
-                    let preview_rgb = parse_hex_color(&raw_hex).map(rgb).unwrap_or(match slot_idx {
-                        0 => theme.bg,
-                        1 => theme.fg,
-                        2 => theme.border_active,
-                        3 => theme.border_inactive,
-                        4 => theme.tab_active_bg,
-                        _ => theme.tab_inactive_bg,
-                    });
+                let build_slot_card =
+                    |slot_idx: usize,
+                     slot_label: &'static str,
+                     swatches: [u32; 6],
+                     cx: &mut Context<Self>| {
+                        let raw_hex = hex_inputs[slot_idx].clone();
+                        let is_editing = active_in == ActiveFormInput::ThemeHex(slot_idx);
+                        let preview_rgb =
+                            parse_hex_color(&raw_hex)
+                                .map(rgb)
+                                .unwrap_or(match slot_idx {
+                                    0 => theme.bg,
+                                    1 => theme.fg,
+                                    2 => theme.border_active,
+                                    3 => theme.border_inactive,
+                                    4 => theme.tab_active_bg,
+                                    _ => theme.tab_inactive_bg,
+                                });
 
-                    let mut swatch_row = div().flex().flex_row().items_center().gap_1p5();
-                    for (sw_i, sw_hex) in swatches.into_iter().enumerate() {
-                        let formatted_sw = format!("#{sw_hex:06X}");
-                        let is_current_sw = raw_hex.eq_ignore_ascii_case(&formatted_sw);
-                        swatch_row = swatch_row.child(
-                            div()
-                                .id(("custom-theme-swatch", slot_idx * 10 + sw_i))
-                                .size(px(14.0))
-                                .rounded_full()
-                                .bg(rgb(sw_hex))
-                                .border_1()
-                                .border_color(if is_current_sw {
-                                    rgb(0xffffff)
-                                } else {
-                                    rgb(0x64748b)
-                                })
-                                .cursor(gpui::CursorStyle::PointingHand)
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.theme_hex_inputs[slot_idx] = formatted_sw.clone();
-                                    view.apply_custom_theme_if_valid(slot_idx, cx);
-                                })),
-                        );
-                    }
+                        let mut swatch_row = div().flex().flex_row().items_center().gap_1p5();
+                        for (sw_i, sw_hex) in swatches.into_iter().enumerate() {
+                            let formatted_sw = format!("#{sw_hex:06X}");
+                            let is_current_sw = raw_hex.eq_ignore_ascii_case(&formatted_sw);
+                            swatch_row = swatch_row.child(
+                                div()
+                                    .id(("custom-theme-swatch", slot_idx * 10 + sw_i))
+                                    .size(px(14.0))
+                                    .rounded_full()
+                                    .bg(rgb(sw_hex))
+                                    .border_1()
+                                    .border_color(if is_current_sw {
+                                        rgb(0xffffff)
+                                    } else {
+                                        rgb(0x64748b)
+                                    })
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.theme_hex_inputs[slot_idx] = formatted_sw.clone();
+                                        view.apply_custom_theme_if_valid(slot_idx, cx);
+                                    })),
+                            );
+                        }
 
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .px_2p5()
-                        .py_1p5()
-                        .rounded_md()
-                        .bg(theme.bg)
-                        .border_1()
-                        .border_color(if is_editing {
-                            theme.border_active
-                        } else {
-                            theme.border_inactive
-                        })
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .justify_between()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .child(
-                                            div()
-                                                .size(px(14.0))
-                                                .rounded_sm()
-                                                .bg(preview_rgb)
-                                                .border_1()
-                                                .border_color(theme.border_active),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(11.0))
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(theme.fg)
-                                                .child(slot_label),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id(("theme-hex-input", slot_idx))
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded_sm()
-                                        .bg(theme.tab_active_bg)
-                                        .border_1()
-                                        .border_color(if is_editing {
-                                            theme.border_active
-                                        } else {
-                                            theme.border_inactive
-                                        })
-                                        .cursor(gpui::CursorStyle::IBeam)
-                                        .font_family("OpenDyslexic Nerd Font")
-                                        .text_size(px(10.5))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(if is_editing {
-                                            theme.border_active
-                                        } else {
-                                            theme.fg
-                                        })
-                                        .on_click(cx.listener(move |view, _, window, cx| {
-                                            view.active_input = ActiveFormInput::ThemeHex(slot_idx);
-                                            window.focus(&view.focus_handle);
-                                            cx.notify();
-                                        }))
-                                        .child(if is_editing {
-                                            format!("{raw_hex}▏")
-                                        } else {
-                                            raw_hex
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_size(px(9.5))
-                                        .text_color(rgb(0x928374))
-                                        .child("Quick swatches:"),
-                                )
-                                .child(swatch_row),
-                        )
-                };
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded_md()
+                            .bg(theme.bg)
+                            .border_1()
+                            .border_color(if is_editing {
+                                theme.border_active
+                            } else {
+                                theme.border_inactive
+                            })
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(
+                                                div()
+                                                    .size(px(14.0))
+                                                    .rounded_sm()
+                                                    .bg(preview_rgb)
+                                                    .border_1()
+                                                    .border_color(theme.border_active),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.0))
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(theme.fg)
+                                                    .child(slot_label),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("theme-hex-input", slot_idx))
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(theme.tab_active_bg)
+                                            .border_1()
+                                            .border_color(if is_editing {
+                                                theme.border_active
+                                            } else {
+                                                theme.border_inactive
+                                            })
+                                            .cursor(gpui::CursorStyle::IBeam)
+                                            .font_family("OpenDyslexic Nerd Font")
+                                            .text_size(px(10.5))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(if is_editing {
+                                                theme.border_active
+                                            } else {
+                                                theme.fg
+                                            })
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.active_input =
+                                                    ActiveFormInput::ThemeHex(slot_idx);
+                                                window.focus(&view.focus_handle);
+                                                cx.notify();
+                                            }))
+                                            .child(if is_editing {
+                                                format!("{raw_hex}▏")
+                                            } else {
+                                                raw_hex
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_size(px(9.5))
+                                            .text_color(rgb(0x928374))
+                                            .child("Quick swatches:"),
+                                    )
+                                    .child(swatch_row),
+                            )
+                    };
 
                 let row_a = div()
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(build_slot_card(slot_defs[0].0, slot_defs[0].1, slot_defs[0].2, cx))
-                    .child(build_slot_card(slot_defs[1].0, slot_defs[1].1, slot_defs[1].2, cx));
+                    .child(build_slot_card(
+                        slot_defs[0].0,
+                        slot_defs[0].1,
+                        slot_defs[0].2,
+                        cx,
+                    ))
+                    .child(build_slot_card(
+                        slot_defs[1].0,
+                        slot_defs[1].1,
+                        slot_defs[1].2,
+                        cx,
+                    ));
                 let row_b = div()
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(build_slot_card(slot_defs[2].0, slot_defs[2].1, slot_defs[2].2, cx))
-                    .child(build_slot_card(slot_defs[3].0, slot_defs[3].1, slot_defs[3].2, cx));
+                    .child(build_slot_card(
+                        slot_defs[2].0,
+                        slot_defs[2].1,
+                        slot_defs[2].2,
+                        cx,
+                    ))
+                    .child(build_slot_card(
+                        slot_defs[3].0,
+                        slot_defs[3].1,
+                        slot_defs[3].2,
+                        cx,
+                    ));
                 let row_c = div()
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(build_slot_card(slot_defs[4].0, slot_defs[4].1, slot_defs[4].2, cx))
-                    .child(build_slot_card(slot_defs[5].0, slot_defs[5].1, slot_defs[5].2, cx));
+                    .child(build_slot_card(
+                        slot_defs[4].0,
+                        slot_defs[4].1,
+                        slot_defs[4].2,
+                        cx,
+                    ))
+                    .child(build_slot_card(
+                        slot_defs[5].0,
+                        slot_defs[5].1,
+                        slot_defs[5].2,
+                        cx,
+                    ));
 
                 let sm_dec = settings_entity.clone();
                 let sm_inc = settings_entity.clone();
@@ -1116,11 +1186,13 @@ impl Render for SettingsView {
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 sm_font.update(cx, |s, cx| {
                                     s.font_family = f_name.to_string();
-                                    s.user_selected_non_dyslexic_font = !f_name.contains("OpenDyslexic");
+                                    s.user_selected_non_dyslexic_font =
+                                        !f_name.contains("OpenDyslexic");
                                     let _ = s.save_to_disk();
                                     cx.notify();
                                 });
-                                view.status_msg = Some(format!("✓ Switched font family to '{f_name}' & saved"));
+                                view.status_msg =
+                                    Some(format!("✓ Switched font family to '{f_name}' & saved"));
                                 cx.notify();
                             }))
                             .child(f_name),
@@ -1173,11 +1245,8 @@ impl Render for SettingsView {
                     );
                 }
 
-                let blink_speeds: [(u64, &'static str); 3] = [
-                    (350, "Fast 350ms"),
-                    (500, "500ms"),
-                    (750, "Calm 750ms"),
-                ];
+                let blink_speeds: [(u64, &'static str); 3] =
+                    [(350, "Fast 350ms"), (500, "500ms"), (750, "Calm 750ms")];
                 let mut blink_speed_pills = div().flex().flex_row().items_center().gap_1();
                 for (b_idx, (ms_val, ms_label)) in blink_speeds.into_iter().enumerate() {
                     let is_speed_sel = cursor_blink_ms == ms_val;
@@ -1324,21 +1393,18 @@ impl Render for SettingsView {
                                             .child(preview_cursor_glyph),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(0x928374))
-                                    .child(format!(
-                                        "{font_family} · {font_size:.0}px · {} {}{}",
-                                        cursor_shape.label(),
-                                        if cursor_blink {
-                                            format!("({cursor_blink_ms}ms blink)")
-                                        } else {
-                                            "(steady)".into()
-                                        },
-                                        if show_line_numbers { " · 1│ln" } else { "" }
-                                    )),
-                            ),
+                            .child(div().text_size(px(10.0)).text_color(rgb(0x928374)).child(
+                                format!(
+                                    "{font_family} · {font_size:.0}px · {} {}{}",
+                                    cursor_shape.label(),
+                                    if cursor_blink {
+                                        format!("({cursor_blink_ms}ms blink)")
+                                    } else {
+                                        "(steady)".into()
+                                    },
+                                    if show_line_numbers { " · 1│ln" } else { "" }
+                                ),
+                            )),
                     );
 
                 div()
@@ -1818,10 +1884,7 @@ impl Render for SettingsView {
                             .child("No matching functions found. Press Backspace or Clear to reset filter."),
                     );
                 } else {
-                    for (idx, desc) in matching_actions
-                        .into_iter()
-                        .skip(start_idx)
-                        .take(page_size)
+                    for (idx, desc) in matching_actions.into_iter().skip(start_idx).take(page_size)
                     {
                         let current_key = bindings
                             .get(idx)
@@ -2821,7 +2884,7 @@ impl Render for SettingsView {
                                                 div()
                                                     .text_size(px(11.0))
                                                     .text_color(theme.fg)
-                                                    .child("Forward /tmp/well-caduceus.sock (-R IPC Tunnel)"),
+                                                    .child("Forward local Hermes IPC (-R tunnel)"),
                                             ),
                                     )
                                     .child(
@@ -2865,59 +2928,60 @@ impl Render for SettingsView {
 
                 let sm_save_ssh = settings_entity.clone();
                 let sm_launch_ssh = settings_entity.clone();
-                let build_ssh_field = |id_str: &'static str,
-                                       label: &'static str,
-                                       val: String,
-                                       field: ActiveFormInput,
-                                       cx: &mut Context<Self>| {
-                    let is_sel = active_in == field;
-                    div()
-                        .id(id_str)
-                        .flex_1()
-                        .min_w_0()
-                        .px_2p5()
-                        .py_1()
-                        .rounded_md()
-                        .bg(theme.bg)
-                        .border_1()
-                        .border_color(if is_sel {
-                            theme.border_active
-                        } else {
-                            theme.border_inactive
-                        })
-                        .cursor(gpui::CursorStyle::IBeam)
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.active_input = field;
-                            window.focus(&view.focus_handle);
-                            cx.notify();
-                        }))
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(0x928374))
-                                .child(label),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(if is_sel {
-                                    theme.border_active
-                                } else {
-                                    theme.fg
-                                })
-                                .child(if is_sel {
-                                    format!("{val}▏")
-                                } else if val.is_empty() {
-                                    "(none)".to_string()
-                                } else {
-                                    val
-                                }),
-                        )
-                };
+                let build_ssh_field =
+                    |id_str: &'static str,
+                     label: &'static str,
+                     val: String,
+                     field: ActiveFormInput,
+                     cx: &mut Context<Self>| {
+                        let is_sel = active_in == field;
+                        div()
+                            .id(id_str)
+                            .flex_1()
+                            .min_w_0()
+                            .px_2p5()
+                            .py_1()
+                            .rounded_md()
+                            .bg(theme.bg)
+                            .border_1()
+                            .border_color(if is_sel {
+                                theme.border_active
+                            } else {
+                                theme.border_inactive
+                            })
+                            .cursor(gpui::CursorStyle::IBeam)
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.active_input = field;
+                                window.focus(&view.focus_handle);
+                                cx.notify();
+                            }))
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0x928374))
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(if is_sel {
+                                        theme.border_active
+                                    } else {
+                                        theme.fg
+                                    })
+                                    .child(if is_sel {
+                                        format!("{val}▏")
+                                    } else if val.is_empty() {
+                                        "(none)".to_string()
+                                    } else {
+                                        val
+                                    }),
+                            )
+                    };
 
                 div()
                     .flex()
@@ -3295,7 +3359,7 @@ impl Render for SettingsView {
                                         cx.notify();
                                     }))
                                     .child(div().text_color(rgb(0x8ec07c)).child(if metis_priority { "☑" } else { "☐" }))
-                                    .child(div().text_xs().text_color(theme.fg).child("Prioritize <2ms offline Metis SQLite/Trie recipe cache before remote LLM calls")),
+                                    .child(div().text_xs().text_color(theme.fg).child("Prioritize local offline Metis SQLite/Trie recipe cache before remote LLM calls")),
                             )
                             .child(
                                 div()
@@ -3307,86 +3371,87 @@ impl Render for SettingsView {
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    .child(div().text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0x8ec07c)).child("🟢 Caduceus IPC Endpoint: /tmp/well-caduceus.sock"))
+                                    .child(div().text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0x8ec07c)).child(format!("Caduceus IPC endpoint: {}", well_ipc::runtime::socket_path().display())))
                                     .child(div().text_xs().text_color(rgb(0xa89984)).child("Dual-Transport Multiplexer: 4-byte LE Framed Binary (4 MiB cap) + HTTP/WS JSON-RPC"))
-                                    .child(div().text_xs().text_color(rgb(0xa89984)).child("BigQuery AI/ML Sync: completions_native (Partitioned + Vertex AI text-embedding-005)")),
+                                    .child(div().text_xs().text_color(rgb(0xa89984)).child("Provider requests are opt-in. No cloud synchronization is configured by this panel.")),
                             ),
                     )
                     .into_any_element()
             }
             SettingsSection::SystemInfoGuide => {
-                let make_lore_card = |icon: &'static str,
-                                      name: &'static str,
-                                      key_badge: &'static str,
-                                      badge_color: u32,
-                                      myth_origin: &'static str,
-                                      desc_line1: &'static str,
-                                      desc_line2: &'static str| {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .p_2p5()
-                        .rounded_lg()
-                        .bg(theme.bg)
-                        .border_1()
-                        .border_color(theme.border_inactive)
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .child(div().text_xs().child(icon))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(theme.border_active)
-                                                .child(name),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .rounded_sm()
-                                        .bg(rgb(badge_color))
-                                        .text_size(px(10.0))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgb(0x090d16))
-                                        .child(key_badge),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(0x8ec07c))
-                                .child(myth_origin),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(theme.fg)
-                                .child(desc_line1),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(rgb(0xd5c4a1))
-                                .child(desc_line2),
-                        )
-                };
+                let make_lore_card =
+                    |icon: &'static str,
+                     name: &'static str,
+                     key_badge: &'static str,
+                     badge_color: u32,
+                     myth_origin: &'static str,
+                     desc_line1: &'static str,
+                     desc_line2: &'static str| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .p_2p5()
+                            .rounded_lg()
+                            .bg(theme.bg)
+                            .border_1()
+                            .border_color(theme.border_inactive)
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(div().text_xs().child(icon))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .text_color(theme.border_active)
+                                                    .child(name),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(rgb(badge_color))
+                                            .text_size(px(10.0))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(0x090d16))
+                                            .child(key_badge),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(0x8ec07c))
+                                    .child(myth_origin),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.fg)
+                                    .child(desc_line1),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(0xd5c4a1))
+                                    .child(desc_line2),
+                            )
+                    };
 
                 div()
                     .flex()
@@ -3720,16 +3785,24 @@ impl Render for SettingsView {
                     // Handle ⌘C / Ctrl+C Copy
                     if (mods.platform || mods.control) && key.eq_ignore_ascii_case("c") {
                         let text_to_copy = match target_input {
-                            ActiveFormInput::SnippetTrigger => Some(view.new_snippet_trigger.clone()),
+                            ActiveFormInput::SnippetTrigger => {
+                                Some(view.new_snippet_trigger.clone())
+                            }
                             ActiveFormInput::SnippetLabel => Some(view.new_snippet_label.clone()),
-                            ActiveFormInput::SnippetTemplate => Some(view.new_snippet_template.clone()),
+                            ActiveFormInput::SnippetTemplate => {
+                                Some(view.new_snippet_template.clone())
+                            }
                             ActiveFormInput::ShortcutsFilter => Some(view.shortcuts_filter.clone()),
                             ActiveFormInput::SshName => Some(view.ssh_draft.name.clone()),
                             ActiveFormInput::SshHostname => Some(view.ssh_draft.hostname.clone()),
                             ActiveFormInput::SshUser => Some(view.ssh_draft.user.clone()),
                             ActiveFormInput::SshPort => Some(view.ssh_draft.port.clone()),
-                            ActiveFormInput::SshIdentityFile => Some(view.ssh_draft.identity_file.clone()),
-                            ActiveFormInput::SshProxyJump => Some(view.ssh_draft.proxy_jump.clone()),
+                            ActiveFormInput::SshIdentityFile => {
+                                Some(view.ssh_draft.identity_file.clone())
+                            }
+                            ActiveFormInput::SshProxyJump => {
+                                Some(view.ssh_draft.proxy_jump.clone())
+                            }
                             _ => None,
                         };
                         if let Some(t) = text_to_copy {
@@ -3756,7 +3829,9 @@ impl Render for SettingsView {
                             ActiveFormInput::SshHostname => view.ssh_draft.hostname.clear(),
                             ActiveFormInput::SshUser => view.ssh_draft.user.clear(),
                             ActiveFormInput::SshPort => view.ssh_draft.port.clear(),
-                            ActiveFormInput::SshIdentityFile => view.ssh_draft.identity_file.clear(),
+                            ActiveFormInput::SshIdentityFile => {
+                                view.ssh_draft.identity_file.clear()
+                            }
                             ActiveFormInput::SshProxyJump => view.ssh_draft.proxy_jump.clear(),
                             _ => {}
                         }
@@ -3995,11 +4070,7 @@ impl Render for SettingsView {
                                     } else {
                                         theme.border_inactive
                                     })
-                                    .text_color(if !is_info_tab {
-                                        theme.bg
-                                    } else {
-                                        theme.fg
-                                    })
+                                    .text_color(if !is_info_tab { theme.bg } else { theme.fg })
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -4050,11 +4121,7 @@ impl Render for SettingsView {
                                     } else {
                                         theme.border_inactive
                                     })
-                                    .text_color(if is_info_tab {
-                                        theme.bg
-                                    } else {
-                                        theme.fg
-                                    })
+                                    .text_color(if is_info_tab { theme.bg } else { theme.fg })
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -4114,33 +4181,28 @@ impl Render for SettingsView {
                             .child(status_msg),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("bottom-save-btn")
-                                    .px_4()
-                                    .py_1p5()
-                                    .rounded_md()
-                                    .bg(rgb(0x8ec07c))
-                                    .text_color(rgb(0x1d2021))
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.save_all(cx);
-                                        sm_close_bottom.update(cx, |s, cx| {
-                                            s.settings_open = false;
-                                            s.modal_open = false;
-                                            s.requested_hub_switch = Some("close");
-                                            cx.notify();
-                                        });
-                                    }))
-                                    .child("✓ Save & Close (⌘S)"),
-                            ),
+                        div().flex().flex_row().items_center().gap_2().child(
+                            div()
+                                .id("bottom-save-btn")
+                                .px_4()
+                                .py_1p5()
+                                .rounded_md()
+                                .bg(rgb(0x8ec07c))
+                                .text_color(rgb(0x1d2021))
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .cursor(gpui::CursorStyle::PointingHand)
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.save_all(cx);
+                                    sm_close_bottom.update(cx, |s, cx| {
+                                        s.settings_open = false;
+                                        s.modal_open = false;
+                                        s.requested_hub_switch = Some("close");
+                                        cx.notify();
+                                    });
+                                }))
+                                .child("✓ Save & Close (⌘S)"),
+                        ),
                     ),
             )
     }

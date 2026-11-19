@@ -97,9 +97,9 @@ pub const WELL_ACTIONS: &[ActionDescriptor] = &[
     },
     ActionDescriptor {
         id: "theia::OpenPxeBootloader",
-        label: "Theia NetOps: PXE / ProxyDHCP Server & Custom UEFI Bootloader",
+        label: "AgentOS: Build, Boot & Network Deployment",
         category: ActionCategory::TheiaSsh,
-        description: "Configure Option 43 TLV ProxyDHCP, iPXE ${next-server} scripts & ipxe-uefi SNP",
+        description: "Build the real AgentOS x86_64 EFI payload, export its ESP image, boot QEMU, or start netboot",
         default_keybind: "⌃⌥B",
         key_context: "Workspace",
     },
@@ -123,7 +123,7 @@ pub const WELL_ACTIONS: &[ActionDescriptor] = &[
         id: "pythia::ToggleCopilot",
         label: "Pythia AI: Command Synthesis & Image Studio",
         category: ActionCategory::PythiaAi,
-        description: "Toggle Pythia Copilot (<2ms Metis cache, LLM & Kitty Image Studio)",
+        description: "Toggle Pythia Copilot (local Metis cache, LLM & Kitty Image Studio)",
         default_keybind: "^⇧K",
         key_context: "Workspace",
     },
@@ -219,6 +219,27 @@ pub const WELL_ACTIONS: &[ActionDescriptor] = &[
 
 /// Filter `WELL_ACTIONS` by a case-insensitive query matching label, id, category, description, or shortcut.
 pub fn filter_actions(query: &str) -> Vec<&'static ActionDescriptor> {
+    filter_actions_with_bindings(query, &[])
+}
+
+pub fn shortcut_for<'a>(id: &str, bindings: &'a [(String, String, String)]) -> &'a str {
+    bindings
+        .iter()
+        .find(|(action, _, _)| action == id)
+        .map(|(_, key, _)| key.as_str())
+        .unwrap_or_else(|| {
+            WELL_ACTIONS
+                .iter()
+                .find(|action| action.id == id)
+                .map(|action| action.default_keybind)
+                .unwrap_or("")
+        })
+}
+
+pub fn filter_actions_with_bindings(
+    query: &str,
+    bindings: &[(String, String, String)],
+) -> Vec<&'static ActionDescriptor> {
     let trimmed = query.trim().to_ascii_lowercase();
     if trimmed.is_empty() {
         return WELL_ACTIONS.iter().collect();
@@ -233,12 +254,24 @@ pub fn filter_actions(query: &str) -> Vec<&'static ActionDescriptor> {
                 act.label,
                 act.category.as_str(),
                 act.description,
-                act.default_keybind
+                shortcut_for(act.id, bindings)
             )
             .to_ascii_lowercase();
             tokens.iter().all(|tok| haystack.contains(tok))
         })
         .collect()
+}
+
+/// Translate the display notation using one path for registration and conflict checks.
+pub fn runtime_shortcut(display: &str) -> String {
+    display
+        .trim()
+        .replace(['⌃', '^'], "ctrl-")
+        .replace('⌥', "alt-")
+        .replace('⇧', "shift-")
+        .replace('⌘', "cmd-")
+        .replace('⏎', "enter")
+        .to_lowercase()
 }
 
 /// Detect shortcut collisions where two distinct actions share the same keybind in the same `key_context`.
@@ -252,7 +285,9 @@ pub fn detect_keybind_conflicts(bindings: &[(String, String, String)]) -> Vec<(u
         for (j, (id_b, key_b, ctx_b)) in bindings.iter().enumerate() {
             if i != j
                 && id_a != id_b
-                && key_a.eq_ignore_ascii_case(key_b)
+                && gpui::Keystroke::parse(&runtime_shortcut(key_a)).is_ok_and(|a| {
+                    gpui::Keystroke::parse(&runtime_shortcut(key_b)).is_ok_and(|b| a == b)
+                })
                 && (ctx_a == ctx_b || ctx_a == "Workspace" || ctx_b == "Workspace")
             {
                 conflicts.push((i, format!("Collision with '{}' in {} context", id_b, ctx_b)));
@@ -268,33 +303,38 @@ pub fn footer_hints_for_context(
     mneme_active: bool,
     pythia_active: bool,
     ssh_active: bool,
-) -> Vec<(&'static str, &'static str)> {
+    bindings: &[(String, String, String)],
+) -> Vec<(String, &'static str)> {
+    let key = |id| shortcut_for(id, bindings).to_owned();
     if pythia_active {
         vec![
-            ("↵", "Synthesize"),
-            ("Tab", "Switch Mode"),
-            ("Esc", "Close Pythia"),
+            ("↵".into(), "Synthesize"),
+            ("Tab".into(), "Switch Mode"),
+            ("Esc".into(), "Close Pythia"),
         ]
     } else if mneme_active {
         vec![
-            ("Tab", "Next Placeholder"),
-            ("↵", "Execute"),
-            ("⇧⏎", "Override"),
-            ("⌃E", "Close Mneme"),
-        ]
-    } else if ssh_active {
-        vec![
-            ("⇧⌘P", "Functions"),
-            ("⌘K", "Pythia AI"),
-            ("⌃E", "Remote Snippets"),
-            ("⌘D", "Split Pane"),
+            (
+                key("mneme::ExpandOrNextSnippetPlaceholder"),
+                "Next Placeholder",
+            ),
+            ("↵".into(), "Execute"),
+            (key("mneme::ForceExecuteUnsafeCommand"), "Override"),
+            (key("mneme::ToggleInlineEditor"), "Close Mneme"),
         ]
     } else {
         vec![
-            ("⇧⌘P", "Functions"),
-            ("⌘K", "Pythia AI"),
-            ("⌃E", "Mneme Snippets"),
-            ("⌘D", "Split Pane"),
+            (key("well::OpenCommandPalette"), "Functions"),
+            (key("pythia::ToggleCopilot"), "Pythia AI"),
+            (
+                key("mneme::OpenSnippetPicker"),
+                if ssh_active {
+                    "Remote Snippets"
+                } else {
+                    "Mneme Snippets"
+                },
+            ),
+            (key("panes::SplitHorizontal"), "Split Pane"),
         ]
     }
 }
@@ -302,6 +342,45 @@ pub fn footer_hints_for_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remapped_shortcuts_drive_search_and_footer() {
+        let bindings = vec![
+            (
+                "well::OpenCommandPalette".into(),
+                "F12".into(),
+                "Workspace".into(),
+            ),
+            (
+                "pythia::ToggleCopilot".into(),
+                "⌘⇧Y".into(),
+                "Workspace".into(),
+            ),
+            (
+                "mneme::OpenSnippetPicker".into(),
+                "".into(),
+                "Workspace".into(),
+            ),
+        ];
+        assert_eq!(
+            filter_actions_with_bindings("F12", &bindings)[0].id,
+            "well::OpenCommandPalette"
+        );
+        assert!(filter_actions_with_bindings("⌘K", &bindings).is_empty());
+        let hints = footer_hints_for_context(false, false, false, &bindings);
+        assert_eq!(hints[0].0, "F12");
+        assert_eq!(hints[1].0, "⌘⇧Y");
+        assert_eq!(hints[2].0, "");
+    }
+
+    #[test]
+    fn equivalent_modifier_spellings_conflict() {
+        let bindings = vec![
+            ("a".into(), "^⇧K".into(), "Workspace".into()),
+            ("b".into(), "⇧⌃K".into(), "TerminalPty".into()),
+        ];
+        assert_eq!(detect_keybind_conflicts(&bindings).len(), 2);
+    }
 
     #[test]
     fn test_action_catalog_completeness_and_uniqueness() {
@@ -412,7 +491,7 @@ mod tests {
             max_scroll.saturating_sub(scrollback)
         };
         assert_eq!(base_line, 0);
-        assert_eq!(base_line + 0 + 1, 1); // Row 0 is line 1
+        assert_eq!(base_line + 1, 1); // Row 0 is line 1
         assert_eq!(base_line + (rows as usize - 1) + 1, 24); // Bottom row is line 24
 
         // 2. Output generated: 50 lines scrolled off screen into scrollback buffer
@@ -425,7 +504,7 @@ mod tests {
         };
         assert_eq!(base_line_scrolled, 50);
         // Line numbers moved up by 50!
-        assert_eq!(base_line_scrolled + 0 + 1, 51); // Top row is now line 51
+        assert_eq!(base_line_scrolled + 1, 51); // Top row is now line 51
         assert_eq!(base_line_scrolled + (rows as usize - 1) + 1, 74); // Bottom row is now line 74
 
         // 3. User scrolls back up into history by 20 lines
@@ -436,20 +515,26 @@ mod tests {
             max_scroll.saturating_sub(scrollback)
         };
         assert_eq!(base_line_history, 30);
-        assert_eq!(base_line_history + 0 + 1, 31);
+        assert_eq!(base_line_history + 1, 31);
         assert_eq!(base_line_history + (rows as usize - 1) + 1, 54);
 
         // 4. Gutter digit formatting
         let total_lines = max_scroll + rows as usize;
         let gutter_digits = total_lines.max(1).to_string().len().max(3);
         assert_eq!(gutter_digits, 3);
-        assert_eq!(format!("{:>width$} │ ", 51, width = gutter_digits), " 51 │ ");
+        assert_eq!(
+            format!("{:>width$} │ ", 51, width = gutter_digits),
+            " 51 │ "
+        );
 
         // 5. High-volume output (>1000 lines) expands gutter width cleanly
         let big_scroll = 1500usize;
         let big_total_lines = big_scroll + rows as usize;
         let big_digits = big_total_lines.to_string().len().max(3);
         assert_eq!(big_digits, 4);
-        assert_eq!(format!("{:>width$} │ ", 1524, width = big_digits), "1524 │ ");
+        assert_eq!(
+            format!("{:>width$} │ ", 1524, width = big_digits),
+            "1524 │ "
+        );
     }
 }

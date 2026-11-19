@@ -1,32 +1,52 @@
-use gpui::*;
 use gpui::prelude::FluentBuilder as _;
+use gpui::*;
 
-mod actions;
-mod diagnostics;
-mod plugins;
-mod settings_view;
-mod ssh_console;
-mod terminal;
-mod theme;
+use well_gpui::{actions, diagnostics, settings_view, ssh_console, terminal};
 
-use actions::{filter_actions, footer_hints_for_context};
+use actions::{filter_actions_with_bindings, footer_hints_for_context, shortcut_for};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use settings_view::{CursorShape, SettingsSection, SettingsView, TerminalSettings};
 use ssh_console::{
-    build_legacy_bios_option43, build_qemu_uefi_test_command, build_standalone_dns_option6,
-    classify_chainload_payload, detect_primary_lan_ip, discover_arp_neighbors,
-    discover_known_hosts, discover_listening_sockets, discover_network_interfaces,
-    generate_strict_ipxe_script, is_ipxe_stage2_client, resolve_dns_query,
-    run_fast_port_scan, run_ping_probe, send_wol_magic_packet, start_http_key_server,
-    start_pxe_http_boot_server, ArpNeighborEntry, ChainloadTargetKind, ClientArch,
-    DiscoveredSshKey, KnownHostEntry, ListeningSocket, LocalNetworkInterface,
-    PingProbeResult, PortScanResult, PxeBootSubtab, PxeServerMode, ServerHubSubtab,
-    SmbShareEntry, SshConsoleInputField, SshConsoleSection, SshHostEditorDraft,
-    SshTunnelEntry, SshTunnelKind, TftpAction,
+    detect_primary_lan_ip, discover_arp_neighbors, discover_known_hosts,
+    discover_listening_sockets, discover_network_interfaces, resolve_dns_query, run_fast_port_scan,
+    run_ping_probe, send_wol_magic_packet, start_http_key_server, ArpNeighborEntry,
+    DiscoveredSshKey, KnownHostEntry, ListeningSocket, LocalNetworkInterface, PingProbeResult,
+    PortScanResult, PxeServerMode, ServerHubSubtab, SmbShareEntry, SshConsoleInputField,
+    SshConsoleSection, SshHostEditorDraft, SshTunnelEntry, SshTunnelKind,
 };
+
 use well_shell::ssh::{SshEngine, SshHostConfig, SshTarget};
 use well_shell::theia_ssh::TheiaSshProfile;
+
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = well, no_json)]
+struct RunWellAction {
+    id: String,
+}
+fn bind_runtime_actions(bindings: &[(String, String, String)], cx: &mut App) {
+    cx.clear_key_bindings();
+    for (id, display, context) in bindings {
+        let key = actions::runtime_shortcut(display);
+        if key.is_empty() {
+            continue;
+        }
+        let Ok(predicate) = gpui::KeyBindingContextPredicate::parse(context) else {
+            continue;
+        };
+        match KeyBinding::load(
+            &key,
+            Box::new(RunWellAction { id: id.clone() }),
+            Some(std::rc::Rc::new(predicate)),
+            false,
+            None,
+            &gpui::DummyKeyboardMapper,
+        ) {
+            Ok(binding) => cx.bind_keys([binding]),
+            Err(e) => eprintln!("[Shortcuts] Invalid binding for {id}: {e}"),
+        }
+    }
+}
 
 actions!(
     well,
@@ -44,7 +64,6 @@ actions!(
         ToggleLineNumbers
     ]
 );
-
 
 #[allow(dead_code)]
 struct KittyImageOverlay {
@@ -80,6 +99,9 @@ pub struct PythiaState {
     pub provider_used: Option<String>,
     pub image_path: Option<String>,
     pub image_preview: Option<std::sync::Arc<gpui::Image>>,
+    pub force_image_regeneration: bool,
+    pub provider_override: Option<well_llm::LlmProvider>,
+    pub image_history: Vec<well_llm::artifacts::ImageArtifact>,
     pub width: u32,
     pub height: u32,
 }
@@ -99,6 +121,9 @@ impl Default for PythiaState {
             provider_used: None,
             image_path: None,
             image_preview: None,
+            force_image_regeneration: false,
+            provider_override: None,
+            image_history: Vec::new(),
             width: 512,
             height: 512,
         }
@@ -107,16 +132,19 @@ impl Default for PythiaState {
 
 fn shared_metis_history() -> std::sync::Arc<std::sync::RwLock<well_shell::MetisHistory>> {
     use std::sync::OnceLock;
-    static SHARED: OnceLock<std::sync::Arc<std::sync::RwLock<well_shell::MetisHistory>>> = OnceLock::new();
-    SHARED.get_or_init(|| {
-        let mut history = well_shell::MetisHistory::new();
-        history.load_all_shell_histories();
-        if let Ok(path) = well_shell::MetisHistory::default_path() {
-            let recipes_path = path.with_file_name("recipes.json");
-            let _ = history.load_recipes_from_file(&recipes_path);
-        }
-        std::sync::Arc::new(std::sync::RwLock::new(history))
-    }).clone()
+    static SHARED: OnceLock<std::sync::Arc<std::sync::RwLock<well_shell::MetisHistory>>> =
+        OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            let mut history = well_shell::MetisHistory::new();
+            history.load_all_shell_histories();
+            if let Ok(path) = well_shell::MetisHistory::default_path() {
+                let recipes_path = path.with_file_name("recipes.json");
+                let _ = history.load_recipes_from_file(&recipes_path);
+            }
+            std::sync::Arc::new(std::sync::RwLock::new(history))
+        })
+        .clone()
 }
 
 struct TerminalView {
@@ -124,6 +152,10 @@ struct TerminalView {
     focus_handle: FocusHandle,
     settings: Entity<TerminalSettings>,
     last_size: std::rc::Rc<std::cell::Cell<Option<(u16, u16)>>>,
+    viewport_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    selection_anchor: Option<(u16, u16)>,
+    selection_head: Option<(u16, u16)>,
+    is_selecting: bool,
     kitty_images: Vec<KittyImageOverlay>,
     mneme_editor: well_editor::MnemeEditor,
     mneme_active: bool,
@@ -145,6 +177,37 @@ impl Focusable for TerminalView {
 }
 
 impl TerminalView {
+    fn submit_mneme(&mut self, force: bool, cx: &mut Context<Self>) {
+        let text = self.mneme_editor.get_text();
+        if text.trim().is_empty() {
+            return;
+        }
+        let warning = self.settings.read(cx).command_warning(&text);
+        if force && warning.is_none() {
+            self.mneme_editor.insert_text("\n");
+            cx.notify();
+            return;
+        }
+        if warning.is_some() && !force {
+            return;
+        }
+        let mut bytes = text.into_bytes();
+        if !bytes.ends_with(b"\r") {
+            bytes.push(b'\r');
+        }
+        match self.pty.write_all(&bytes) {
+            Ok(()) => {
+                let _ = self.mneme_editor.take_execution_payload();
+                self.mneme_active = false;
+                self.input_buffer.clear();
+                self.ghost_suggestion = None;
+            }
+            Err(e) => {
+                eprintln!("[Mneme] Input was not submitted: {e}");
+            }
+        }
+        cx.notify();
+    }
     fn from_pty(
         cx: &mut Context<Self>,
         settings: Entity<TerminalSettings>,
@@ -168,10 +231,12 @@ impl TerminalView {
                                 cx.notify();
                             });
                         }
-                    }).ok();
+                    })
+                    .ok();
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let cx = cx.clone();
@@ -183,7 +248,9 @@ impl TerminalView {
                             view.update(cx, |view, cx| {
                                 let s = view.settings.read(cx);
                                 sleep_ms = s.cursor_blink_ms.clamp(200, 1200);
-                                if s.cursor_blink || view.mneme_active || view.pythia.active {
+                                if !s.modal_open
+                                    && (s.cursor_blink || view.mneme_active || view.pythia.active)
+                                {
                                     cx.notify();
                                 }
                             });
@@ -200,7 +267,8 @@ impl TerminalView {
                         .await;
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         let focus_handle = cx.focus_handle();
 
@@ -209,6 +277,10 @@ impl TerminalView {
             focus_handle,
             settings,
             last_size: std::rc::Rc::new(std::cell::Cell::new(None)),
+            viewport_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
+            selection_anchor: None,
+            selection_head: None,
+            is_selecting: false,
             kitty_images: Vec::new(),
             mneme_editor: well_editor::MnemeEditor::default(),
             mneme_active: false,
@@ -226,6 +298,194 @@ impl TerminalView {
         view
     }
 
+    fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+        self.selection_head = None;
+        self.is_selecting = false;
+    }
+
+    fn normalized_selection(&self) -> Option<((u16, u16), (u16, u16))> {
+        let a = self.selection_anchor?;
+        let b = self.selection_head?;
+        if a == b && self.is_selecting {
+            return None;
+        }
+        if a <= b {
+            Some((a, b))
+        } else {
+            Some((b, a))
+        }
+    }
+
+    fn is_cell_selected(
+        sel: Option<((u16, u16), (u16, u16))>,
+        row: u16,
+        col: u16,
+    ) -> bool {
+        if let Some((start, end)) = sel {
+            (row, col) >= start && (row, col) <= end
+        } else {
+            false
+        }
+    }
+
+    fn point_to_grid_cell(&self, pos: Point<Pixels>, cx: &App) -> (u16, u16) {
+        let (font_family, font_size, show_line_numbers) = {
+            let s = self.settings.read(cx);
+            (s.font_family.clone(), s.font_size, s.show_line_numbers)
+        };
+        let (char_width, line_height) = terminal::cell_metrics_for_font(&font_family, font_size);
+        let mut parser = self.pty.parser.lock().unwrap();
+        let scrollback = parser.screen().scrollback();
+        let max_scroll = {
+            let screen_mut = parser.screen_mut();
+            screen_mut.set_scrollback(usize::MAX);
+            let max = screen_mut.scrollback();
+            screen_mut.set_scrollback(scrollback);
+            max
+        };
+        let is_alt_screen = parser.screen().alternate_screen();
+        let size = parser.screen().size();
+        drop(parser);
+
+        let total_lines = if is_alt_screen {
+            size.0 as usize
+        } else {
+            max_scroll + size.0 as usize
+        };
+        let gutter_digits = total_lines.max(1).to_string().len().max(3);
+        let gutter_px = if show_line_numbers {
+            (char_width * (gutter_digits + 3) as f32).ceil()
+        } else {
+            0.0
+        };
+
+        let (origin_x, origin_y) = self
+            .viewport_bounds
+            .get()
+            .map(|b| (f32::from(b.origin.x), f32::from(b.origin.y)))
+            .unwrap_or((0.0, 0.0));
+        let rel_x = (f32::from(pos.x) - origin_x - 8.0 - gutter_px).max(0.0);
+        let rel_y = (f32::from(pos.y) - origin_y - 8.0).max(0.0);
+        let col = ((rel_x / char_width).floor() as u16).min(size.1.saturating_sub(1));
+        let row = ((rel_y / line_height).floor() as u16).min(size.0.saturating_sub(1));
+        (row, col)
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.normalized_selection()?;
+        let parser = self.pty.parser.lock().unwrap();
+        let screen = parser.screen();
+        let size = screen.size();
+        if size.0 == 0 || size.1 == 0 {
+            return None;
+        }
+        let mut lines = Vec::new();
+        for r in start.0..=end.0.min(size.0.saturating_sub(1)) {
+            let c_start = if r == start.0 { start.1 } else { 0 };
+            let c_end = if r == end.0 {
+                end.1.min(size.1.saturating_sub(1))
+            } else {
+                size.1.saturating_sub(1)
+            };
+            if c_start > c_end {
+                continue;
+            }
+            let mut row_str = String::with_capacity((c_end - c_start + 1) as usize);
+            for c in c_start..=c_end {
+                if let Some(cell) = screen.cell(r, c) {
+                    let s = cell.contents();
+                    if s.is_empty() {
+                        row_str.push(' ');
+                    } else {
+                        row_str.push_str(s);
+                    }
+                } else {
+                    row_str.push(' ');
+                }
+            }
+            let trimmed = row_str.trim_end_matches(' ').to_string();
+            lines.push(trimmed);
+        }
+        let joined = lines.join("\n");
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    }
+
+    fn is_word_char(ch: char) -> bool {
+        ch.is_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '-' | '.' | '/' | '~' | ':' | '@' | '+' | '$' | '%' | '=' | '?' | '&'
+            )
+    }
+
+    fn select_word_at(&mut self, row: u16, col: u16) {
+        let parser = self.pty.parser.lock().unwrap();
+        let screen = parser.screen();
+        let size = screen.size();
+        if row >= size.0 || col >= size.1 {
+            return;
+        }
+        let cell_char = |c: u16| -> char {
+            screen
+                .cell(row, c)
+                .and_then(|cell| cell.contents().chars().next())
+                .unwrap_or(' ')
+        };
+        let target = cell_char(col);
+        let target_is_word = Self::is_word_char(target);
+        let mut left = col;
+        while left > 0 {
+            let prev = cell_char(left - 1);
+            if Self::is_word_char(prev) == target_is_word && (target_is_word || prev == target) {
+                left -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut right = col;
+        while right + 1 < size.1 {
+            let next = cell_char(right + 1);
+            if Self::is_word_char(next) == target_is_word && (target_is_word || next == target) {
+                right += 1;
+            } else {
+                break;
+            }
+        }
+        drop(parser);
+        self.selection_anchor = Some((row, left));
+        self.selection_head = Some((row, right));
+        self.is_selecting = false;
+    }
+
+    fn select_line_at(&mut self, row: u16) {
+        let cols = self
+            .pty
+            .parser
+            .lock()
+            .map(|p| p.screen().size().1)
+            .unwrap_or(80);
+        self.selection_anchor = Some((row, 0));
+        self.selection_head = Some((row, cols.saturating_sub(1)));
+        self.is_selecting = false;
+    }
+
+    fn select_all(&mut self) {
+        let (rows, cols) = self
+            .pty
+            .parser
+            .lock()
+            .map(|p| p.screen().size())
+            .unwrap_or((24, 80));
+        self.selection_anchor = Some((0, 0));
+        self.selection_head = Some((rows.saturating_sub(1), cols.saturating_sub(1)));
+        self.is_selecting = false;
+    }
+
     fn with_ssh_profile(mut self, profile: Option<TheiaSshProfile>) -> Self {
         self.ssh_profile = profile;
         self
@@ -234,14 +494,12 @@ impl TerminalView {
     #[allow(clippy::arc_with_non_send_sync)]
     fn new(cx: &mut Context<Self>, settings: Entity<TerminalSettings>) -> Self {
         let (tx, rx) = futures::channel::mpsc::unbounded();
-        let pty = std::sync::Arc::new(well_shell::pty::PtySession::spawn_with_stream(
-            24, 
-            80, 
-            None, 
-            move |_output| {
+        let pty = std::sync::Arc::new(
+            well_shell::pty::PtySession::spawn_with_stream(24, 80, None, move |_output| {
                 let _ = tx.unbounded_send(());
-            }
-        ).expect("failed to spawn pty"));
+            })
+            .expect("failed to spawn pty"),
+        );
         let astraea = std::sync::Arc::new(well_prompt::AstraeaStateVector::in_memory());
         Self::from_pty(cx, settings, pty, rx, astraea, None)
     }
@@ -301,117 +559,162 @@ impl TerminalView {
         Ok(Self::from_pty(cx, settings, pty, rx, astraea, cwd))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn place_image(
+        &mut self,
+        bytes: Vec<u8>,
+        format: u32,
+        width: Option<u32>,
+        height: Option<u32>,
+        columns: Option<u32>,
+        rows: Option<u32>,
+        id: u32,
+        placement_id: u32,
+    ) -> Result<(), String> {
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err("Image payload exceeds 32 MiB".into());
+        }
+        let (image, w, h) = match format {
+            100 => {
+                let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                    .with_guessed_format()
+                    .map_err(|e| e.to_string())?;
+                let (w, h) = reader.into_dimensions().map_err(|e| e.to_string())?;
+                if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 16 * 1024 * 1024 {
+                    return Err("Image pixel limit exceeded".into());
+                }
+                (
+                    gpui::Image::from_bytes(terminal::image_format(&bytes)?, bytes),
+                    w,
+                    h,
+                )
+            }
+            24 | 32 => {
+                let w = width.ok_or("Raw Kitty image is missing width")?;
+                let h = height.ok_or("Raw Kitty image is missing height")?;
+                if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 16 * 1024 * 1024 {
+                    return Err("Invalid raw image dimensions".into());
+                }
+                let decoded = if format == 32 {
+                    image::DynamicImage::ImageRgba8(
+                        image::RgbaImage::from_raw(w, h, bytes)
+                            .ok_or("Invalid RGBA payload length")?,
+                    )
+                } else {
+                    image::DynamicImage::ImageRgb8(
+                        image::RgbImage::from_raw(w, h, bytes)
+                            .ok_or("Invalid RGB payload length")?,
+                    )
+                };
+                let mut png = std::io::Cursor::new(Vec::new());
+                decoded
+                    .write_to(&mut png, image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
+                (
+                    gpui::Image::from_bytes(gpui::ImageFormat::Png, png.into_inner()),
+                    w,
+                    h,
+                )
+            }
+            _ => return Err("Unsupported Kitty image format".into()),
+        };
+        if id != 0 {
+            self.kitty_images
+                .retain(|image| image.id != id || image.placement_id != placement_id);
+        }
+        let cost = u64::from(w) * u64::from(h) * 4;
+        while !self.kitty_images.is_empty()
+            && (self.kitty_images.len() >= 64
+                || self
+                    .kitty_images
+                    .iter()
+                    .map(|i| u64::from(i.width.unwrap_or(0)) * u64::from(i.height.unwrap_or(0)) * 4)
+                    .sum::<u64>()
+                    + cost
+                    > 128 * 1024 * 1024)
+        {
+            self.kitty_images.remove(0);
+        }
+        let (cursor_row, cursor_col) = self
+            .pty
+            .parser
+            .lock()
+            .map_err(|e| e.to_string())?
+            .screen()
+            .cursor_position();
+        self.kitty_images.push(KittyImageOverlay {
+            id,
+            placement_id,
+            image: std::sync::Arc::new(image),
+            cursor_row,
+            cursor_col,
+            width: Some(w),
+            height: Some(h),
+            columns,
+            rows,
+        });
+        Ok(())
+    }
+
     fn update_text(&mut self) {
-        if let Ok(rx) = self.pty.graphic_events_rx.lock() {
-            while let Ok(event) = rx.try_recv() {
-                match event {
-                    well_shell::GraphicEvent::WorkingDirUpdate(path) => {
-                        self.cwd = Some(path.clone());
-                        let snap = well_prompt::AstraeaWatcher::scan_path(std::path::Path::new(&path), 0, 0);
-                        self.astraea.write_snapshot(&snap);
+        let events: Vec<_> = self
+            .pty
+            .graphic_events_rx
+            .lock()
+            .map(|rx| rx.try_iter().take(256).collect())
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                well_shell::GraphicEvent::WorkingDirUpdate(path) => {
+                    self.cwd = Some(path.clone());
+                    self.astraea
+                        .write_snapshot(&well_prompt::AstraeaWatcher::scan_path(
+                            std::path::Path::new(&path),
+                            0,
+                            0,
+                        ));
+                }
+                well_shell::GraphicEvent::Hyperlink(_) => {}
+                well_shell::GraphicEvent::KittyImage {
+                    id,
+                    placement_id,
+                    format,
+                    action,
+                    payload_base64,
+                    is_complete,
+                    width,
+                    height,
+                    columns,
+                    rows,
+                } => {
+                    if action == 'd' {
+                        self.kitty_images.retain(|image| id != 0 && image.id != id);
+                        continue;
                     }
-                    well_shell::GraphicEvent::Hyperlink(_) => {}
-                    well_shell::GraphicEvent::KittyImage {
-                        id,
-                        placement_id,
-                        format,
-                        action: _,
-                        payload_base64,
-                        is_complete,
-                    } => {
-                        let width: Option<u32> = None;
-                        let height: Option<u32> = None;
-                        let columns: Option<u32> = None;
-                        let rows: Option<u32> = None;
-                        println!("RECEIVED KITTY IMAGE: id={} format={} is_complete={}", id, format, is_complete);
-                    // Decode payload
+                    if !is_complete || payload_base64.len() > 32 * 1024 * 1024 {
+                        continue;
+                    }
                     if let Ok(bytes) = BASE64.decode(payload_base64) {
-                        println!("DECODED BYTES length: {}", bytes.len());
-                        
-                        let mut computed_w = width;
-                        let mut computed_h = height;
-                        
-                        if format == 100 {
-                            if let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
-                                if let Ok(dims) = reader.into_dimensions() {
-                                    if computed_w.is_none() {
-                                        computed_w = Some(dims.0);
-                                    }
-                                    if computed_h.is_none() {
-                                        computed_h = Some(dims.1);
-                                    }
-                                }
-                            }
-                        }
-                        
-                        let gpui_img = if format == 100 {
-                            // PNG
-                            gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes)
-                        } else if format == 32 {
-                            // RGBA
-                            let w = computed_w.unwrap_or(0);
-                            let h = computed_h.unwrap_or(0);
-                            if w > 0 && h > 0 {
-                                if let Some(rgba) = image::RgbaImage::from_raw(w, h, bytes) {
-                                    let mut buf = std::io::Cursor::new(Vec::new());
-                                    if rgba.write_to(&mut buf, image::ImageFormat::Png).is_ok() {
-                                        gpui::Image::from_bytes(gpui::ImageFormat::Png, buf.into_inner())
-                                    } else {
-                                        continue;
-                                    }
-                                } else {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            }
-                        } else if format == 24 {
-                            // RGB
-                            let w = computed_w.unwrap_or(0);
-                            let h = computed_h.unwrap_or(0);
-                            if w > 0 && h > 0 {
-                                if let Some(rgb) = image::RgbImage::from_raw(w, h, bytes) {
-                                    let mut buf = std::io::Cursor::new(Vec::new());
-                                    if rgb.write_to(&mut buf, image::ImageFormat::Png).is_ok() {
-                                        gpui::Image::from_bytes(gpui::ImageFormat::Png, buf.into_inner())
-                                    } else {
-                                        continue;
-                                    }
-                                } else {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue; // unsupported
-                        };
-
-                        let (cursor_row, cursor_col) = {
-                            let parser = self.pty.parser.lock().unwrap();
-                            let screen = parser.screen();
-                            screen.cursor_position()
-                        };
-
-                        self.kitty_images.push(KittyImageOverlay {
-                            id,
-                            placement_id,
-                            image: std::sync::Arc::new(gpui_img),
-                            cursor_row,
-                            cursor_col,
-                            width: computed_w,
-                            height: computed_h,
+                        let _ = self.place_image(
+                            bytes,
+                            format,
+                            width,
+                            height,
                             columns,
                             rows,
-                        });
+                            id,
+                            placement_id,
+                        );
                     }
                 }
             }
         }
     }
-}
 
     pub fn execute_pythia(&mut self, cx: &mut Context<Self>) {
+        if self.pythia.is_generating {
+            return;
+        }
         let trimmed = self.pythia.query.trim().to_string();
         if trimmed.is_empty() {
             self.pythia.status = Some("Please enter a query or prompt first.".to_string());
@@ -429,6 +732,14 @@ impl TerminalView {
         let width = self.pythia.width;
         let height = self.pythia.height;
 
+        let provider = self
+            .pythia
+            .provider_override
+            .take()
+            .unwrap_or(well_llm::LlmProvider::Gemini);
+        let force_regeneration = self.pythia.force_image_regeneration;
+        self.pythia.force_image_regeneration = false;
+        let prioritize_cache = self.settings.read(cx).metis_offline_cache_priority;
         cx.spawn(move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
@@ -437,15 +748,24 @@ impl TerminalView {
                         let local_recipe = {
                             let history = shared_metis_history();
                             let guard = history.read().unwrap();
-                            guard.search_recipes(&query, 1).into_iter().next()
+                            if prioritize_cache {
+                                guard.search_recipes(&query, 1).into_iter().next()
+                            } else {
+                                None
+                            }
                         };
 
                         if let Some(recipe) = local_recipe {
                             well_llm::TranslationResult {
+                                is_destructive: well_core::ai::detect_destructive_command(
+                                    &recipe.command,
+                                ),
                                 command: recipe.command,
-                                explanation: format!("⚡ Instant Metis Recipe [cluster: {}]", recipe.cluster_id),
+                                explanation: format!(
+                                    "Metis Recipe [cluster: {}]",
+                                    recipe.cluster_id
+                                ),
                                 confidence: recipe.confidence,
-                                is_destructive: false,
                                 provider_used: "Metis Local Cache".to_string(),
                                 fell_back_to_offline: true,
                                 generated_image_path: None,
@@ -455,7 +775,7 @@ impl TerminalView {
                                 query: query.clone(),
                                 shell: "zsh".to_string(),
                                 cwd: cwd.clone(),
-                                provider: well_llm::LlmProvider::Gemini,
+                                provider: provider.clone(),
                                 gemini_api_key: None,
                                 gemini_model: None,
                                 ollama_url: None,
@@ -475,7 +795,7 @@ impl TerminalView {
                             query: query.clone(),
                             shell: "zsh".to_string(),
                             cwd: cwd.clone(),
-                            provider: well_llm::LlmProvider::Gemini,
+                            provider: provider.clone(),
                             gemini_api_key: None,
                             gemini_model: None,
                             ollama_url: None,
@@ -485,7 +805,7 @@ impl TerminalView {
                             image_prompt: Some(query.clone()),
                             image_width: Some(width),
                             image_height: Some(height),
-                            force_image_regeneration: false,
+                            force_image_regeneration: force_regeneration,
                         };
                         well_llm::PythiaTranslator::translate(&req)
                     }
@@ -501,25 +821,65 @@ impl TerminalView {
                             view.pythia.last_command = Some(result.command.clone());
                             view.pythia.last_explanation = Some(result.explanation.clone());
                             view.pythia.last_confidence = result.confidence;
-                            view.pythia.is_destructive = result.is_destructive;
+                            view.pythia.is_destructive =
+                                well_core::ai::detect_destructive_command(&result.command);
                             view.pythia.provider_used = Some(result.provider_used.clone());
 
                             if let Some(ref path) = result.generated_image_path {
                                 view.pythia.image_path = Some(path.clone());
                                 if let Ok(bytes) = std::fs::read(path) {
-                                    let gpui_img = gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes);
+                                    let gpui_img = gpui::Image::from_bytes(
+                                        terminal::image_format(&bytes)
+                                            .unwrap_or(gpui::ImageFormat::Png),
+                                        bytes,
+                                    );
                                     view.pythia.image_preview = Some(std::sync::Arc::new(gpui_img));
                                 }
-                                view.pythia.status = Some(format!("✓ Image generated via {}", result.provider_used));
+                                view.pythia.status =
+                                    Some(format!("✓ Image generated via {}", result.provider_used));
+                                view.refresh_image_history(cx);
+                            } else if mode == PythiaMode::ImageStudio {
+                                view.pythia.status = Some(format!(
+                                    "Image generation failed: {}",
+                                    result.explanation
+                                ));
                             } else {
-                                view.pythia.status = Some(format!("✓ {} (confidence {:.0}%)", result.provider_used, result.confidence * 100.0));
+                                view.pythia.status = Some(format!(
+                                    "✓ {} (confidence {:.0}%)",
+                                    result.provider_used,
+                                    result.confidence * 100.0
+                                ));
                             }
                             cx.notify();
                         });
                     }
-                }).ok();
+                })
+                .ok();
             }
-        }).detach();
+        })
+        .detach();
+    }
+
+    fn refresh_image_history(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let result = cx
+                    .background_executor()
+                    .spawn(async {
+                        well_llm::artifacts::ImageStore::open_default().and_then(|s| s.list())
+                    })
+                    .await;
+                let _ = this.update(&mut cx.clone(), |this, cx| {
+                    match result {
+                        Ok(items) => this.pythia.image_history = items,
+                        Err(e) => this.pythia.status = Some(e),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn render_pythia_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -553,13 +913,21 @@ impl TerminalView {
                         rgb(0x282828)
                     })
                     .border_1()
-                    .border_color(if mode == PythiaMode::CommandSynthesis { theme.border_active } else { rgb(0x3c3836) })
+                    .border_color(if mode == PythiaMode::CommandSynthesis {
+                        theme.border_active
+                    } else {
+                        rgb(0x3c3836)
+                    })
                     .text_color(if mode == PythiaMode::CommandSynthesis {
                         theme.bg
                     } else {
                         theme.fg
                     })
-                    .font_weight(if mode == PythiaMode::CommandSynthesis { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL })
+                    .font_weight(if mode == PythiaMode::CommandSynthesis {
+                        gpui::FontWeight::BOLD
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.pythia.mode = PythiaMode::CommandSynthesis;
                         cx.notify();
@@ -580,13 +948,21 @@ impl TerminalView {
                         rgb(0x282828)
                     })
                     .border_1()
-                    .border_color(if mode == PythiaMode::ImageStudio { rgb(0xd3869b) } else { rgb(0x3c3836) })
+                    .border_color(if mode == PythiaMode::ImageStudio {
+                        rgb(0xd3869b)
+                    } else {
+                        rgb(0x3c3836)
+                    })
                     .text_color(if mode == PythiaMode::ImageStudio {
                         rgb(0x1d2021)
                     } else {
                         theme.fg
                     })
-                    .font_weight(if mode == PythiaMode::ImageStudio { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL })
+                    .font_weight(if mode == PythiaMode::ImageStudio {
+                        gpui::FontWeight::BOLD
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.pythia.mode = PythiaMode::ImageStudio;
                         cx.notify();
@@ -607,13 +983,21 @@ impl TerminalView {
                         rgb(0x282828)
                     })
                     .border_1()
-                    .border_color(if mode == PythiaMode::StderrDiagnosis { rgb(0xfb4934) } else { rgb(0x3c3836) })
+                    .border_color(if mode == PythiaMode::StderrDiagnosis {
+                        rgb(0xfb4934)
+                    } else {
+                        rgb(0x3c3836)
+                    })
                     .text_color(if mode == PythiaMode::StderrDiagnosis {
                         rgb(0x1d2021)
                     } else {
                         theme.fg
                     })
-                    .font_weight(if mode == PythiaMode::StderrDiagnosis { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL })
+                    .font_weight(if mode == PythiaMode::StderrDiagnosis {
+                        gpui::FontWeight::BOLD
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.pythia.mode = PythiaMode::StderrDiagnosis;
                         cx.notify();
@@ -642,21 +1026,25 @@ impl TerminalView {
                     .text_color(theme.fg)
                     .child(if query.is_empty() {
                         let placeholder = match mode {
-                            PythiaMode::CommandSynthesis => "Describe command: e.g. find large log files and compress...",
-                            PythiaMode::ImageStudio => "Image prompt: e.g. cyberpunk neon workstation raining...",
-                            PythiaMode::StderrDiagnosis => "Paste error or stderr for instant diagnosis...",
+                            PythiaMode::CommandSynthesis => {
+                                "Describe command: e.g. find large log files and compress..."
+                            }
+                            PythiaMode::ImageStudio => {
+                                "Image prompt: e.g. cyberpunk neon workstation raining..."
+                            }
+                            PythiaMode::StderrDiagnosis => {
+                                "Paste error or stderr for instant diagnosis..."
+                            }
                         };
                         div().text_color(rgb(0x928374)).child(placeholder)
                     } else {
                         div().text_color(theme.fg).child(query)
                     })
-                    .child(
-                        div()
-                            .w(px(2.0))
-                            .h(px(16.0))
-                            .ml_1()
-                            .bg(if cursor_visible { theme.border_active } else { gpui::rgba(0x00000000) }),
-                    ),
+                    .child(div().w(px(2.0)).h(px(16.0)).ml_1().bg(if cursor_visible {
+                        theme.border_active
+                    } else {
+                        gpui::rgba(0x00000000)
+                    })),
             )
             .child(
                 div()
@@ -672,13 +1060,14 @@ impl TerminalView {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.execute_pythia(cx);
                     }))
-                    .child(if is_generating { "⏳ Synthesizing..." } else { "↵ Enter" }),
+                    .child(if is_generating {
+                        "⏳ Synthesizing..."
+                    } else {
+                        "↵ Enter"
+                    }),
             );
 
-        let mut content = div()
-            .flex()
-            .flex_col()
-            .gap_3();
+        let mut content = div().flex().flex_col().gap_3();
 
         if self.pythia.is_destructive {
             content = content.child(
@@ -700,6 +1089,55 @@ impl TerminalView {
         }
 
         content = content.child(input_box);
+        if mode == PythiaMode::ImageStudio {
+            let mut history = div()
+                .id("saved-image-history")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .max_h(px(160.0))
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .id("image-history-refresh")
+                        .text_xs()
+                        .text_color(theme.border_active)
+                        .cursor(CursorStyle::PointingHand)
+                        .child("Saved images · Refresh history")
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_image_history(cx))),
+                );
+            for (index, artifact) in self.pythia.image_history.iter().take(50).enumerate() {
+                let select = artifact.clone();
+                let delete = artifact.path.clone();
+                let regenerate = artifact.clone();
+                let label = artifact
+                    .metadata
+                    .as_ref()
+                    .map(|m| m.prompt.chars().take(70).collect::<String>())
+                    .unwrap_or_else(|| {
+                        artifact
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into()
+                    });
+                history=history.child(div().flex().flex_row().justify_between().gap_2().p_2().rounded_md().bg(theme.tab_active_bg)
+                    .child(div().id(("image-select",index)).text_xs().cursor(CursorStyle::PointingHand).child(label).on_click(cx.listener(move |this,_,_,cx|{
+                        match std::fs::read(&select.path).map_err(|e|e.to_string()).and_then(|bytes|terminal::image_format(&bytes).map(|format|(format,bytes)).map_err(|e|e.to_string())) {
+                            Ok((format,bytes))=>{this.pythia.image_path=Some(select.path.to_string_lossy().into());this.pythia.image_preview=Some(std::sync::Arc::new(gpui::Image::from_bytes(format,bytes)));if let Some(m)=&select.metadata{this.pythia.query=m.prompt.clone();this.pythia.width=m.width;this.pythia.height=m.height;}},
+                            Err(e)=>this.pythia.status=Some(e),
+                        }cx.notify();
+                    })))
+                    .child(div().id(("image-regenerate",index)).text_xs().text_color(theme.border_active).cursor(CursorStyle::PointingHand).child("Regenerate").on_click(cx.listener(move |this,_,_,cx|{
+                        if let Some(m)=&regenerate.metadata {this.pythia.query=m.prompt.clone();this.pythia.width=m.width;this.pythia.height=m.height;this.pythia.provider_override=Some(m.provider.clone());this.pythia.force_image_regeneration=true;this.execute_pythia(cx);}else{this.pythia.status=Some("This older image has no saved prompt; enter one to regenerate".into());cx.notify();}
+                    })))
+                    .child(div().id(("image-delete",index)).text_xs().text_color(rgb(0xfb4934)).cursor(CursorStyle::PointingHand).child("Delete").on_click(cx.listener(move |this,_,_,cx|{
+                        match well_llm::artifacts::ImageStore::open_default().and_then(|s|s.remove(&delete)){Ok(())=>{if this.pythia.image_path.as_deref()==delete.to_str(){this.pythia.image_path=None;this.pythia.image_preview=None;}this.refresh_image_history(cx);},Err(e)=>{this.pythia.status=Some(e);cx.notify();}}
+                    }))));
+            }
+            content = content.child(history);
+        }
 
         if mode == PythiaMode::ImageStudio {
             let presets = div()
@@ -748,52 +1186,116 @@ impl TerminalView {
                 .items_center()
                 .child(div().text_xs().text_color(rgb(0x928374)).child("📐 Size:"))
                 .child(
-                    div().id("size-256").px_2().py_0p5().rounded_md()
-                        .bg(if self.pythia.width == 256 { theme.border_active } else { rgb(0x282828) })
+                    div()
+                        .id("size-256")
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(if self.pythia.width == 256 {
+                            theme.border_active
+                        } else {
+                            rgb(0x282828)
+                        })
                         .border_1()
-                        .border_color(if self.pythia.width == 256 { theme.border_active } else { rgb(0x3c3836) })
-                        .text_color(if self.pythia.width == 256 { theme.bg } else { theme.fg })
-                        .text_xs().cursor(gpui::CursorStyle::PointingHand)
+                        .border_color(if self.pythia.width == 256 {
+                            theme.border_active
+                        } else {
+                            rgb(0x3c3836)
+                        })
+                        .text_color(if self.pythia.width == 256 {
+                            theme.bg
+                        } else {
+                            theme.fg
+                        })
+                        .text_xs()
+                        .cursor(gpui::CursorStyle::PointingHand)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.pythia.width = 256;
                             this.pythia.height = 256;
                             cx.notify();
                         }))
-                        .child("256x256")
+                        .child("256x256"),
                 )
                 .child(
-                    div().id("size-512").px_2().py_0p5().rounded_md()
-                        .bg(if self.pythia.width == 512 { theme.border_active } else { rgb(0x282828) })
+                    div()
+                        .id("size-512")
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(if self.pythia.width == 512 {
+                            theme.border_active
+                        } else {
+                            rgb(0x282828)
+                        })
                         .border_1()
-                        .border_color(if self.pythia.width == 512 { theme.border_active } else { rgb(0x3c3836) })
-                        .text_color(if self.pythia.width == 512 { theme.bg } else { theme.fg })
-                        .text_xs().cursor(gpui::CursorStyle::PointingHand)
+                        .border_color(if self.pythia.width == 512 {
+                            theme.border_active
+                        } else {
+                            rgb(0x3c3836)
+                        })
+                        .text_color(if self.pythia.width == 512 {
+                            theme.bg
+                        } else {
+                            theme.fg
+                        })
+                        .text_xs()
+                        .cursor(gpui::CursorStyle::PointingHand)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.pythia.width = 512;
                             this.pythia.height = 512;
                             cx.notify();
                         }))
-                        .child("512x512")
+                        .child("512x512"),
                 )
                 .child(
-                    div().id("size-1024").px_2().py_0p5().rounded_md()
-                        .bg(if self.pythia.width == 1024 { theme.border_active } else { rgb(0x282828) })
+                    div()
+                        .id("size-1024")
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .bg(if self.pythia.width == 1024 {
+                            theme.border_active
+                        } else {
+                            rgb(0x282828)
+                        })
                         .border_1()
-                        .border_color(if self.pythia.width == 1024 { theme.border_active } else { rgb(0x3c3836) })
-                        .text_color(if self.pythia.width == 1024 { theme.bg } else { theme.fg })
-                        .text_xs().cursor(gpui::CursorStyle::PointingHand)
+                        .border_color(if self.pythia.width == 1024 {
+                            theme.border_active
+                        } else {
+                            rgb(0x3c3836)
+                        })
+                        .text_color(if self.pythia.width == 1024 {
+                            theme.bg
+                        } else {
+                            theme.fg
+                        })
+                        .text_xs()
+                        .cursor(gpui::CursorStyle::PointingHand)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.pythia.width = 1024;
                             this.pythia.height = 1024;
                             cx.notify();
                         }))
-                        .child("1024x1024")
+                        .child("1024x1024"),
                 );
 
-            content = content.child(div().flex().flex_row().justify_between().items_center().child(presets).child(res_selector));
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .items_center()
+                    .child(presets)
+                    .child(res_selector),
+            );
 
             if let Some(ref img) = self.pythia.image_preview {
-                let img_el = gpui::img(img.clone()).w(px(160.0)).h(px(160.0)).rounded_lg().border_1().border_color(theme.border_active);
+                let img_el = gpui::img(img.clone())
+                    .w(px(160.0))
+                    .h(px(160.0))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border_active);
                 let preview_card = div()
                     .flex()
                     .flex_row()
@@ -810,8 +1312,19 @@ impl TerminalView {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(div().text_sm().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0xfe8019)).child("✨ Generated Image Artifact Ready"))
-                            .child(div().text_xs().text_color(rgb(0xa89984)).child(self.pythia.image_path.clone().unwrap_or_default()))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgb(0xfe8019))
+                                    .child("✨ Generated Image Artifact Ready"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0xa89984))
+                                    .child(self.pythia.image_path.clone().unwrap_or_default()),
+                            )
                             .child(
                                 div()
                                     .flex()
@@ -830,19 +1343,22 @@ impl TerminalView {
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                if let Some(path) = &this.pythia.image_path {
-                                                    if let Ok(bytes) = std::fs::read(path) {
-                                                        let b64 = BASE64.encode(&bytes);
-                                                        let escape = format!("\x1b_Gf=100,a=T,m=0;{}\x1b\\\r\n", b64);
-                                                        let mut writer = this.pty.writer.lock().unwrap();
-                                                        use std::io::Write;
-                                                        let _ = writer.write_all(escape.as_bytes());
-                                                        this.pythia.active = false;
-                                                        cx.notify();
+                                                if let Some(path) = this.pythia.image_path.clone() {
+                                                    match std::fs::read(path)
+                                                        .map_err(|e| e.to_string())
+                                                        .and_then(|bytes| {
+                                                            this.place_image(
+                                                                bytes, 100, None, None, None, None,
+                                                                0, 0,
+                                                            )
+                                                        }) {
+                                                        Ok(()) => this.pythia.active = false,
+                                                        Err(e) => this.pythia.status = Some(e),
                                                     }
+                                                    cx.notify();
                                                 }
                                             }))
-                                            .child("🖼 Render Inline in Terminal")
+                                            .child("🖼 Render Inline in Terminal"),
                                     )
                                     .child(
                                         div()
@@ -858,12 +1374,15 @@ impl TerminalView {
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|this, _, _, _| {
                                                 if let Some(path) = &this.pythia.image_path {
-                                                    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+                                                    let _ = std::process::Command::new("open")
+                                                        .arg("-R")
+                                                        .arg(path)
+                                                        .spawn();
                                                 }
                                             }))
-                                            .child("📂 Reveal in Finder")
-                                    )
-                            )
+                                            .child("📂 Reveal in Finder"),
+                                    ),
+                            ),
                     );
                 content = content.child(preview_card);
             }
@@ -915,11 +1434,22 @@ impl TerminalView {
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        let mut writer = this.pty.writer.lock().unwrap();
-                                        use std::io::Write;
-                                        let _ = writer.write_all(cmd_clone.as_bytes());
-                                        let _ = writer.write_all(b"\r");
-                                        this.pythia.active = false;
+                                        if well_core::ai::detect_destructive_command(&cmd_clone) {
+                                            this.mneme_editor.set_text(&cmd_clone);
+                                            this.mneme_active = true;
+                                            this.pythia.active = false;
+                                            cx.notify();
+                                            return;
+                                        }
+                                        let mut bytes = cmd_clone.as_bytes().to_vec();
+                                        bytes.push(b'\r');
+                                        match this.pty.write_all(&bytes) {
+                                            Ok(()) => this.pythia.active = false,
+                                            Err(e) => {
+                                                this.pythia.status =
+                                                    Some(format!("Command was not submitted: {e}"))
+                                            }
+                                        }
                                         cx.notify();
                                     }))
                                     .child("▶ Run in Terminal"),
@@ -956,7 +1486,9 @@ impl TerminalView {
                                     .text_xs()
                                     .cursor(gpui::CursorStyle::PointingHand)
                                     .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(cmd_clone3.clone()));
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            cmd_clone3.clone(),
+                                        ));
                                     }))
                                     .child("📋 Copy"),
                             ),
@@ -965,7 +1497,11 @@ impl TerminalView {
             }
         }
 
-        let status_text = self.pythia.status.clone().unwrap_or_else(|| "Tab: Switch Mode · Enter: Execute · Esc: Close".to_string());
+        let status_text = self
+            .pythia
+            .status
+            .clone()
+            .unwrap_or_else(|| "Tab: Switch Mode · Enter: Execute · Esc: Close".to_string());
         let footer = div()
             .flex()
             .flex_row()
@@ -977,7 +1513,9 @@ impl TerminalView {
             .child(div().child("Pythia 2.0 Engine"));
 
         let modal_card = div()
-            .w(px(680.0))
+            .w(relative(0.68))
+            .min_w(px(480.0))
+            .max_w(px(1080.0))
             .bg(rgb(0x1d2021))
             .border_1()
             .border_color(theme.border_active)
@@ -999,7 +1537,13 @@ impl TerminalView {
                             .flex_row()
                             .items_center()
                             .gap_3()
-                            .child(div().text_color(theme.border_active).text_base().font_weight(gpui::FontWeight::BOLD).child("⚡ PYTHIA AI"))
+                            .child(
+                                div()
+                                    .text_color(theme.border_active)
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("⚡ PYTHIA AI"),
+                            )
                             .child(mode_pills),
                     )
                     .child(
@@ -1033,6 +1577,7 @@ impl TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_focused = self.focus_handle.is_focused(_window);
+        let images_enabled = self.settings.read(cx).kitty_graphics_enabled;
         let (
             theme,
             font_family,
@@ -1086,7 +1631,8 @@ impl Render for TerminalView {
         let is_alt_screen = parser.screen().alternate_screen();
         let size = parser.screen().size();
         let (cursor_row, cursor_col) = parser.screen().cursor_position();
-        let show_vt_cursor = !parser.screen().hide_cursor() && !self.mneme_active && scrollback == 0;
+        let show_vt_cursor =
+            !parser.screen().hide_cursor() && !self.mneme_active && scrollback == 0;
         let active_ghost = if scrollback == 0 && !self.mneme_active && !self.pythia.active {
             self.ghost_suggestion.as_deref()
         } else {
@@ -1145,6 +1691,7 @@ impl Render for TerminalView {
 
         let cell_w = px(char_width);
         let cell_h = px(line_height);
+        let active_selection = self.normalized_selection();
 
         let mut row_elements = Vec::with_capacity(size.0 as usize);
         for row in 0..size.0 {
@@ -1152,7 +1699,8 @@ impl Render for TerminalView {
             if show_line_numbers {
                 let line_no = base_line + row as usize + 1;
                 let is_current_line = show_vt_cursor && row == cursor_row;
-                let is_written_line = is_alt_screen || scrollback > 0 || max_scroll > 0 || row <= last_active_row;
+                let is_written_line =
+                    is_alt_screen || scrollback > 0 || max_scroll > 0 || row <= last_active_row;
                 let gutter_color = if is_current_line {
                     if is_focused {
                         theme.border_active
@@ -1228,13 +1776,16 @@ impl Render for TerminalView {
                         raw.to_string()
                     };
                     let fg_rgb = terminal::convert_color(cell.fgcolor(), theme.fg, &theme);
-                    let bg_rgb =
-                        terminal::convert_color(cell.bgcolor(), rgba(0x00000000), &theme);
+                    let bg_rgb = terminal::convert_color(cell.bgcolor(), rgba(0x00000000), &theme);
                     let mut fg = fg_rgb;
                     let mut bg = bg_rgb;
 
                     let mut is_ghost_char = false;
-                    if show_vt_cursor && row == cursor_row && col > cursor_col && raw.trim().is_empty() {
+                    if show_vt_cursor
+                        && row == cursor_row
+                        && col > cursor_col
+                        && raw.trim().is_empty()
+                    {
                         if let Some(ghost) = active_ghost {
                             let ghost_char_idx = (col - cursor_col - 1) as usize;
                             if let Some(ghost_char) = ghost.chars().nth(ghost_char_idx) {
@@ -1249,7 +1800,15 @@ impl Render for TerminalView {
                         std::mem::swap(&mut fg, &mut bg);
                     }
 
-                    if is_cursor_cell && is_focused && blink_visible && cursor_shape == CursorShape::Block {
+                    let is_selected = Self::is_cell_selected(active_selection, row, col);
+                    if is_selected {
+                        bg = gpui::rgba(0x38bdf859);
+                        fg = rgb(0xffffff);
+                    } else if is_cursor_cell
+                        && is_focused
+                        && blink_visible
+                        && cursor_shape == CursorShape::Block
+                    {
                         if text == " " {
                             if let Some(ghost) = active_ghost {
                                 if let Some(first_ch) = ghost.chars().next() {
@@ -1305,6 +1864,7 @@ impl Render for TerminalView {
 
                     col_elements.push(el);
                 } else {
+                    let is_selected = Self::is_cell_selected(active_selection, row, col);
                     col_elements.push(
                         div()
                             .w(cell_w)
@@ -1314,7 +1874,11 @@ impl Render for TerminalView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .bg(rgba(0x00000000))
+                            .bg(if is_selected {
+                                gpui::rgba(0x38bdf859)
+                            } else {
+                                rgba(0x00000000)
+                            })
                             .text_color(rgba(0xffffffff))
                             .child(" "),
                     );
@@ -1347,511 +1911,642 @@ impl Render for TerminalView {
                 let (border_hex, bg_hex, _) = prof.tier.prism_palette();
                 (
                     rgb(bg_hex),
-                    if is_focused { rgb(border_hex) } else { theme.border_inactive },
+                    if is_focused {
+                        rgb(border_hex)
+                    } else {
+                        theme.border_inactive
+                    },
                 )
             } else {
                 (
                     theme.bg,
-                    if is_focused { theme.border_active } else { theme.border_inactive },
+                    if is_focused {
+                        theme.border_active
+                    } else {
+                        theme.border_inactive
+                    },
                 )
             }
         } else {
             (
                 theme.bg,
-                if is_focused { theme.border_active } else { theme.border_inactive },
+                if is_focused {
+                    theme.border_active
+                } else {
+                    theme.border_inactive
+                },
             )
         };
-        
-        let mut container = div()
-            .key_context("TerminalPty")
-            .relative()
-            .bg(pane_bg)
-            .border_2()
-            .rounded_xl()
-            .overflow_hidden()
-            .shadow_sm()
-            .border_color(pane_border)
-            .size_full()
-            .font_family(font_family.clone())
-            .text_size(px(font_size))
-            .line_height(cell_h)
-            .cursor(gpui::CursorStyle::Arrow)
-            .track_focus(&self.focus_handle)
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                if this.settings.read(cx).modal_open {
-                    return;
-                }
-                let (font_family, font_size) = {
-                    let s = this.settings.read(cx);
-                    (s.font_family.clone(), s.font_size)
-                };
-                let (_, line_height) = terminal::cell_metrics_for_font(&font_family, font_size);
-                let line_height = line_height.max(12.0);
 
-                let lines = match event.delta {
-                    gpui::ScrollDelta::Lines(p) => {
-                        this.scroll_line_accumulator += p.y * 3.0;
-                        if this.scroll_line_accumulator.abs() >= 1.0 {
-                            let c = this.scroll_line_accumulator as i32;
-                            this.scroll_line_accumulator -= c as f32;
-                            c
-                        } else if p.y != 0.0 {
-                            let c = if p.y > 0.0 { 1 } else { -1 };
-                            this.scroll_line_accumulator = 0.0;
-                            c
-                        } else {
-                            0
-                        }
-                    }
-                    gpui::ScrollDelta::Pixels(p) => {
-                        let py = f32::from(p.y);
-                        this.scroll_pixel_accumulator += py;
-                        let step = (line_height / 2.0).clamp(6.0, 18.0);
-                        let mut count = (this.scroll_pixel_accumulator / step) as i32;
-                        if count != 0 {
-                            this.scroll_pixel_accumulator -= count as f32 * step;
-                        } else if py.abs() >= 1.0 && this.scroll_pixel_accumulator.abs() >= (step * 0.5) {
-                            count = if this.scroll_pixel_accumulator > 0.0 { 1 } else { -1 };
-                            this.scroll_pixel_accumulator = 0.0;
-                        }
-                        count
-                    }
-                };
-
-                if lines != 0 {
-                    let mut parser = this.pty.parser.lock().unwrap();
-                    let mouse_mode = parser.screen().mouse_protocol_mode();
-                    let mouse_encoding = parser.screen().mouse_protocol_encoding();
-                    let is_alt_screen = parser.screen().alternate_screen();
-
-                    if mouse_mode != vt100::MouseProtocolMode::None {
-                        let btn = if lines > 0 { 64 } else { 65 };
-                        let count = lines.abs();
-                        let mut bytes = Vec::new();
-                        let col = 1u16;
-                        let row = 1u16;
-                        for _ in 0..count {
-                            match mouse_encoding {
-                                vt100::MouseProtocolEncoding::Sgr => {
-                                    let seq = format!("\x1b[<{};{};{}M", btn, col, row);
-                                    bytes.extend_from_slice(seq.as_bytes());
-                                }
-                                vt100::MouseProtocolEncoding::Default
-                                | vt100::MouseProtocolEncoding::Utf8 => {
-                                    let b = 32u8.saturating_add(btn);
-                                    let c = 32u8.saturating_add(col.min(223) as u8);
-                                    let r = 32u8.saturating_add(row.min(223) as u8);
-                                    bytes.extend_from_slice(&[0x1b, b'[', b'M', b, c, r]);
-                                }
-                            }
-                        }
-                        drop(parser);
-                        let mut writer = this.pty.writer.lock().unwrap();
-                        use std::io::Write;
-                        let _ = writer.write_all(&bytes);
-                    } else if is_alt_screen {
-                        let count = lines.abs();
-                        let seq = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        let mut bytes = Vec::with_capacity(count as usize * seq.len());
-                        for _ in 0..count {
-                            bytes.extend_from_slice(seq);
-                        }
-                        drop(parser);
-                        let mut writer = this.pty.writer.lock().unwrap();
-                        use std::io::Write;
-                        let _ = writer.write_all(&bytes);
-                    } else {
-                        let cur = parser.screen().scrollback();
-                        if lines > 0 {
-                            parser.screen_mut().set_scrollback(cur.saturating_add(lines as usize));
-                        } else {
-                            parser.screen_mut().set_scrollback(cur.saturating_sub((-lines) as usize));
-                        }
-                    }
-                    cx.notify();
-                }
-            }))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                if this.settings.read(cx).modal_open {
-                    return;
-                }
-                let capslock_on = window.capslock().on;
-                let is_copilot_toggle = event.keystroke.modifiers.control && event.keystroke.modifiers.shift && event.keystroke.key == "k";
-                if is_copilot_toggle {
-                    this.pythia.active = !this.pythia.active;
-                    cx.notify();
-                    return;
-                }
-
-                if this.pythia.active {
-                    let key = event.keystroke.key.as_str();
-                    match key {
-                        "escape" => {
-                            this.pythia.active = false;
-                        }
-                        "tab" => {
-                            this.pythia.mode = match this.pythia.mode {
-                                PythiaMode::CommandSynthesis => PythiaMode::ImageStudio,
-                                PythiaMode::ImageStudio => PythiaMode::StderrDiagnosis,
-                                PythiaMode::StderrDiagnosis => PythiaMode::CommandSynthesis,
-                            };
-                        }
-                        "backspace" => {
-                            this.pythia.query.pop();
-                        }
-                        "enter" => {
-                            this.execute_pythia(cx);
-                        }
-                        _ => {
-                            if let Some(c) = settings_view::extract_printable_char_with_capslock(
-                                &event.keystroke,
-                                capslock_on,
-                            ) {
-                                this.pythia.query.push_str(&c);
-                            }
-                        }
-                    }
-                    cx.notify();
-                    return;
-                }
-
-                if event.keystroke.key == "escape" && this.mneme_active {
-                    this.mneme_active = false;
-                    cx.notify();
-                    return;
-                }
-                if event.keystroke.modifiers.control && event.keystroke.key == "e" {
-                    this.mneme_active = !this.mneme_active;
-                    cx.notify();
-                    return;
-                }
-
-                if this.mneme_active {
-                    let key = event.keystroke.key.as_str();
-                    match key {
-                        "tab" => {
-                            let snippets = this.settings.read(cx).snippets.clone();
-                            let is_ssh = this.ssh_profile.is_some();
-                            let _ = this.mneme_editor.expand_or_advance_snippet(&snippets, is_ssh);
-                            cx.stop_propagation();
-                        }
-                        "up" => this.mneme_editor.move_cursor_up(),
-                        "down" => this.mneme_editor.move_cursor_down(),
-                        "left" => {
-                            if event.keystroke.modifiers.alt {
-                                this.mneme_editor.move_word_left();
-                            } else {
-                                this.mneme_editor.move_cursor_left();
-                            }
-                        }
-                        "right" => {
-                            if event.keystroke.modifiers.alt {
-                                this.mneme_editor.move_word_right();
-                            } else {
-                                this.mneme_editor.move_cursor_right();
-                            }
-                        }
-                        "backspace" => this.mneme_editor.backspace(),
-                        "delete" => this.mneme_editor.delete_next_char(),
-                        "enter" => {
-                            let warning = this.mneme_editor.destructive_warning();
-                            if event.keystroke.modifiers.shift {
-                                if warning.is_some() {
-                                    // ⇧⏎ explicitly force-executes gated destructive commands
-                                    if let Some(payload) = this.mneme_editor.take_execution_payload() {
-                                        let mut writer = this.pty.writer.lock().unwrap();
-                                        use std::io::Write;
-                                        let mut bytes = payload.into_bytes();
-                                        if !bytes.ends_with(b"\n") && !bytes.ends_with(b"\r") {
-                                            bytes.push(b'\r');
-                                        }
-                                        let _ = writer.write_all(&bytes);
-                                        let _ = writer.flush();
-                                        this.mneme_active = false;
-                                        this.input_buffer.clear();
-                                        this.ghost_suggestion = None;
-                                    }
-                                } else {
-                                    this.mneme_editor.insert_text("\n");
-                                }
-                            } else if warning.is_none() {
-                                if let Some(payload) = this.mneme_editor.take_execution_payload() {
-                                    let mut writer = this.pty.writer.lock().unwrap();
-                                    use std::io::Write;
-                                    let mut bytes = payload.into_bytes();
-                                    if !bytes.ends_with(b"\n") && !bytes.ends_with(b"\r") {
-                                        bytes.push(b'\r');
-                                    }
-                                    let _ = writer.write_all(&bytes);
-                                    let _ = writer.flush();
-                                    this.mneme_active = false;
-                                    this.input_buffer.clear();
-                                    this.ghost_suggestion = None;
-                                }
-                            }
-                        }
-                        _ => {
-                            if let Some(c) = settings_view::extract_printable_char_with_capslock(
-                                &event.keystroke,
-                                capslock_on,
-                            ) {
-                                this.mneme_editor.insert_text(&c);
-                            }
-                        }
-                    }
-                    cx.notify();
-                    return;
-                }
-
-                // Keyboard scrollback navigation
-                let key_str = event.keystroke.key.as_str();
-                let is_alt = event.keystroke.modifiers.alt;
-                let is_ctrl = event.keystroke.modifiers.control;
-                let is_shift = event.keystroke.modifiers.shift;
-                let is_platform = event.keystroke.modifiers.platform;
-
-                if key_str == "pageup" {
-                    let mut parser = this.pty.parser.lock().unwrap();
-                    if parser.screen().alternate_screen() {
-                        let mut writer = this.pty.writer.lock().unwrap();
-                        use std::io::Write;
-                        let _ = writer.write_all(b"\x1b[5~");
-                    } else {
-                        let cur = parser.screen().scrollback();
-                        let size = parser.screen().size();
-                        let step = size.0.saturating_sub(2).max(1) as usize;
-                        parser.screen_mut().set_scrollback(cur.saturating_add(step));
-                        cx.notify();
-                    }
-                    return;
-                }
-                if key_str == "pagedown" {
-                    let mut parser = this.pty.parser.lock().unwrap();
-                    if parser.screen().alternate_screen() {
-                        let mut writer = this.pty.writer.lock().unwrap();
-                        use std::io::Write;
-                        let _ = writer.write_all(b"\x1b[6~");
-                    } else {
-                        let cur = parser.screen().scrollback();
-                        let size = parser.screen().size();
-                        let step = size.0.saturating_sub(2).max(1) as usize;
-                        parser.screen_mut().set_scrollback(cur.saturating_sub(step));
-                        cx.notify();
-                    }
-                    return;
-                }
-                if key_str == "home" && (is_shift || is_platform) {
-                    let mut parser = this.pty.parser.lock().unwrap();
-                    if !parser.screen().alternate_screen() {
-                        parser.screen_mut().set_scrollback(usize::MAX);
-                        cx.notify();
-                        return;
-                    }
-                }
-                if key_str == "end" && (is_shift || is_platform) {
-                    let mut parser = this.pty.parser.lock().unwrap();
-                    if !parser.screen().alternate_screen() {
-                        parser.screen_mut().set_scrollback(0);
-                        cx.notify();
-                        return;
-                    }
-                }
-
-                // Reset scrollback on any regular command typing
-                {
-                    let mut parser = this.pty.parser.lock().unwrap();
-                    if parser.screen().scrollback() > 0 && key_str != "escape" {
-                        parser.screen_mut().set_scrollback(0);
-                    }
-                }
-
-                // Ghost predictive autocomplete handling
-                if this.ghost_suggestion.is_some() && !is_shift {
-                    if key_str == "right" && is_alt {
-                        let hist = this.metis.read().unwrap();
-                        if let Some(next_word) = hist.next_word_suggestion(&this.input_buffer) {
-                            let mut writer = this.pty.writer.lock().unwrap();
-                            use std::io::Write;
-                            let _ = writer.write_all(next_word.as_bytes());
-                            this.input_buffer.push_str(&next_word);
-                            this.ghost_suggestion = hist.remaining_suggestion(&this.input_buffer);
-                            cx.notify();
+        let mut container =
+            div()
+                .key_context("TerminalPty")
+                .relative()
+                .bg(pane_bg)
+                .border_2()
+                .rounded_xl()
+                .overflow_hidden()
+                .shadow_sm()
+                .border_color(pane_border)
+                .size_full()
+                .font_family(font_family.clone())
+                .text_size(px(font_size))
+                .line_height(cell_h)
+                .cursor(gpui::CursorStyle::IBeam)
+                .track_focus(&self.focus_handle)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                        if this.settings.read(cx).modal_open || this.pythia.active {
                             return;
                         }
-                    } else if key_str == "tab" || (key_str == "right" && !is_alt) || (is_ctrl && key_str == "f") {
-                        if let Some(rem) = this.ghost_suggestion.take() {
-                            let mut writer = this.pty.writer.lock().unwrap();
-                            use std::io::Write;
-                            let _ = writer.write_all(rem.as_bytes());
-                            this.input_buffer.push_str(&rem);
-                            this.ghost_suggestion = None;
-                            cx.notify();
+                        window.focus(&this.focus_handle);
+                        let (row, col) = this.point_to_grid_cell(event.position, cx);
+                        if event.click_count >= 3 {
+                            this.select_line_at(row);
+                            if let Some(text) = this.selected_text() {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            }
+                        } else if event.click_count == 2 {
+                            this.select_word_at(row, col);
+                            if let Some(text) = this.selected_text() {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            }
+                        } else if event.modifiers.shift && this.selection_anchor.is_some() {
+                            this.selection_head = Some((row, col));
+                            this.is_selecting = true;
+                        } else {
+                            this.selection_anchor = Some((row, col));
+                            this.selection_head = Some((row, col));
+                            this.is_selecting = true;
+                        }
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_move(cx.listener(
+                    |this, event: &gpui::MouseMoveEvent, _window, cx| {
+                        if !this.is_selecting {
                             return;
                         }
-                    }
-                }
-
-                let mut writer = this.pty.writer.lock().unwrap();
-                let key = &event.keystroke.key;
-                let modifiers = &event.keystroke.modifiers;
-                if modifiers.control {
-                    let chars: Vec<char> = key.chars().collect();
-                    if chars.len() == 1 {
-                        let c = chars[0].to_ascii_lowercase();
-                        if c == 'c' || c == 'u' {
-                            this.input_buffer.clear();
-                            this.ghost_suggestion = None;
+                        if event.pressed_button != Some(gpui::MouseButton::Left) {
+                            this.is_selecting = false;
+                            return;
+                        }
+                        let (row, col) = this.point_to_grid_cell(event.position, cx);
+                        if this.selection_head != Some((row, col)) {
+                            this.selection_head = Some((row, col));
                             cx.notify();
                         }
-                        if c.is_ascii_lowercase() {
-                            let ctrl_c = c as u8 - b'a' + 1;
-                            let _ = writer.write_all(&[ctrl_c]);
-                        }
-                    }
-                    return;
-                }
-
-                match key.as_str() {
-                    "enter" => {
-                        let trimmed = this.input_buffer.trim().to_string();
-                        if !trimmed.is_empty() {
-                            if let Ok(mut hist) = this.metis.write() {
-                                hist.learn_command(&trimmed);
-                                if let Ok(path) = well_shell::MetisHistory::default_path() {
-                                    let _ = well_shell::MetisHistory::append_to_file(&path, &trimmed);
-                                }
+                    },
+                ))
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
+                        if this.is_selecting {
+                            let (row, col) = this.point_to_grid_cell(event.position, cx);
+                            this.selection_head = Some((row, col));
+                            this.is_selecting = false;
+                            if this.selection_anchor == this.selection_head {
+                                this.clear_selection();
+                            } else if let Some(text) = this.selected_text() {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                             }
+                            cx.notify();
                         }
-                        this.input_buffer.clear();
-                        this.ghost_suggestion = None;
-                    }
-                    "backspace" => {
-                        this.input_buffer.pop();
-                        let hist = this.metis.read().unwrap();
-                        this.ghost_suggestion = if this.input_buffer.is_empty() {
-                            None
-                        } else {
-                            hist.remaining_suggestion(&this.input_buffer)
-                        };
-                    }
-                    "escape" => {
-                        this.input_buffer.clear();
-                        this.ghost_suggestion = None;
-                        let mut parser = this.pty.parser.lock().unwrap();
-                        if parser.screen().scrollback() > 0 {
-                            parser.screen_mut().set_scrollback(0);
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|this, _event: &gpui::MouseDownEvent, window, cx| {
+                        if this.settings.read(cx).modal_open || this.pythia.active {
+                            return;
                         }
-                    }
-                    _ => {
-                        if !modifiers.control && !modifiers.platform {
-                            if let Some(c) = settings_view::extract_printable_char_with_capslock(
-                                &event.keystroke,
-                                capslock_on,
-                            ) {
-                                this.input_buffer.push_str(&c);
-                                let hist = this.metis.read().unwrap();
-                                this.ghost_suggestion = hist.remaining_suggestion(&this.input_buffer);
-                            }
-                        }
-                    }
-                }
-
-                if modifiers.platform {
-                    if key.eq_ignore_ascii_case("v") {
-                        if let Some(item) = cx.read_from_clipboard() {
+                        window.focus(&this.focus_handle);
+                        if let Some(text) = this.selected_text() {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            this.clear_selection();
+                            cx.notify();
+                        } else if let Some(item) = cx.read_from_clipboard() {
                             if let Some(text) = item.text() {
+                                let mut writer = this.pty.writer.lock().unwrap();
                                 use std::io::Write;
                                 let _ = writer.write_all(text.as_bytes());
                                 this.input_buffer.push_str(&text);
                                 cx.notify();
                             }
                         }
-                    }
-                    return;
-                }
-
-                let bytes =
-                    settings_view::encode_terminal_key_bytes(&event.keystroke, capslock_on);
-                if !bytes.is_empty() {
-                    use std::io::Write;
-                    let _ = writer.write_all(&bytes);
-                }
-                cx.notify();
-            }))
-            .child({
-                let pty = self.pty.clone();
-                let last_size = self.last_size.clone();
-                let (font_family_for_canvas, font_size, show_line_numbers) = {
-                    let s = self.settings.read(cx);
-                    (s.font_family.clone(), s.font_size, s.show_line_numbers)
-                };
-                let gutter_px_captured = gutter_px;
-                canvas(
-                    move |bounds, _window, _cx| {
-                        let usable_width = (f32::from(bounds.size.width) - pad_x * 2.0 - 6.0).max(char_width);
-                        let usable_height = (f32::from(bounds.size.height) - pad_y * 2.0 - 10.0).max(line_height);
-                        let effective_width = if show_line_numbers {
-                            (usable_width - gutter_px_captured).max(char_width)
-                        } else {
-                            usable_width
+                    }),
+                )
+                .on_scroll_wheel(cx.listener(
+                    |this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                        if this.settings.read(cx).modal_open {
+                            return;
+                        }
+                        let (font_family, font_size) = {
+                            let s = this.settings.read(cx);
+                            (s.font_family.clone(), s.font_size)
                         };
-                        let (cols, rows) = terminal::calculate_grid_dimensions_for_font(
-                            effective_width,
-                            usable_height,
-                            &font_family_for_canvas,
-                            font_size,
-                        );
-                        
-                        let current = Some((rows, cols));
-                        if last_size.get() != current {
-                            last_size.set(current);
-                            pty.resize(rows, cols).ok();
-                            true
-                        } else {
-                            false
+                        let (_, line_height) =
+                            terminal::cell_metrics_for_font(&font_family, font_size);
+                        let line_height = line_height.max(12.0);
+
+                        let lines = match event.delta {
+                            gpui::ScrollDelta::Lines(p) => {
+                                this.scroll_line_accumulator += p.y * 3.0;
+                                if this.scroll_line_accumulator.abs() >= 1.0 {
+                                    let c = this.scroll_line_accumulator as i32;
+                                    this.scroll_line_accumulator -= c as f32;
+                                    c
+                                } else if p.y != 0.0 {
+                                    let c = if p.y > 0.0 { 1 } else { -1 };
+                                    this.scroll_line_accumulator = 0.0;
+                                    c
+                                } else {
+                                    0
+                                }
+                            }
+                            gpui::ScrollDelta::Pixels(p) => {
+                                let py = f32::from(p.y);
+                                this.scroll_pixel_accumulator += py;
+                                let step = (line_height / 2.0).clamp(6.0, 18.0);
+                                let mut count = (this.scroll_pixel_accumulator / step) as i32;
+                                if count != 0 {
+                                    this.scroll_pixel_accumulator -= count as f32 * step;
+                                } else if py.abs() >= 1.0
+                                    && this.scroll_pixel_accumulator.abs() >= (step * 0.5)
+                                {
+                                    count = if this.scroll_pixel_accumulator > 0.0 {
+                                        1
+                                    } else {
+                                        -1
+                                    };
+                                    this.scroll_pixel_accumulator = 0.0;
+                                }
+                                count
+                            }
+                        };
+
+                        if lines != 0 {
+                            let mut parser = this.pty.parser.lock().unwrap();
+                            let mouse_mode = parser.screen().mouse_protocol_mode();
+                            let mouse_encoding = parser.screen().mouse_protocol_encoding();
+                            let is_alt_screen = parser.screen().alternate_screen();
+
+                            if mouse_mode != vt100::MouseProtocolMode::None {
+                                let btn = if lines > 0 { 64 } else { 65 };
+                                let count = lines.abs();
+                                let mut bytes = Vec::new();
+                                let col = 1u16;
+                                let row = 1u16;
+                                for _ in 0..count {
+                                    match mouse_encoding {
+                                        vt100::MouseProtocolEncoding::Sgr => {
+                                            let seq = format!("\x1b[<{};{};{}M", btn, col, row);
+                                            bytes.extend_from_slice(seq.as_bytes());
+                                        }
+                                        vt100::MouseProtocolEncoding::Default
+                                        | vt100::MouseProtocolEncoding::Utf8 => {
+                                            let b = 32u8.saturating_add(btn);
+                                            let c = 32u8.saturating_add(col.min(223) as u8);
+                                            let r = 32u8.saturating_add(row.min(223) as u8);
+                                            bytes.extend_from_slice(&[0x1b, b'[', b'M', b, c, r]);
+                                        }
+                                    }
+                                }
+                                drop(parser);
+                                let mut writer = this.pty.writer.lock().unwrap();
+                                use std::io::Write;
+                                let _ = writer.write_all(&bytes);
+                            } else if is_alt_screen {
+                                let count = lines.abs();
+                                let seq = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
+                                let mut bytes = Vec::with_capacity(count as usize * seq.len());
+                                for _ in 0..count {
+                                    bytes.extend_from_slice(seq);
+                                }
+                                drop(parser);
+                                let mut writer = this.pty.writer.lock().unwrap();
+                                use std::io::Write;
+                                let _ = writer.write_all(&bytes);
+                            } else {
+                                let cur = parser.screen().scrollback();
+                                if lines > 0 {
+                                    parser
+                                        .screen_mut()
+                                        .set_scrollback(cur.saturating_add(lines as usize));
+                                } else {
+                                    parser
+                                        .screen_mut()
+                                        .set_scrollback(cur.saturating_sub((-lines) as usize));
+                                }
+                            }
+                            cx.notify();
                         }
                     },
-                    |_bounds, resized, window, _cx| {
-                        if resized {
-                            window.refresh();
+                ))
+                .on_key_down(
+                    cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                        if this.settings.read(cx).modal_open {
+                            return;
                         }
-                    }
-                ).absolute().inset_0()
-            })
-            .child(
-                div()
+                        let capslock_on = window.capslock().on;
+                        if this.pythia.active {
+                            let key = event.keystroke.key.as_str();
+                            match key {
+                                "escape" => {
+                                    this.pythia.active = false;
+                                }
+                                "tab" => {
+                                    this.pythia.mode = match this.pythia.mode {
+                                        PythiaMode::CommandSynthesis => PythiaMode::ImageStudio,
+                                        PythiaMode::ImageStudio => PythiaMode::StderrDiagnosis,
+                                        PythiaMode::StderrDiagnosis => PythiaMode::CommandSynthesis,
+                                    };
+                                }
+                                "backspace" => {
+                                    this.pythia.query.pop();
+                                }
+                                "enter" => {
+                                    this.execute_pythia(cx);
+                                }
+                                _ => {
+                                    if let Some(c) =
+                                        settings_view::extract_printable_char_with_capslock(
+                                            &event.keystroke,
+                                            capslock_on,
+                                        )
+                                    {
+                                        this.pythia.query.push_str(&c);
+                                    }
+                                }
+                            }
+                            cx.notify();
+                            return;
+                        }
+
+                        if event.keystroke.key == "escape" && this.mneme_active {
+                            this.mneme_active = false;
+                            cx.notify();
+                            return;
+                        }
+                        if this.mneme_active {
+                            let key = event.keystroke.key.as_str();
+                            match key {
+                                "tab" => {
+                                    let snippets = this.settings.read(cx).snippets.clone();
+                                    let is_ssh = this.ssh_profile.is_some();
+                                    let _ = this
+                                        .mneme_editor
+                                        .expand_or_advance_snippet(&snippets, is_ssh);
+                                    cx.stop_propagation();
+                                }
+                                "up" => this.mneme_editor.move_cursor_up(),
+                                "down" => this.mneme_editor.move_cursor_down(),
+                                "left" => {
+                                    if event.keystroke.modifiers.alt {
+                                        this.mneme_editor.move_word_left();
+                                    } else {
+                                        this.mneme_editor.move_cursor_left();
+                                    }
+                                }
+                                "right" => {
+                                    if event.keystroke.modifiers.alt {
+                                        this.mneme_editor.move_word_right();
+                                    } else {
+                                        this.mneme_editor.move_cursor_right();
+                                    }
+                                }
+                                "backspace" => this.mneme_editor.backspace(),
+                                "delete" => this.mneme_editor.delete_next_char(),
+                                "enter" => this.submit_mneme(event.keystroke.modifiers.shift, cx),
+                                _ => {
+                                    if let Some(c) =
+                                        settings_view::extract_printable_char_with_capslock(
+                                            &event.keystroke,
+                                            capslock_on,
+                                        )
+                                    {
+                                        this.mneme_editor.insert_text(&c);
+                                    }
+                                }
+                            }
+                            cx.notify();
+                            return;
+                        }
+
+                        // Keyboard scrollback navigation
+                        let key_str = event.keystroke.key.as_str();
+                        let is_alt = event.keystroke.modifiers.alt;
+                        let is_ctrl = event.keystroke.modifiers.control;
+                        let is_shift = event.keystroke.modifiers.shift;
+                        let is_platform = event.keystroke.modifiers.platform;
+
+                        if key_str == "pageup" {
+                            let mut parser = this.pty.parser.lock().unwrap();
+                            if parser.screen().alternate_screen() {
+                                let mut writer = this.pty.writer.lock().unwrap();
+                                use std::io::Write;
+                                let _ = writer.write_all(b"\x1b[5~");
+                            } else {
+                                let cur = parser.screen().scrollback();
+                                let size = parser.screen().size();
+                                let step = size.0.saturating_sub(2).max(1) as usize;
+                                parser.screen_mut().set_scrollback(cur.saturating_add(step));
+                                cx.notify();
+                            }
+                            return;
+                        }
+                        if key_str == "pagedown" {
+                            let mut parser = this.pty.parser.lock().unwrap();
+                            if parser.screen().alternate_screen() {
+                                let mut writer = this.pty.writer.lock().unwrap();
+                                use std::io::Write;
+                                let _ = writer.write_all(b"\x1b[6~");
+                            } else {
+                                let cur = parser.screen().scrollback();
+                                let size = parser.screen().size();
+                                let step = size.0.saturating_sub(2).max(1) as usize;
+                                parser.screen_mut().set_scrollback(cur.saturating_sub(step));
+                                cx.notify();
+                            }
+                            return;
+                        }
+                        if key_str == "home" && (is_shift || is_platform) {
+                            let mut parser = this.pty.parser.lock().unwrap();
+                            if !parser.screen().alternate_screen() {
+                                parser.screen_mut().set_scrollback(usize::MAX);
+                                cx.notify();
+                                return;
+                            }
+                        }
+                        if key_str == "end" && (is_shift || is_platform) {
+                            let mut parser = this.pty.parser.lock().unwrap();
+                            if !parser.screen().alternate_screen() {
+                                parser.screen_mut().set_scrollback(0);
+                                cx.notify();
+                                return;
+                            }
+                        }
+
+                        // Reset scrollback on any regular command typing
+                        {
+                            let mut parser = this.pty.parser.lock().unwrap();
+                            if parser.screen().scrollback() > 0 && key_str != "escape" {
+                                parser.screen_mut().set_scrollback(0);
+                            }
+                        }
+
+                        // Ghost predictive autocomplete handling
+                        if this.ghost_suggestion.is_some() && !is_shift {
+                            if key_str == "right" && is_alt {
+                                let hist = this.metis.read().unwrap();
+                                if let Some(next_word) =
+                                    hist.next_word_suggestion(&this.input_buffer)
+                                {
+                                    let mut writer = this.pty.writer.lock().unwrap();
+                                    use std::io::Write;
+                                    let _ = writer.write_all(next_word.as_bytes());
+                                    this.input_buffer.push_str(&next_word);
+                                    this.ghost_suggestion =
+                                        hist.remaining_suggestion(&this.input_buffer);
+                                    cx.notify();
+                                    return;
+                                }
+                            } else if key_str == "tab"
+                                || (key_str == "right" && !is_alt)
+                                || (is_ctrl && key_str == "f")
+                            {
+                                if let Some(rem) = this.ghost_suggestion.take() {
+                                    let mut writer = this.pty.writer.lock().unwrap();
+                                    use std::io::Write;
+                                    let _ = writer.write_all(rem.as_bytes());
+                                    this.input_buffer.push_str(&rem);
+                                    this.ghost_suggestion = None;
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                        }
+
+                        let key = &event.keystroke.key;
+                        let modifiers = &event.keystroke.modifiers;
+                        if modifiers.control {
+                            let chars: Vec<char> = key.chars().collect();
+                            if chars.len() == 1 {
+                                let c = chars[0].to_ascii_lowercase();
+                                if c == 'c' && modifiers.shift {
+                                    if let Some(selected) = this.selected_text() {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            selected,
+                                        ));
+                                    }
+                                    return;
+                                }
+                                if c == 'v' && modifiers.shift {
+                                    if let Some(item) = cx.read_from_clipboard() {
+                                        if let Some(text) = item.text() {
+                                            use std::io::Write;
+                                            let _ = this.pty.writer.lock().unwrap().write_all(text.as_bytes());
+                                            this.input_buffer.push_str(&text);
+                                            this.clear_selection();
+                                            cx.notify();
+                                        }
+                                    }
+                                    return;
+                                }
+                                if c == 'c' || c == 'u' {
+                                    this.input_buffer.clear();
+                                    this.ghost_suggestion = None;
+                                    this.clear_selection();
+                                    cx.notify();
+                                }
+                                if c.is_ascii_lowercase() {
+                                    use std::io::Write;
+                                    let ctrl_c = c as u8 - b'a' + 1;
+                                    let _ = this.pty.writer.lock().unwrap().write_all(&[ctrl_c]);
+                                }
+                            }
+                            return;
+                        }
+
+                        match key.as_str() {
+                            "enter" => {
+                                let trimmed = this.input_buffer.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    if let Ok(mut hist) = this.metis.write() {
+                                        hist.learn_command(&trimmed);
+                                        if let Ok(path) = well_shell::MetisHistory::default_path() {
+                                            let _ = well_shell::MetisHistory::append_to_file(
+                                                &path, &trimmed,
+                                            );
+                                        }
+                                    }
+                                }
+                                this.input_buffer.clear();
+                                this.ghost_suggestion = None;
+                                this.clear_selection();
+                            }
+                            "backspace" => {
+                                this.input_buffer.pop();
+                                this.clear_selection();
+                                let hist = this.metis.read().unwrap();
+                                this.ghost_suggestion = if this.input_buffer.is_empty() {
+                                    None
+                                } else {
+                                    hist.remaining_suggestion(&this.input_buffer)
+                                };
+                            }
+                            "escape" => {
+                                this.input_buffer.clear();
+                                this.ghost_suggestion = None;
+                                this.clear_selection();
+                                let mut parser = this.pty.parser.lock().unwrap();
+                                if parser.screen().scrollback() > 0 {
+                                    parser.screen_mut().set_scrollback(0);
+                                }
+                            }
+                            _ => {
+                                if !modifiers.control && !modifiers.platform {
+                                    if let Some(c) =
+                                        settings_view::extract_printable_char_with_capslock(
+                                            &event.keystroke,
+                                            capslock_on,
+                                        )
+                                    {
+                                        this.clear_selection();
+                                        this.input_buffer.push_str(&c);
+                                        let hist = this.metis.read().unwrap();
+                                        this.ghost_suggestion =
+                                            hist.remaining_suggestion(&this.input_buffer);
+                                    }
+                                }
+                            }
+                        }
+
+                        if modifiers.platform {
+                            if key.eq_ignore_ascii_case("c") {
+                                if let Some(selected) = this.selected_text() {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        selected,
+                                    ));
+                                    cx.notify();
+                                }
+                            } else if key.eq_ignore_ascii_case("a") {
+                                this.select_all();
+                                if let Some(selected) = this.selected_text() {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        selected,
+                                    ));
+                                }
+                                cx.notify();
+                            } else if key.eq_ignore_ascii_case("v") {
+                                if let Some(item) = cx.read_from_clipboard() {
+                                    if let Some(text) = item.text() {
+                                        use std::io::Write;
+                                        let _ = this.pty.writer.lock().unwrap().write_all(text.as_bytes());
+                                        this.input_buffer.push_str(&text);
+                                        this.clear_selection();
+                                        cx.notify();
+                                    }
+                                }
+                            }
+                            return;
+                        }
+
+                        let bytes =
+                            settings_view::encode_terminal_key_bytes(&event.keystroke, capslock_on);
+                        if !bytes.is_empty() {
+                            use std::io::Write;
+                            let _ = this.pty.writer.lock().unwrap().write_all(&bytes);
+                        }
+                        cx.notify();
+                    }),
+                )
+                .child({
+                    let pty = self.pty.clone();
+                    let last_size = self.last_size.clone();
+                    let viewport_bounds = self.viewport_bounds.clone();
+                    let (font_family_for_canvas, font_size, show_line_numbers) = {
+                        let s = self.settings.read(cx);
+                        (s.font_family.clone(), s.font_size, s.show_line_numbers)
+                    };
+                    let gutter_px_captured = gutter_px;
+                    canvas(
+                        move |bounds, _window, _cx| {
+                            viewport_bounds.set(Some(bounds));
+                            let usable_width =
+                                (f32::from(bounds.size.width) - pad_x * 2.0 - 6.0).max(char_width);
+                            let usable_height =
+                                (f32::from(bounds.size.height) - pad_y * 2.0 - 10.0)
+                                    .max(line_height);
+                            let effective_width = if show_line_numbers {
+                                (usable_width - gutter_px_captured).max(char_width)
+                            } else {
+                                usable_width
+                            };
+                            let (cols, rows) = terminal::calculate_grid_dimensions_for_font(
+                                effective_width,
+                                usable_height,
+                                &font_family_for_canvas,
+                                font_size,
+                            );
+
+                            let current = Some((rows, cols));
+                            if last_size.get() != current {
+                                last_size.set(current);
+                                pty.resize(rows, cols).ok();
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                        |_bounds, resized, window, _cx| {
+                            if resized {
+                                window.refresh();
+                            }
+                        },
+                    )
                     .absolute()
-                    .top(px(pad_y))
-                    .left(px(pad_x))
-                    .right(px(pad_x))
-                    .bottom(px(pad_y))
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .children(row_elements),
-            )
-            .children(
-                self.kitty_images.iter().map(|img_overlay| {
-                    let top = pad_y + img_overlay.cursor_row as f32 * line_height;
-                    let left = pad_x + img_overlay.cursor_col as f32 * char_width + gutter_px;
-                    let mut el = gpui::img(img_overlay.image.clone());
-                    
-                    // Set width and height if available, otherwise just use natural size
-                    if let Some(w) = img_overlay.width {
-                        el = el.w(px(w as f32));
-                    } else if let Some(c) = img_overlay.columns {
-                        el = el.w(px(c as f32 * char_width));
-                    }
-                    
-                    if let Some(h) = img_overlay.height {
-                        el = el.h(px(h as f32));
-                    } else if let Some(r) = img_overlay.rows {
-                        el = el.h(px(r as f32 * line_height));
-                    }
-                    
-                    div().absolute().top(px(top)).left(px(left)).child(el)
+                    .inset_0()
                 })
-            );
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(pad_y))
+                        .left(px(pad_x))
+                        .right(px(pad_x))
+                        .bottom(px(pad_y))
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .children(row_elements),
+                )
+                .children(
+                    self.kitty_images
+                        .iter()
+                        .filter(|_| images_enabled)
+                        .map(|img_overlay| {
+                            let top = pad_y + img_overlay.cursor_row as f32 * line_height;
+                            let left =
+                                pad_x + img_overlay.cursor_col as f32 * char_width + gutter_px;
+                            let mut el = gpui::img(img_overlay.image.clone());
+
+                            // Set width and height if available, otherwise just use natural size
+                            if let Some(w) = img_overlay.width {
+                                el = el.w(px(w as f32));
+                            } else if let Some(c) = img_overlay.columns {
+                                el = el.w(px(c as f32 * char_width));
+                            }
+
+                            if let Some(h) = img_overlay.height {
+                                el = el.h(px(h as f32));
+                            } else if let Some(r) = img_overlay.rows {
+                                el = el.h(px(r as f32 * line_height));
+                            }
+
+                            div().absolute().top(px(top)).left(px(left)).child(el)
+                        }),
+                );
 
         if scrollback > 0 {
             container = container.child(
@@ -1935,7 +2630,7 @@ impl Render for TerminalView {
         if self.mneme_active {
             let mneme_text = self.mneme_editor.get_text();
             let cwd_display = self.cwd.as_deref().unwrap_or("~");
-            
+
             let mut prompt_elements: Vec<gpui::Div> = Vec::new();
             if let Some(prof) = &self.ssh_profile {
                 let (_, _, badge_hex) = prof.tier.prism_palette();
@@ -1953,23 +2648,35 @@ impl Render for TerminalView {
                 );
             }
             prompt_elements.push(
-                div().text_color(theme.ansi_colors[2]).child(cwd_display.to_string())
+                div()
+                    .text_color(theme.ansi_colors[2])
+                    .child(cwd_display.to_string()),
             );
             let snap = self.astraea.read_snapshot();
             if !snap.git_branch.is_empty() {
                 let dirty = if snap.is_dirty { "*" } else { "" };
                 let op_name = snap.scm_op.as_str();
-                let op_display = if op_name.is_empty() { "".to_string() } else { format!(" {op_name}") };
+                let op_display = if op_name.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" {op_name}")
+                };
                 prompt_elements.push(div().text_color(theme.ansi_colors[5]).ml_1().child("on"));
-                prompt_elements.push(div().text_color(theme.ansi_colors[4]).ml_1().child(format!("\u{e0a0} {}{}{}", snap.git_branch, dirty, op_display)));
+                prompt_elements.push(div().text_color(theme.ansi_colors[4]).ml_1().child(format!(
+                    "\u{e0a0} {}{}{}",
+                    snap.git_branch, dirty, op_display
+                )));
             }
             prompt_elements.push(div().text_color(theme.fg).ml_1().child("❯"));
-            
-            let prompt_row = div().flex().flex_row().items_center()
+
+            let prompt_row = div()
+                .flex()
+                .flex_row()
+                .items_center()
                 .font_family(font_family.clone())
                 .text_size(px(14.0))
                 .children(prompt_elements);
-            
+
             let mneme_overlay = div()
                 .key_context("MnemeInlineEditor")
                 .cursor(gpui::CursorStyle::IBeam)
@@ -1997,12 +2704,12 @@ impl Render for TerminalView {
                             let cursor_pos = if cursors.is_empty() { 0 } else { cursors[0] };
                             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
                             let cursor_visible = (now / 500).is_multiple_of(2);
-                            
+
                             let lines: Vec<&str> = mneme_text.split('\n').collect();
                             let mut current_char_idx = 0;
                             let mut cursor_line = 0;
                             let mut cursor_char_idx_in_line = 0;
-                            
+
                             for (i, line) in lines.iter().enumerate() {
                                 let line_len = line.chars().count();
                                 if current_char_idx + line_len >= cursor_pos {
@@ -2012,7 +2719,7 @@ impl Render for TerminalView {
                                 }
                                 current_char_idx += line_len + 1;
                             }
-                            
+
                             if lines.is_empty() {
                                 cursor_line = 0;
                                 cursor_char_idx_in_line = 0;
@@ -2130,7 +2837,7 @@ impl Render for TerminalView {
                                 .child("Tab: Expand Snippet (:klogs, :tfplan, :killport) · Ctrl+E: Close · Shift+Enter: Newline · Enter: Send to Terminal")
                         })
                 );
-                
+
             container = container.child(mneme_overlay);
         }
 
@@ -2141,8 +2848,6 @@ impl Render for TerminalView {
         container
     }
 }
-
-
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SplitDirection {
@@ -2173,14 +2878,22 @@ impl PaneTree {
                     .size_full()
                     .overflow_hidden()
                     .child(terminal.clone())
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |view, _event, window, cx| {
-                        if !view.palette_open && !view.ssh_state.open {
-                            window.focus(&term_clone.read(cx).focus_handle);
-                        }
-                    }))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |view, _event, window, cx| {
+                            if !view.palette_open && !view.ssh_state.open {
+                                view.tabs[view.active_tab].active_terminal = term_clone.clone();
+                                window.focus(&term_clone.read(cx).focus_handle);
+                            }
+                        }),
+                    )
                     .into_any_element()
             }
-            PaneTree::Split { direction, first, second } => {
+            PaneTree::Split {
+                direction,
+                first,
+                second,
+            } => {
                 let mut container = div()
                     .flex_1()
                     .min_h_0()
@@ -2193,10 +2906,10 @@ impl PaneTree {
                 } else {
                     container = container.flex_col();
                 }
-                
+
                 let first_el = first.render(cx);
                 let second_el = second.render(cx);
-                
+
                 let divider = div().bg(rgb(0xfe8019)); // Theia radiant amber divider
                 let divider = if *direction == SplitDirection::Horizontal {
                     divider.w(px(2.0)).h_full()
@@ -2204,24 +2917,38 @@ impl PaneTree {
                     divider.h(px(2.0)).w_full()
                 };
 
-                container.child(first_el).child(divider).child(second_el).into_any_element()
+                container
+                    .child(first_el)
+                    .child(divider)
+                    .child(second_el)
+                    .into_any_element()
             }
         }
     }
 
-    fn split(&mut self, target: &Entity<TerminalView>, new_leaf: Entity<TerminalView>, direction: SplitDirection) -> bool {
+    fn split(
+        &mut self,
+        target: &Entity<TerminalView>,
+        new_leaf: Entity<TerminalView>,
+        direction: SplitDirection,
+    ) -> bool {
         match self {
             PaneTree::Leaf(term) => {
                 if term == target {
                     let first = Box::new(PaneTree::Leaf(term.clone()));
                     let second = Box::new(PaneTree::Leaf(new_leaf));
-                    *self = PaneTree::Split { direction, first, second };
+                    *self = PaneTree::Split {
+                        direction,
+                        first,
+                        second,
+                    };
                     return true;
                 }
                 false
             }
             PaneTree::Split { first, second, .. } => {
-                first.split(target, new_leaf.clone(), direction) || second.split(target, new_leaf, direction)
+                first.split(target, new_leaf.clone(), direction)
+                    || second.split(target, new_leaf, direction)
             }
         }
     }
@@ -2242,20 +2969,20 @@ impl PaneTree {
             }
         }
     }
-    
+
     fn first_leaf(&self) -> Entity<TerminalView> {
         match self {
             PaneTree::Leaf(t) => t.clone(),
             PaneTree::Split { first, .. } => first.first_leaf(),
         }
     }
-    
+
     fn all_leaves(&self) -> Vec<Entity<TerminalView>> {
         let mut leaves = Vec::new();
         self.collect_leaves(&mut leaves);
         leaves
     }
-    
+
     fn collect_leaves(&self, leaves: &mut Vec<Entity<TerminalView>>) {
         match self {
             PaneTree::Leaf(t) => leaves.push(t.clone()),
@@ -2287,7 +3014,11 @@ enum NetProbeKind {
 enum NetProbeOutcome {
     Ping(Option<PingProbeResult>),
     Dns(Vec<String>),
-    Refresh(Vec<LocalNetworkInterface>, Vec<ListeningSocket>, Vec<ArpNeighborEntry>),
+    Refresh(
+        Vec<LocalNetworkInterface>,
+        Vec<ListeningSocket>,
+        Vec<ArpNeighborEntry>,
+    ),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -2303,7 +3034,6 @@ struct TheiaSshState {
     open: bool,
     section: SshConsoleSection,
     server_subtab: ServerHubSubtab,
-    pxe_subtab: PxeBootSubtab,
     key_vault_subtab: KeyVaultSubtab,
     active_input: SshConsoleInputField,
     search_filter: String,
@@ -2313,6 +3043,7 @@ struct TheiaSshState {
     tunnel_draft_remote: String,
     tunnel_ssh_host: String,
     server_running: bool,
+    server_host: Option<std::sync::Arc<well_ssh::server::SshHost>>,
     server_port: String,
     server_listen_addr: String,
     allow_pubkey_auth: bool,
@@ -2322,12 +3053,11 @@ struct TheiaSshState {
     key_server_port: String,
     key_server_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pxe_mode: PxeServerMode,
-    pxe_arch: ClientArch,
     pxe_server_ip: String,
     pxe_http_port: String,
     pxe_bootfile: String,
-    pxe_http_running: bool,
-    pxe_http_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    boot_source: String,
+    boot_lease_range: String,
     smb_shares: Vec<SmbShareEntry>,
     smb_draft_host: String,
     smb_draft_share: String,
@@ -2352,7 +3082,6 @@ impl Default for TheiaSshState {
             open: false,
             section: SshConsoleSection::HostEditor,
             server_subtab: ServerHubSubtab::ServerHosting,
-            pxe_subtab: PxeBootSubtab::PxeServer,
             key_vault_subtab: KeyVaultSubtab::KeyPairs,
             active_input: SshConsoleInputField::SidebarSearch,
             search_filter: String::new(),
@@ -2360,29 +3089,36 @@ impl Default for TheiaSshState {
             tunnel_draft_kind: SshTunnelKind::Local,
             tunnel_draft_local: "127.0.0.1:5433".into(),
             tunnel_draft_remote: "127.0.0.1:5432".into(),
-            tunnel_ssh_host: "chyna@192.168.1.12".into(),
+            tunnel_ssh_host: String::new(),
             server_running: false,
+            server_host: None,
             server_port: "2222".into(),
-            server_listen_addr: "0.0.0.0 (All LAN & VPN Interfaces)".into(),
+            server_listen_addr: "127.0.0.1".into(),
             allow_pubkey_auth: true,
-            allow_password_auth: true,
+            allow_password_auth: false,
             agent_key_path: "~/.ssh/id_ed25519".into(),
             key_server_running: false,
             key_server_port: "8787".into(),
             key_server_stop: None,
             pxe_mode: PxeServerMode::ProxyDhcp,
-            pxe_arch: ClientArch::UefiX86_64,
             pxe_server_ip: lan_ip,
             pxe_http_port: "8080".into(),
             pxe_bootfile: "boot.ipxe".into(),
-            pxe_http_running: false,
-            pxe_http_stop: None,
-            smb_shares: SmbShareEntry::default_catalog(),
-            smb_draft_host: "192.168.1.12".into(),
+            boot_source: std::env::var("WELL_AGENTOS_SOURCE").unwrap_or_else(|_| {
+                let candidate = std::path::Path::new("/Volumes/remove/agent-os");
+                if candidate.join("microvm/build.zig").is_file() {
+                    candidate.display().to_string()
+                } else {
+                    String::new()
+                }
+            }),
+            boot_lease_range: String::new(),
+            smb_shares: Vec::new(),
+            smb_draft_host: String::new(),
             smb_draft_share: "pxeboot".into(),
-            smb_draft_user: "chyna".into(),
-            net_target_host: "192.168.1.12".into(),
-            net_target_mac: "a8:a1:59:2c:41:0e".into(),
+            smb_draft_user: String::new(),
+            net_target_host: "127.0.0.1".into(),
+            net_target_mac: String::new(),
             net_port_scan: Vec::new(),
             net_arp_entries: discover_arp_neighbors(),
             net_interfaces: Vec::new(),
@@ -2416,6 +3152,8 @@ impl TheiaSshState {
             SshConsoleInputField::PxeServerIp => self.pxe_server_ip.clone(),
             SshConsoleInputField::PxeHttpPort => self.pxe_http_port.clone(),
             SshConsoleInputField::PxeBootFile => self.pxe_bootfile.clone(),
+            SshConsoleInputField::BootSource => self.boot_source.clone(),
+            SshConsoleInputField::BootLeaseRange => self.boot_lease_range.clone(),
             SshConsoleInputField::SmbServerHost => self.smb_draft_host.clone(),
             SshConsoleInputField::SmbShareName => self.smb_draft_share.clone(),
             SshConsoleInputField::SmbUsername => self.smb_draft_user.clone(),
@@ -2455,6 +3193,8 @@ impl TheiaSshState {
                 self.pxe_http_port.push_str(&digits);
             }
             SshConsoleInputField::PxeBootFile => self.pxe_bootfile.push_str(text),
+            SshConsoleInputField::BootSource => self.boot_source.push_str(text),
+            SshConsoleInputField::BootLeaseRange => self.boot_lease_range.push_str(text),
             SshConsoleInputField::SmbServerHost => self.smb_draft_host.push_str(text),
             SshConsoleInputField::SmbShareName => self.smb_draft_share.push_str(text),
             SshConsoleInputField::SmbUsername => self.smb_draft_user.push_str(text),
@@ -2482,6 +3222,8 @@ impl TheiaSshState {
             SshConsoleInputField::PxeServerIp => self.pxe_server_ip.clear(),
             SshConsoleInputField::PxeHttpPort => self.pxe_http_port.clear(),
             SshConsoleInputField::PxeBootFile => self.pxe_bootfile.clear(),
+            SshConsoleInputField::BootSource => self.boot_source.clear(),
+            SshConsoleInputField::BootLeaseRange => self.boot_lease_range.clear(),
             SshConsoleInputField::SmbServerHost => self.smb_draft_host.clear(),
             SshConsoleInputField::SmbShareName => self.smb_draft_share.clear(),
             SshConsoleInputField::SmbUsername => self.smb_draft_user.clear(),
@@ -2504,10 +3246,40 @@ struct WorkspaceView {
     palette_selected_idx: usize,
     palette_focus_handle: FocusHandle,
     next_tab_id: u64,
+    tunnel_sessions: std::collections::HashMap<String, WeakEntity<TerminalView>>,
 }
 
 impl WorkspaceView {
     fn new(cx: &mut Context<Self>, settings: Entity<TerminalSettings>) -> Self {
+        cx.spawn(|view: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(300))
+                        .await;
+                    if cx
+                        .update(|cx| {
+                            view.update(cx, |view, cx| {
+                                if view.ssh_state.open {
+                                    if let Some(host) = &view.ssh_state.server_host {
+                                        view.ssh_state.server_running =
+                                            host.running.load(std::sync::atomic::Ordering::Acquire);
+                                        view.ssh_state.status_message =
+                                            host.message.lock().ok().map(|m| m.clone());
+                                    }
+                                    cx.notify();
+                                }
+                            })
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
         cx.observe(&settings, |view: &mut Self, settings_ent, cx| {
             let req_snip = settings_ent.read(cx).requested_snippet_insert.clone();
             if let Some(trigger) = req_snip {
@@ -2532,7 +3304,9 @@ impl WorkspaceView {
                         term.mneme_editor.expand_snippet(snippet, None);
                     } else {
                         term.mneme_editor.set_text(&format!(":{clean_trig}"));
-                        let _ = term.mneme_editor.expand_or_advance_snippet(&snippets, is_ssh);
+                        let _ = term
+                            .mneme_editor
+                            .expand_or_advance_snippet(&snippets, is_ssh);
                     }
                     cx.notify();
                 });
@@ -2598,6 +3372,7 @@ impl WorkspaceView {
             palette_selected_idx: 0,
             palette_focus_handle,
             next_tab_id: 2,
+            tunnel_sessions: std::collections::HashMap::new(),
         }
     }
 
@@ -2607,6 +3382,252 @@ impl WorkspaceView {
         self.settings.update(cx, |s, _| {
             s.modal_open = is_open;
         });
+    }
+
+    fn netboot_command(&self) -> Result<String, String> {
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        self.ssh_state
+            .pxe_server_ip
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|_| "Choose a valid interface IPv4 address")?;
+        let mode = if self.ssh_state.pxe_mode == PxeServerMode::ProxyDhcp {
+            "proxy"
+        } else {
+            "standalone"
+        };
+        let range = if mode == "standalone" {
+            format!(" --range {}", quote(&self.ssh_state.boot_lease_range))
+        } else {
+            String::new()
+        };
+        Ok(format!(
+            "sudo {} serve --output {} --bind-ip {} --mode {mode}{range}",
+            Self::boot_companion()?,
+            quote(&Self::boot_output().to_string_lossy()),
+            quote(&self.ssh_state.pxe_server_ip)
+        ))
+    }
+    fn boot_output() -> std::path::PathBuf {
+        well_ipc::runtime::socket_path()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("agentos")
+    }
+
+    fn boot_companion() -> Result<String, String> {
+        fn quote(s: &str) -> String {
+            format!("'{}'", s.replace('\'', "'\\''"))
+        }
+        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        let companion = executable
+            .parent()
+            .ok_or("Missing executable directory")?
+            .join("well-boot");
+        if companion.is_file() {
+            return Ok(quote(&companion.to_string_lossy()));
+        }
+        if cfg!(debug_assertions) {
+            let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/debug/well-boot");
+            if dev.is_file() {
+                return Ok(quote(&dev.to_string_lossy()));
+            }
+        }
+
+        Err("The well-boot companion is missing; rebuild the Well app bundle".into())
+    }
+
+    fn render_agentos_boot(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.settings.read(cx).theme.clone();
+        let output = Self::boot_output();
+        let artifact = output.join("manifest.json");
+        let manifest = std::fs::read(&artifact)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+        let mut panel = div().flex().flex_col().gap_3().p_4().bg(theme.bg).text_color(theme.fg)
+            .child(div().text_lg().font_weight(FontWeight::BOLD).child("◈ AgentOS · Boot Engine"))
+            .child(div().text_sm().child("Build a measured x86_64 EFI payload. Boot it locally, export it, or serve it to your network."));
+        for (id, label, value, field) in [
+            (
+                "boot-source",
+                "AgentOS source checkout",
+                self.ssh_state.boot_source.clone(),
+                SshConsoleInputField::BootSource,
+            ),
+            (
+                "boot-ip",
+                "Network interface IPv4",
+                self.ssh_state.pxe_server_ip.clone(),
+                SshConsoleInputField::PxeServerIp,
+            ),
+            (
+                "boot-range",
+                "Standalone lease range · START,END",
+                self.ssh_state.boot_lease_range.clone(),
+                SshConsoleInputField::BootLeaseRange,
+            ),
+        ] {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_xs().child(label))
+                    .child(
+                        div()
+                            .id(id)
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if self.ssh_state.active_input == field {
+                                theme.border_active
+                            } else {
+                                theme.border_inactive
+                            })
+                            .bg(theme.tab_active_bg)
+                            .cursor(CursorStyle::IBeam)
+                            .child(if value.is_empty() {
+                                "Click to enter…".to_string()
+                            } else {
+                                value
+                            })
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.ssh_state.active_input = field;
+                                window.focus(&view.ssh_focus_handle);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        panel = panel.child(
+            div()
+                .id("boot-mode")
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(theme.tab_active_bg)
+                .cursor(CursorStyle::PointingHand)
+                .child(format!(
+                    "Mode: {}",
+                    match self.ssh_state.pxe_mode {
+                        PxeServerMode::ProxyDhcp => "ProxyDHCP · existing router",
+                        PxeServerMode::StandaloneDhcp => "Standalone · isolated network",
+                    }
+                ))
+                .on_click(cx.listener(|view, _, _, cx| {
+                    view.ssh_state.pxe_mode = match view.ssh_state.pxe_mode {
+                        PxeServerMode::ProxyDhcp => PxeServerMode::StandaloneDhcp,
+                        PxeServerMode::StandaloneDhcp => PxeServerMode::ProxyDhcp,
+                    };
+                    cx.notify();
+                })),
+        );
+        let mut buttons = div().flex().flex_wrap().gap_2();
+        for (id, label, operation) in [
+            ("agentos-build", "Build & Export", "build"),
+            ("agentos-run", "Boot QEMU", "run"),
+            ("agentos-pxe-test", "Test PXE in QEMU", "network"),
+            ("agentos-serve", "Start Netboot…", "serve"),
+            ("agentos-monitor", "AgentOS Monitor", "monitor"),
+            ("agentos-attest", "PYTHIA Attest", "attest"),
+            ("agentos-status", "Kernel Status", "status"),
+        ] {
+            buttons = buttons.child(
+                div()
+                    .id(id)
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(theme.tab_active_bg)
+                    .border_1()
+                    .border_color(theme.border_active)
+                    .cursor(CursorStyle::PointingHand)
+                    .child(label)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+                        if matches!(operation, "monitor" | "attest" | "status") {
+                            let src = view.ssh_state.boot_source.trim();
+                            if src.is_empty() {
+                                view.ssh_state.status_message =
+                                    Some("Choose the AgentOS source checkout first".into());
+                                cx.notify();
+                                return;
+                            }
+                            let manifest_path = std::path::Path::new(src).join("Cargo.toml");
+                            let command = format!(
+                                "cargo run --manifest-path {} -p trismegistus-cli -- {operation}",
+                                quote(&manifest_path.to_string_lossy())
+                            );
+                            view.dispatch_command_to_split_pane(&command, window, cx);
+                            return;
+                        }
+                        let companion = match Self::boot_companion() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                view.ssh_state.status_message = Some(e);
+                                cx.notify();
+                                return;
+                            }
+                        };
+                        let output = quote(&Self::boot_output().to_string_lossy());
+                        let args = match operation {
+                            "build" => {
+                                if view.ssh_state.boot_source.trim().is_empty() {
+                                    view.ssh_state.status_message =
+                                        Some("Choose the AgentOS source checkout first".into());
+                                    cx.notify();
+                                    return;
+                                }
+                                format!(
+                                    "build --source {} --output {output}",
+                                    quote(&view.ssh_state.boot_source)
+                                )
+                            }
+                            "run" => format!("run --output {output}"),
+                            "network" => format!("run --network --output {output}"),
+                            _ => {
+                                if view
+                                    .ssh_state
+                                    .pxe_server_ip
+                                    .parse::<std::net::Ipv4Addr>()
+                                    .is_err()
+                                {
+                                    view.ssh_state.status_message =
+                                        Some("Enter a valid local interface IPv4 address".into());
+                                    cx.notify();
+                                    return;
+                                }
+                                let mode = match view.ssh_state.pxe_mode {
+                                    PxeServerMode::ProxyDhcp => "proxy",
+                                    PxeServerMode::StandaloneDhcp => "standalone",
+                                };
+                                let range = if mode == "standalone" {
+                                    format!(" --range {}", quote(&view.ssh_state.boot_lease_range))
+                                } else {
+                                    String::new()
+                                };
+                                format!(
+                                    "serve --output {output} --bind-ip {} --mode {mode}{range}",
+                                    quote(&view.ssh_state.pxe_server_ip)
+                                )
+                            }
+                        };
+                        let command = if operation == "serve" {
+                            format!("sudo {companion} {args}")
+                        } else {
+                            format!("{companion} {args}")
+                        };
+                        view.dispatch_command_to_split_pane(&command, window, cx);
+                    })),
+            );
+        }
+        panel.child(buttons)
+            .child(div().text_xs().child(format!("Artifacts: {}",output.display())))
+            .child(div().text_sm().child(manifest.and_then(|m|m["kernel_sha384"].as_str().map(|h|format!("Last build · SHA-384 {h}"))).unwrap_or_else(||"No exported AgentOS build yet".into())))
+            .child(div().text_xs().child("Builds and QEMU tests stay local. Netboot asks for sudo in the new pane; Ctrl+C stops it. QEMU PXE uses an isolated built-in DHCP/TFTP backend. ARM64 and hardware attestation are unverified."))
     }
 
     fn toggle_command_palette(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
@@ -2619,7 +3640,11 @@ impl WorkspaceView {
             self.palette_selected_idx = 0;
             window.focus(&self.palette_focus_handle);
         } else {
-            let focus = self.tabs[self.active_tab].active_terminal.read(cx).focus_handle.clone();
+            let focus = self.tabs[self.active_tab]
+                .active_terminal
+                .read(cx)
+                .focus_handle
+                .clone();
             window.focus(&focus);
         }
         self.sync_modal_open_flag(cx);
@@ -2637,7 +3662,11 @@ impl WorkspaceView {
             let focus = self.settings_view.read(cx).focus_handle.clone();
             window.focus(&focus);
         } else {
-            let focus = self.tabs[self.active_tab].active_terminal.read(cx).focus_handle.clone();
+            let focus = self.tabs[self.active_tab]
+                .active_terminal
+                .read(cx)
+                .focus_handle
+                .clone();
             window.focus(&focus);
         }
         self.sync_modal_open_flag(cx);
@@ -2711,12 +3740,7 @@ impl WorkspaceView {
                 self.sync_modal_open_flag(cx);
             }
             "theia::SshSplitRight" => {
-                let first_host = self
-                    .settings
-                    .read(cx)
-                    .ssh_profiles
-                    .first()
-                    .cloned();
+                let first_host = self.settings.read(cx).ssh_profiles.first().cloned();
                 if let Some(mut p) = first_host {
                     p.forward_caduceus_ipc = self.ssh_state.forward_caduceus_ipc;
                     let base = self.ssh_engine.resolve_target(&p.host.name);
@@ -2740,25 +3764,37 @@ impl WorkspaceView {
                 });
                 window.focus(&active_term.read(cx).focus_handle);
             }
-            "mneme::ToggleInlineEditor"
-            | "mneme::ExpandOrNextSnippetPlaceholder"
-            | "mneme::OpenSnippetPicker"
-            | "mneme::ExpandSnippet" => {
-                let active_term = self.tabs[self.active_tab].active_terminal.clone();
-                active_term.update(cx, |term, cx| {
-                    term.mneme_active = true;
-                    if term.mneme_editor.get_text().trim().is_empty() {
-                        term.mneme_editor.set_text(":klogs");
-                    }
-                    let snippets = term.settings.read(cx).snippets.clone();
-                    let is_ssh = term.ssh_profile.is_some();
-                    let _ = term.mneme_editor.expand_or_advance_snippet(&snippets, is_ssh);
+            "mneme::ToggleInlineEditor" => {
+                let term = self.active_terminal(window, cx);
+                term.update(cx, |term, cx| {
+                    term.mneme_active = !term.mneme_active;
                     cx.notify();
                 });
-                window.focus(&active_term.read(cx).focus_handle);
+                window.focus(&term.read(cx).focus_handle);
+            }
+            "mneme::ExpandOrNextSnippetPlaceholder" | "mneme::ExpandSnippet" => {
+                let term = self.active_terminal(window, cx);
+                term.update(cx, |term, cx| {
+                    term.mneme_active = true;
+                    let snippets = term.settings.read(cx).snippets.clone();
+                    let is_ssh = term.ssh_profile.is_some();
+                    let _ = term
+                        .mneme_editor
+                        .expand_or_advance_snippet(&snippets, is_ssh);
+                    cx.notify();
+                });
+                window.focus(&term.read(cx).focus_handle);
+            }
+            "mneme::OpenSnippetPicker" => {
+                self.settings_view.update(cx, |view, cx| {
+                    view.active_section = SettingsSection::SnippetsWorkflows;
+                    cx.notify();
+                });
+                self.toggle_settings_modal(window, cx);
             }
             "mneme::ForceExecuteUnsafeCommand" | "mneme::ForceExecuteUnsafe" => {
-                let active_term = self.tabs[self.active_tab].active_terminal.clone();
+                let active_term = self.active_terminal(window, cx);
+                active_term.update(cx, |term, cx| term.submit_mneme(true, cx));
                 window.focus(&active_term.read(cx).focus_handle);
             }
             "terminal::ToggleLineNumbers" | "well::ToggleLineNumbers" => {
@@ -2787,7 +3823,11 @@ impl WorkspaceView {
             });
             window.focus(&self.ssh_focus_handle);
         } else {
-            let focus = self.tabs[self.active_tab].active_terminal.read(cx).focus_handle.clone();
+            let focus = self.tabs[self.active_tab]
+                .active_terminal
+                .read(cx)
+                .focus_handle
+                .clone();
             window.focus(&focus);
         }
         self.sync_modal_open_flag(cx);
@@ -2848,7 +3888,8 @@ impl WorkspaceView {
                         None => format!("🌐 {}", target_clone.destination),
                     };
 
-                    self.ssh_engine.register_session(tab_id, target_clone.clone());
+                    self.ssh_engine
+                        .register_session(tab_id, target_clone.clone());
 
                     self.tabs.push(WorkspaceTab {
                         tab_id,
@@ -2899,13 +3940,21 @@ impl WorkspaceView {
             } else if self.active_tab >= self.tabs.len() {
                 self.active_tab = self.tabs.len() - 1;
             }
-            let focus = self.tabs[self.active_tab].active_terminal.read(cx).focus_handle.clone();
+            let focus = self.tabs[self.active_tab]
+                .active_terminal
+                .read(cx)
+                .focus_handle
+                .clone();
             window.focus(&focus);
             cx.notify();
         }
     }
 
-    fn active_terminal(&self, window: &gpui::Window, cx: &mut Context<Self>) -> Entity<TerminalView> {
+    fn active_terminal(
+        &self,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalView> {
         let tab = &self.tabs[self.active_tab];
         if let Some(focused) = Self::find_focused_terminal(&tab.root, window, cx) {
             focused
@@ -2913,8 +3962,12 @@ impl WorkspaceView {
             tab.active_terminal.clone()
         }
     }
-    
-    fn find_focused_terminal(tree: &PaneTree, window: &gpui::Window, cx: &mut Context<Self>) -> Option<Entity<TerminalView>> {
+
+    fn find_focused_terminal(
+        tree: &PaneTree,
+        window: &gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<TerminalView>> {
         match tree {
             PaneTree::Leaf(term) => {
                 if term.read(cx).focus_handle.is_focused(window) {
@@ -2923,25 +3976,80 @@ impl WorkspaceView {
                     None
                 }
             }
-            PaneTree::Split { first, second, .. } => {
-                Self::find_focused_terminal(first, window, cx).or_else(|| Self::find_focused_terminal(second, window, cx))
-            }
+            PaneTree::Split { first, second, .. } => Self::find_focused_terminal(first, window, cx)
+                .or_else(|| Self::find_focused_terminal(second, window, cx)),
         }
     }
 
-    fn split_active_pane(&mut self, direction: SplitDirection, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    fn split_active_pane(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         let new_term = cx.new(|cx| TerminalView::new(cx, self.settings.clone()));
         let target = self.active_terminal(window, cx);
-        
+
         let tab = &mut self.tabs[self.active_tab];
         tab.root.split(&target, new_term.clone(), direction);
         tab.active_terminal = new_term.clone();
-        
+
         let focus = new_term.read(cx).focus_handle.clone();
         window.focus(&focus);
         cx.notify();
     }
 
+    fn start_tunnel(
+        &mut self,
+        tunnel: &SshTunnelEntry,
+        destination: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if destination.trim().is_empty() {
+            self.ssh_state.status_message = Some("Enter the SSH destination first".into());
+            cx.notify();
+            return;
+        }
+        let key = tunnel.build_ssh_command(destination);
+        let forwarding = if tunnel.kind == SshTunnelKind::Dynamic {
+            tunnel.local_listen.clone()
+        } else {
+            format!("{}:{}", tunnel.local_listen, tunnel.remote_target)
+        };
+        let target = SshTarget {
+            destination: destination.trim().into(),
+            extra_args: vec![
+                "-N".into(),
+                "-o".into(),
+                "ExitOnForwardFailure=yes".into(),
+                tunnel.kind.ssh_flag().into(),
+                forwarding,
+            ],
+            ..Default::default()
+        };
+        match TerminalView::spawn_ssh_pty(&target) {
+            Ok((pty, rx, astraea, cwd)) => {
+                let term = cx.new(|cx| {
+                    TerminalView::from_pty(cx, self.settings.clone(), pty, rx, astraea, cwd)
+                });
+                let active = self.active_terminal(window, cx);
+                let tab = &mut self.tabs[self.active_tab];
+                tab.root
+                    .split(&active, term.clone(), SplitDirection::Horizontal);
+                tab.active_terminal = term.clone();
+                self.tunnel_sessions.insert(key, term.downgrade());
+                self.ssh_state.open = false;
+                self.sync_modal_open_flag(cx);
+                window.focus(&term.read(cx).focus_handle);
+                cx.notify();
+            }
+            Err(e) => {
+                self.ssh_state.status_message = Some(format!("SSH tunnel failed to start: {e}"));
+                cx.notify();
+            }
+        }
+    }
     fn dispatch_command_to_split_pane(
         &mut self,
         cmd: &str,
@@ -2960,17 +4068,21 @@ impl WorkspaceView {
         }
         cx.notify();
     }
-    
+
     fn close_active_pane(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let target = self.active_terminal(window, cx);
         let tab = &mut self.tabs[self.active_tab];
-        
+
         if matches!(&tab.root, PaneTree::Leaf(term) if term == &target) {
             self.close_tab(self.active_tab, window, cx);
         } else {
             tab.root.close(&target);
             tab.active_terminal = tab.root.first_leaf();
-            let focus = self.tabs[self.active_tab].active_terminal.read(cx).focus_handle.clone();
+            let focus = self.tabs[self.active_tab]
+                .active_terminal
+                .read(cx)
+                .focus_handle
+                .clone();
             window.focus(&focus);
             cx.notify();
         }
@@ -2994,12 +4106,14 @@ impl WorkspaceView {
         window.focus(&focus);
         cx.notify();
     }
-    
+
     fn focus_next_pane(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let target = self.active_terminal(window, cx);
         let tab = &mut self.tabs[self.active_tab];
         let leaves = tab.root.all_leaves();
-        if leaves.is_empty() { return; }
+        if leaves.is_empty() {
+            return;
+        }
         let mut next_idx = 0;
         for (i, leaf) in leaves.iter().enumerate() {
             if leaf == &target {
@@ -3007,7 +4121,7 @@ impl WorkspaceView {
                 break;
             }
         }
-        
+
         let next_term = &leaves[next_idx];
         tab.active_terminal = next_term.clone();
         window.focus(&next_term.read(cx).focus_handle);
@@ -3106,13 +4220,37 @@ impl WorkspaceView {
             .collect();
 
         let rail_sections = [
-            (SshConsoleSection::HostEditor, ">_", "SSH Host Editor & Terminal"),
-            (SshConsoleSection::SmbShares, "📁", "SMB / CIFS Network Shares & Mounts"),
-            (SshConsoleSection::PortForwarding, "🖧", "Visual Port Forwarding & Tunnels"),
-            (SshConsoleSection::PxeAndBootloader, "</>", "PXE / ProxyDHCP & Custom UEFI Bootloader"),
+            (
+                SshConsoleSection::HostEditor,
+                ">_",
+                "SSH Host Editor & Terminal",
+            ),
+            (
+                SshConsoleSection::SmbShares,
+                "📁",
+                "SMB / CIFS Network Shares & Mounts",
+            ),
+            (
+                SshConsoleSection::PortForwarding,
+                "🖧",
+                "Visual Port Forwarding & Tunnels",
+            ),
+            (
+                SshConsoleSection::PxeAndBootloader,
+                "</>",
+                "PXE / ProxyDHCP & Custom UEFI Bootloader",
+            ),
             (SshConsoleSection::KeyVault, "🔑", "Local SSH Key Vault"),
-            (SshConsoleSection::ServerAndAgentHub, "⇄", "SSH Server Hosting & SSH Agent Hub"),
-            (SshConsoleSection::NetworkTools, "📡", "Networking Tools (Port Scan, ARP, WoL)"),
+            (
+                SshConsoleSection::ServerAndAgentHub,
+                "⇄",
+                "SSH Server Hosting & SSH Agent Hub",
+            ),
+            (
+                SshConsoleSection::NetworkTools,
+                "📡",
+                "Networking Tools (Port Scan, ARP, WoL)",
+            ),
         ];
 
         let mut icon_rail = div()
@@ -3154,7 +4292,7 @@ impl WorkspaceView {
                     .text_color(if is_active {
                         theme.border_active
                     } else {
-                        rgb(0x94a3b8)
+                        theme.fg
                     })
                     .text_sm()
                     .font_weight(gpui::FontWeight::BOLD)
@@ -3177,7 +4315,7 @@ impl WorkspaceView {
                 .rounded_full()
                 .bg(theme.tab_active_bg)
                 .border_1()
-                .border_color(rgb(0x06b6d4))
+                .border_color(theme.border_active)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3192,7 +4330,9 @@ impl WorkspaceView {
 
         let search_focused = active_input == SshConsoleInputField::SidebarSearch;
         let mut hosts_sidebar = div()
-            .w(px(268.0))
+            .w(relative(0.24))
+            .min_w(px(250.0))
+            .max_w(px(380.0))
             .h_full()
             .flex_shrink_0()
             .bg(theme.tab_inactive_bg)
@@ -3251,14 +4391,14 @@ impl WorkspaceView {
             .child(
                 div()
                     .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
+                    .flex_col()
+                    .gap_2()
+                    .items_start()
                     .child(
                         div()
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(0x94a3b8))
+                            .text_color(theme.fg)
                             .child("SERVERS & CLUSTERS"),
                     )
                     .child(
@@ -3294,10 +4434,10 @@ impl WorkspaceView {
                                     .px_2()
                                     .py_0p5()
                                     .rounded_sm()
-                                    .bg(rgb(0x06b6d4))
+                                    .bg(theme.border_active)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0x090d16))
+                                    .text_color(theme.bg)
                                     .cursor(gpui::CursorStyle::PointingHand)
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.ssh_state.section = SshConsoleSection::HostEditor;
@@ -3334,8 +4474,8 @@ impl WorkspaceView {
                     div()
                         .text_xs()
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(rgb(0x94a3b8))
-                        .child("⌄ 📁 /home/chyna"),
+                        .text_color(theme.fg)
+                        .child("⌄ Saved hosts"),
                 )
                 .child(
                     div()
@@ -3361,6 +4501,9 @@ impl WorkspaceView {
             saved_list = saved_list.child(
                 div()
                     .id(("saved-ssh-card", idx_val))
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
                     .p_2()
                     .rounded_md()
                     .bg(if is_editing {
@@ -3370,17 +4513,15 @@ impl WorkspaceView {
                     })
                     .border_1()
                     .border_color(if is_editing {
-                        rgb(0x06b6d4)
+                        theme.border_active
                     } else {
-                        rgb(0x1e293b)
+                        theme.border_inactive
                     })
                     .cursor(gpui::CursorStyle::PointingHand)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.ssh_state.section = SshConsoleSection::HostEditor;
-                        view.ssh_state.host_draft = SshHostEditorDraft::from_profile(
-                            Some(idx_val),
-                            &prof_card,
-                        );
+                        view.ssh_state.host_draft =
+                            SshHostEditorDraft::from_profile(Some(idx_val), &prof_card);
                         view.ssh_state.active_input = SshConsoleInputField::HostHostname;
                         window.focus(&view.ssh_focus_handle);
                         cx.notify();
@@ -3391,11 +4532,15 @@ impl WorkspaceView {
                     .child(
                         div()
                             .flex()
-                            .flex_row()
-                            .justify_between()
-                            .items_center()
+                            .flex_col()
+                            .gap_2()
+                            .items_start()
                             .child(
                                 div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .text_color(rgb(0xf1f5f9))
@@ -3411,15 +4556,18 @@ impl WorkspaceView {
                                         div()
                                             .id(("edit-saved-ssh", idx_val))
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(theme.fg)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.ssh_state.section = SshConsoleSection::HostEditor;
-                                                view.ssh_state.host_draft = SshHostEditorDraft::from_profile(
-                                                    Some(idx_val),
-                                                    &prof_edit,
-                                                );
-                                                view.ssh_state.active_input = SshConsoleInputField::HostHostname;
+                                                view.ssh_state.section =
+                                                    SshConsoleSection::HostEditor;
+                                                view.ssh_state.host_draft =
+                                                    SshHostEditorDraft::from_profile(
+                                                        Some(idx_val),
+                                                        &prof_edit,
+                                                    );
+                                                view.ssh_state.active_input =
+                                                    SshConsoleInputField::HostHostname;
                                                 window.focus(&view.ssh_focus_handle);
                                                 cx.notify();
                                             }))
@@ -3439,8 +4587,11 @@ impl WorkspaceView {
                                                         cx.notify();
                                                     }
                                                 });
-                                                if view.ssh_state.host_draft.editing_index == Some(idx_val) {
-                                                    view.ssh_state.host_draft = SshHostEditorDraft::new_blank();
+                                                if view.ssh_state.host_draft.editing_index
+                                                    == Some(idx_val)
+                                                {
+                                                    view.ssh_state.host_draft =
+                                                        SshHostEditorDraft::new_blank();
                                                 }
                                                 cx.notify();
                                             }))
@@ -3452,15 +4603,23 @@ impl WorkspaceView {
                                             .px_1p5()
                                             .py_0p5()
                                             .rounded_sm()
-                                            .bg(rgb(0x1e293b))
+                                            .bg(theme.border_inactive)
                                             .text_size(px(10.0))
                                             .text_color(rgb(0x38bdf8))
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, window, cx| {
                                                 let p = prof_split.clone();
-                                                let base = view.ssh_engine.resolve_target(&p.host.hostname);
+                                                let base = view
+                                                    .ssh_engine
+                                                    .resolve_target(&p.host.hostname);
                                                 let target = p.build_target(base);
-                                                view.connect_ssh_with_mode(target, Some(p), Some(SplitDirection::Horizontal), window, cx);
+                                                view.connect_ssh_with_mode(
+                                                    target,
+                                                    Some(p),
+                                                    Some(SplitDirection::Horizontal),
+                                                    window,
+                                                    cx,
+                                                );
                                             }))
                                             .child("◫ Split"),
                                     )
@@ -3472,16 +4631,24 @@ impl WorkspaceView {
                                             .rounded_sm()
                                             .bg(gpui::rgba(0x06b6d422))
                                             .border_1()
-                                            .border_color(rgb(0x06b6d4))
+                                            .border_color(theme.border_active)
                                             .text_size(px(10.0))
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0x22d3ee))
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, window, cx| {
                                                 let p = prof_connect.clone();
-                                                let base = view.ssh_engine.resolve_target(&p.host.hostname);
+                                                let base = view
+                                                    .ssh_engine
+                                                    .resolve_target(&p.host.hostname);
                                                 let target = p.build_target(base);
-                                                view.connect_ssh_with_mode(target, Some(p), None, window, cx);
+                                                view.connect_ssh_with_mode(
+                                                    target,
+                                                    Some(p),
+                                                    None,
+                                                    window,
+                                                    cx,
+                                                );
                                             }))
                                             .child("↗ Connect"),
                                     ),
@@ -3534,18 +4701,20 @@ impl WorkspaceView {
             cfg_list = cfg_list.child(
                 div()
                     .id(("cfg-ssh-card", cidx))
+                    .w_full()
+                    .min_w_0()
+                    .flex_shrink_0()
                     .p_2()
                     .rounded_md()
                     .bg(rgb(0x131b2c))
                     .border_1()
-                    .border_color(rgb(0x1e293b))
+                    .border_color(theme.border_inactive)
                     .cursor(gpui::CursorStyle::PointingHand)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.ssh_state.section = SshConsoleSection::HostEditor;
                         view.ssh_state.host_draft =
                             SshHostEditorDraft::from_profile(None, &prof_card);
-                        view.ssh_state.active_input =
-                            SshConsoleInputField::HostHostname;
+                        view.ssh_state.active_input = SshConsoleInputField::HostHostname;
                         window.focus(&view.ssh_focus_handle);
                         cx.notify();
                     }))
@@ -3555,17 +4724,23 @@ impl WorkspaceView {
                     .child(
                         div()
                             .flex()
-                            .flex_row()
-                            .justify_between()
-                            .items_center()
+                            .flex_col()
+                            .gap_2()
+                            .items_start()
                             .child(
                                 div()
+                                    .w_full()
+                                    .min_w_0()
                                     .flex()
                                     .flex_row()
                                     .items_center()
                                     .gap_1p5()
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0xf1f5f9))
@@ -3575,8 +4750,8 @@ impl WorkspaceView {
                                         div()
                                             .px_1()
                                             .rounded_sm()
-                                            .bg(rgb(0x1e293b))
-                                            .text_color(rgb(0x94a3b8))
+                                            .bg(theme.border_inactive)
+                                            .text_color(theme.fg)
                                             .text_xs()
                                             .child("config"),
                                     ),
@@ -3591,12 +4766,15 @@ impl WorkspaceView {
                                         div()
                                             .id(("edit-cfg-ssh", cidx))
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(theme.fg)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.ssh_state.section = SshConsoleSection::HostEditor;
+                                                view.ssh_state.section =
+                                                    SshConsoleSection::HostEditor;
                                                 view.ssh_state.host_draft =
-                                                    SshHostEditorDraft::from_profile(None, &prof_edit);
+                                                    SshHostEditorDraft::from_profile(
+                                                        None, &prof_edit,
+                                                    );
                                                 view.ssh_state.active_input =
                                                     SshConsoleInputField::HostHostname;
                                                 window.focus(&view.ssh_focus_handle);
@@ -3610,15 +4788,22 @@ impl WorkspaceView {
                                             .px_1p5()
                                             .py_0p5()
                                             .rounded_sm()
-                                            .bg(rgb(0x1e293b))
+                                            .bg(theme.border_inactive)
                                             .text_size(px(10.0))
                                             .text_color(rgb(0x38bdf8))
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, window, cx| {
                                                 let p = prof_split.clone();
-                                                let base = view.ssh_engine.resolve_target(&p.host.name);
+                                                let base =
+                                                    view.ssh_engine.resolve_target(&p.host.name);
                                                 let target = p.build_target(base);
-                                                view.connect_ssh_with_mode(target, Some(p), Some(SplitDirection::Horizontal), window, cx);
+                                                view.connect_ssh_with_mode(
+                                                    target,
+                                                    Some(p),
+                                                    Some(SplitDirection::Horizontal),
+                                                    window,
+                                                    cx,
+                                                );
                                             }))
                                             .child("◫ Split"),
                                     )
@@ -3630,16 +4815,23 @@ impl WorkspaceView {
                                             .rounded_sm()
                                             .bg(gpui::rgba(0x06b6d422))
                                             .border_1()
-                                            .border_color(rgb(0x06b6d4))
+                                            .border_color(theme.border_active)
                                             .text_size(px(10.0))
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(rgb(0x22d3ee))
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, window, cx| {
                                                 let p = prof_conn.clone();
-                                                let base = view.ssh_engine.resolve_target(&p.host.name);
+                                                let base =
+                                                    view.ssh_engine.resolve_target(&p.host.name);
                                                 let target = p.build_target(base);
-                                                view.connect_ssh_with_mode(target, Some(p), None, window, cx);
+                                                view.connect_ssh_with_mode(
+                                                    target,
+                                                    Some(p),
+                                                    None,
+                                                    window,
+                                                    cx,
+                                                );
                                             }))
                                             .child("↗ Connect"),
                                     ),
@@ -3686,7 +4878,7 @@ impl WorkspaceView {
                             div()
                                 .text_xs()
                                 .font_weight(gpui::FontWeight::BOLD)
-                                .text_color(rgb(0x94a3b8))
+                                .text_color(theme.fg)
                                 .child(label),
                         )
                         .child(
@@ -3695,12 +4887,12 @@ impl WorkspaceView {
                                 .px_3()
                                 .py_2()
                                 .rounded_md()
-                                .bg(rgb(0x090d16))
+                                .bg(theme.bg)
                                 .border_1()
                                 .border_color(if focused {
-                                    rgb(0x06b6d4)
+                                    theme.border_active
                                 } else {
-                                    rgb(0x1e293b)
+                                    theme.border_inactive
                                 })
                                 .font_family("OpenDyslexic Nerd Font")
                                 .text_xs()
@@ -3736,9 +4928,9 @@ impl WorkspaceView {
                             })
                             .border_1()
                             .border_color(if draft.forward_agent {
-                                rgb(0x06b6d4)
+                                theme.border_active
                             } else {
-                                rgb(0x1e293b)
+                                theme.border_inactive
                             })
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
@@ -3774,7 +4966,7 @@ impl WorkspaceView {
                             .border_color(if draft.use_control_master {
                                 rgb(0x10b981)
                             } else {
-                                rgb(0x1e293b)
+                                theme.border_inactive
                             })
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
@@ -3823,12 +5015,9 @@ impl WorkspaceView {
                                 .flex_row()
                                 .justify_between()
                                 .items_center()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0xecfdf5))
-                                        .child(format!("🟢 Active PTY: {user}@{dest}:{port} (Tab #{tab_id})")),
-                                )
+                                .child(div().text_xs().text_color(rgb(0xecfdf5)).child(format!(
+                                    "🟢 Active PTY: {user}@{dest}:{port} (Tab #{tab_id})"
+                                )))
                                 .child(
                                     div()
                                         .flex()
@@ -3841,26 +5030,30 @@ impl WorkspaceView {
                                                 .py_0p5()
                                                 .rounded_sm()
                                                 .bg(rgb(0x10b981))
-                                                .text_color(rgb(0x090d16))
+                                                .text_color(theme.bg)
                                                 .text_xs()
                                                 .font_weight(gpui::FontWeight::BOLD)
                                                 .cursor(gpui::CursorStyle::PointingHand)
-                                                .on_click(cx.listener(move |view, _, window, cx| {
-                                                    if let Some(pos) =
-                                                        view.tabs.iter().position(|t| t.tab_id == tab_id)
-                                                    {
-                                                        view.active_tab = pos;
-                                                        let focus = view.tabs[pos]
-                                                            .active_terminal
-                                                            .read(cx)
-                                                            .focus_handle
-                                                            .clone();
-                                                        window.focus(&focus);
-                                                        view.ssh_state.open = false;
-                                                        view.sync_modal_open_flag(cx);
-                                                        cx.notify();
-                                                    }
-                                                }))
+                                                .on_click(cx.listener(
+                                                    move |view, _, window, cx| {
+                                                        if let Some(pos) = view
+                                                            .tabs
+                                                            .iter()
+                                                            .position(|t| t.tab_id == tab_id)
+                                                        {
+                                                            view.active_tab = pos;
+                                                            let focus = view.tabs[pos]
+                                                                .active_terminal
+                                                                .read(cx)
+                                                                .focus_handle
+                                                                .clone();
+                                                            window.focus(&focus);
+                                                            view.ssh_state.open = false;
+                                                            view.sync_modal_open_flag(cx);
+                                                            cx.notify();
+                                                        }
+                                                    },
+                                                ))
                                                 .child("Jump to Tab"),
                                         )
                                         .child(
@@ -3873,13 +5066,17 @@ impl WorkspaceView {
                                                 .text_color(rgb(0xffffff))
                                                 .text_xs()
                                                 .cursor(gpui::CursorStyle::PointingHand)
-                                                .on_click(cx.listener(move |view, _, window, cx| {
-                                                    if let Some(pos) =
-                                                        view.tabs.iter().position(|t| t.tab_id == tab_id)
-                                                    {
-                                                        view.close_tab(pos, window, cx);
-                                                    }
-                                                }))
+                                                .on_click(cx.listener(
+                                                    move |view, _, window, cx| {
+                                                        if let Some(pos) = view
+                                                            .tabs
+                                                            .iter()
+                                                            .position(|t| t.tab_id == tab_id)
+                                                        {
+                                                            view.close_tab(pos, window, cx);
+                                                        }
+                                                    },
+                                                ))
                                                 .child("Disconnect"),
                                         ),
                                 ),
@@ -3911,7 +5108,7 @@ impl WorkspaceView {
                                             .rounded_lg()
                                             .bg(gpui::rgba(0x06b6d422))
                                             .border_1()
-                                            .border_color(rgb(0x06b6d4))
+                                            .border_color(theme.border_active)
                                             .flex()
                                             .items_center()
                                             .justify_center()
@@ -3927,7 +5124,7 @@ impl WorkspaceView {
                                                 div()
                                                     .text_base()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .child(if draft.editing_index.is_some() {
                                                         format!("Edit SSH Host Profile — {}", draft.name)
                                                     } else {
@@ -3937,7 +5134,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Select any host on the left (✎) to edit, or configure and save a new SSH host profile."),
                                             ),
                                     ),
@@ -3960,9 +5157,9 @@ impl WorkspaceView {
                         div()
                             .p_4()
                             .rounded_xl()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_col()
                             .gap_3()
@@ -4041,7 +5238,7 @@ impl WorkspaceView {
                                                 div()
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Caduceus IPC Tunnel (-R)"),
                                             )
                                             .child(
@@ -4053,13 +5250,13 @@ impl WorkspaceView {
                                                     .bg(if draft.forward_caduceus_ipc {
                                                         gpui::rgba(0x10b98128)
                                                     } else {
-                                                        rgb(0x090d16)
+                                                        theme.bg
                                                     })
                                                     .border_1()
                                                     .border_color(if draft.forward_caduceus_ipc {
                                                         rgb(0x10b981)
                                                     } else {
-                                                        rgb(0x1e293b)
+                                                        theme.border_inactive
                                                     })
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
@@ -4098,7 +5295,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .text_size(px(10.5))
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Persists to ~/.config/well/operator_settings.json"),
                                             ),
                                     )
@@ -4115,8 +5312,8 @@ impl WorkspaceView {
                                                     .px_4()
                                                     .py_1p5()
                                                     .rounded_md()
-                                                    .bg(rgb(0x06b6d4))
-                                                    .text_color(rgb(0x090d16))
+                                                    .bg(theme.border_active)
+                                                    .text_color(theme.bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -4132,7 +5329,7 @@ impl WorkspaceView {
                                                     .py_1p5()
                                                     .rounded_md()
                                                     .bg(rgb(0x10b981))
-                                                    .text_color(rgb(0x090d16))
+                                                    .text_color(theme.bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -4160,7 +5357,7 @@ impl WorkspaceView {
                                                     .px_3p5()
                                                     .py_1p5()
                                                     .rounded_md()
-                                                    .bg(rgb(0x1e293b))
+                                                    .bg(theme.border_inactive)
                                                     .border_1()
                                                     .border_color(rgb(0x38bdf8))
                                                     .text_color(rgb(0x38bdf8))
@@ -4208,9 +5405,17 @@ impl WorkspaceView {
                     let title = tunnel.title.clone();
                     let l_addr = tunnel.local_listen.clone();
                     let r_addr = tunnel.remote_target.clone();
-                    let is_active = tunnel.active || tunnel.probe_local_port();
+                    let is_active = self
+                        .tunnel_sessions
+                        .get(&tunnel.build_ssh_command(&t_ssh_host))
+                        .and_then(|t| t.upgrade())
+                        .is_some_and(|t| t.read(cx).pty.is_alive());
                     let ssh_cmd = tunnel.build_ssh_command(&t_ssh_host);
-                    let ssh_cmd_for_split = ssh_cmd.clone();
+                    let tunnel_for_split = tunnel.clone();
+                    let destination_for_split = t_ssh_host.clone();
+                    let tunnel_for_toggle = tunnel.clone();
+                    let destination_for_toggle = t_ssh_host.clone();
+                    let key_for_toggle = ssh_cmd.clone();
                     let ssh_cmd_for_copy = ssh_cmd.clone();
 
                     let card = div()
@@ -4218,12 +5423,12 @@ impl WorkspaceView {
                         .flex_1()
                         .p_3p5()
                         .rounded_xl()
-                        .bg(rgb(0x111726))
+                        .bg(theme.tab_active_bg)
                         .border_1()
                         .border_color(if is_active {
                             rgb(0x10b981)
                         } else {
-                            rgb(0x1e293b)
+                            theme.border_inactive
                         })
                         .flex()
                         .flex_col()
@@ -4255,7 +5460,7 @@ impl WorkspaceView {
                                             div()
                                                 .text_sm()
                                                 .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0xf8fafc))
+                                                .text_color(theme.fg)
                                                 .child(title),
                                         ),
                                 )
@@ -4273,7 +5478,11 @@ impl WorkspaceView {
                                                 } else {
                                                     rgb(0x64748b)
                                                 })
-                                                .child(if is_active { "● Listening" } else { "● Stopped" }),
+                                                .child(if is_active {
+                                                    "● Listening"
+                                                } else {
+                                                    "● Stopped"
+                                                }),
                                         )
                                         .child(
                                             div()
@@ -4300,7 +5509,7 @@ impl WorkspaceView {
                                 .px_3()
                                 .py_2()
                                 .rounded_lg()
-                                .bg(rgb(0x090d16))
+                                .bg(theme.bg)
                                 .border_1()
                                 .border_color(rgb(0x162032))
                                 .flex()
@@ -4359,7 +5568,7 @@ impl WorkspaceView {
                                         .id(("copy-tunnel-cmd", tidx))
                                         .text_xs()
                                         .font_family("OpenDyslexic Nerd Font")
-                                        .text_color(rgb(0x94a3b8))
+                                        .text_color(theme.fg)
                                         .cursor(gpui::CursorStyle::PointingHand)
                                         .on_click(cx.listener(move |view, _, _, cx| {
                                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -4391,13 +5600,11 @@ impl WorkspaceView {
                                                 .font_weight(gpui::FontWeight::BOLD)
                                                 .text_color(rgb(0x38bdf8))
                                                 .cursor(gpui::CursorStyle::PointingHand)
-                                                .on_click(cx.listener(move |view, _, window, cx| {
-                                                    view.dispatch_command_to_split_pane(
-                                                        &ssh_cmd_for_split,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }))
+                                                .on_click(cx.listener(
+                                                    move |view, _, window, cx| {
+                                                        view.start_tunnel(&tunnel_for_split,&destination_for_split,window,cx);
+                                                    },
+                                                ))
                                                 .child("🪟 Split Tunnel"),
                                         )
                                         .child(
@@ -4425,15 +5632,10 @@ impl WorkspaceView {
                                                     rgb(0x34d399)
                                                 })
                                                 .cursor(gpui::CursorStyle::PointingHand)
-                                                .on_click(cx.listener(move |view, _, _, cx| {
-                                                    view.settings.update(cx, |s, cx| {
-                                                        if let Some(t) = s.ssh_tunnels.get_mut(tidx) {
-                                                            t.active = !t.active;
-                                                            let _ = s.save_to_disk();
-                                                            cx.notify();
-                                                        }
-                                                    });
-                                                    cx.notify();
+                                                .on_click(cx.listener(move |view, _, window, cx| {
+                                                    if let Some(term)=view.tunnel_sessions.get(&key_for_toggle).and_then(|t|t.upgrade()).filter(|t|t.read(cx).pty.is_alive()) {
+                                                        view.ssh_state.status_message=Some(match term.read(cx).pty.terminate(){Ok(())=>"SSH tunnel process stopped".into(),Err(e)=>format!("Unable to stop tunnel: {e}")});cx.notify();
+                                                    }else{view.start_tunnel(&tunnel_for_toggle,&destination_for_toggle,window,cx);}
                                                 }))
                                                 .child(if is_active {
                                                     "■ Stop Tunnel"
@@ -4476,7 +5678,7 @@ impl WorkspaceView {
                                                 div()
                                                     .text_base()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .child("⇄ Visual Port Forwarding & Tunnels"),
                                             )
                                             .child(
@@ -4486,7 +5688,7 @@ impl WorkspaceView {
                                                     .rounded_full()
                                                     .bg(gpui::rgba(0x06b6d422))
                                                     .border_1()
-                                                    .border_color(rgb(0x06b6d4))
+                                                    .border_color(theme.border_active)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(rgb(0x22d3ee))
@@ -4496,7 +5698,7 @@ impl WorkspaceView {
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(theme.fg)
                                             .child("Route database connections, microservices, and SOCKS5 traffic through SSH tunnels."),
                                     ),
                             )
@@ -4507,7 +5709,7 @@ impl WorkspaceView {
                                     .py_1p5()
                                     .rounded_lg()
                                     .bg(rgb(0xf59e0b))
-                                    .text_color(rgb(0x090d16))
+                                    .text_color(theme.bg)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -4547,9 +5749,9 @@ impl WorkspaceView {
                             .px_3()
                             .py_2()
                             .rounded_lg()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_row()
                             .items_center()
@@ -4560,7 +5762,7 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x1e293b))
+                                    .bg(theme.border_inactive)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .text_color(rgb(0x22d3ee))
@@ -4582,16 +5784,16 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if host_focused {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x1e293b)
+                                        theme.border_inactive
                                     })
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
-                                    .text_color(rgb(0xf8fafc))
+                                    .text_color(theme.fg)
                                     .cursor(gpui::CursorStyle::IBeam)
                                     .on_click(cx.listener(|view, _, window, cx| {
                                         view.ssh_state.active_input =
@@ -4612,12 +5814,12 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if local_focused {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x1e293b)
+                                        theme.border_inactive
                                     })
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
@@ -4643,12 +5845,12 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if remote_focused {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x1e293b)
+                                        theme.border_inactive
                                     })
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
@@ -4704,9 +5906,9 @@ impl WorkspaceView {
                             .id(("ssh-vault-key", kidx))
                             .p_3()
                             .rounded_xl()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_col()
                             .gap_1p5()
@@ -4751,7 +5953,7 @@ impl WorkspaceView {
                                                                 div()
                                                                     .text_sm()
                                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                                    .text_color(rgb(0xf8fafc))
+                                                                    .text_color(theme.fg)
                                                                     .child(kname),
                                                             )
                                                             .child(
@@ -4791,7 +5993,7 @@ impl WorkspaceView {
                                                     .border_1()
                                                     .border_color(rgb(0x26324d))
                                                     .text_xs()
-                                                    .text_color(rgb(0xe2e8f0))
+                                                    .text_color(theme.fg)
                                                     .cursor(gpui::CursorStyle::PointingHand)
                                                     .on_click(cx.listener(move |view, _, _, cx| {
                                                         let _ = std::process::Command::new("ssh-add")
@@ -4817,7 +6019,7 @@ impl WorkspaceView {
                                                     .border_1()
                                                     .border_color(rgb(0x26324d))
                                                     .text_xs()
-                                                    .text_color(rgb(0xe2e8f0))
+                                                    .text_color(theme.fg)
                                                     .cursor(gpui::CursorStyle::PointingHand)
                                                     .on_click(cx.listener(move |view, _, window, cx| {
                                                         let target_host = view.ssh_state.tunnel_ssh_host.clone();
@@ -4834,7 +6036,7 @@ impl WorkspaceView {
                                                     .rounded_md()
                                                     .bg(gpui::rgba(0x06b6d422))
                                                     .border_1()
-                                                    .border_color(rgb(0x06b6d4))
+                                                    .border_color(theme.border_active)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(rgb(0x22d3ee))
@@ -4859,7 +6061,7 @@ impl WorkspaceView {
                                 div()
                                     .text_xs()
                                     .font_family("OpenDyslexic Nerd Font")
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(theme.fg)
                                     .child(format!("Fingerprint:  {kfp}")),
                             )
                             .child(
@@ -4867,12 +6069,12 @@ impl WorkspaceView {
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(rgb(0x162032))
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(theme.fg)
                                     .child(kpub),
                             ),
                     );
@@ -4884,12 +6086,12 @@ impl WorkspaceView {
                         .px_3()
                         .py_1()
                         .rounded_md()
-                        .bg(if active { rgb(0x10b981) } else { rgb(0x090d16) })
-                        .text_color(if active { rgb(0x090d16) } else { rgb(0x94a3b8) })
+                        .bg(if active { rgb(0x10b981) } else { theme.bg })
+                        .text_color(if active { theme.bg } else { theme.fg })
                         .text_xs()
                         .font_weight(gpui::FontWeight::BOLD)
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|st| st.text_color(rgb(0xf8fafc)))
+                        .hover(|st| st.text_color(theme.fg))
                         .child(label)
                 };
                 let vault_pill_kp = vault_pill(
@@ -4945,7 +6147,7 @@ impl WorkspaceView {
                             div()
                                 .p_3()
                                 .rounded_xl()
-                                .bg(rgb(0x111726))
+                                .bg(theme.tab_active_bg)
                                 .border_1()
                                 .border_color(rgb(0x7c3aed))
                                 .flex()
@@ -4955,13 +6157,13 @@ impl WorkspaceView {
                                     div()
                                         .text_xs()
                                         .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
+                                        .text_color(theme.fg)
                                         .child("🔐 FIDO2 Hardware Passkeys (sk-ssh-ed25519@openssh.com / sk-ecdsa-sha2-nistp256)"),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x94a3b8))
+                                        .text_color(theme.fg)
                                         .child("Private key material never leaves the authenticator. Each SSH login requires a physical touch on the YubiKey (or Touch ID via a FIDO2 provider)."),
                                 )
                                 .child(
@@ -5039,9 +6241,9 @@ impl WorkspaceView {
                                 div()
                                     .p_3()
                                     .rounded_lg()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
-                                    .border_color(rgb(0x1e293b))
+                                    .border_color(theme.border_inactive)
                                     .text_xs()
                                     .text_color(rgb(0x64748b))
                                     .child("No *_sk passkeys found in ~/.ssh yet. Plug in a YubiKey and click “Generate ed25519-sk Passkey”, or “Import Resident Keys” to pull existing credentials off the device."),
@@ -5057,7 +6259,7 @@ impl WorkspaceView {
                                     .id(("passkey-card", pidx))
                                     .p_3()
                                     .rounded_xl()
-                                    .bg(rgb(0x111726))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
                                     .border_color(rgb(0x4c1d95))
                                     .flex()
@@ -5075,7 +6277,7 @@ impl WorkspaceView {
                                                     .flex_row()
                                                     .gap_2()
                                                     .items_center()
-                                                    .child(div().text_sm().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0xf8fafc)).child(pk.name.clone()))
+                                                    .child(div().text_sm().font_weight(gpui::FontWeight::BOLD).text_color(theme.fg).child(pk.name.clone()))
                                                     .child(
                                                         div()
                                                             .px_1p5()
@@ -5125,7 +6327,7 @@ impl WorkspaceView {
                                             ),
                                     )
                                     .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(pk_path))
-                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x94a3b8)).child(format!("Fingerprint:  {}", pk.fingerprint))),
+                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(theme.fg).child(format!("Fingerprint:  {}", pk.fingerprint))),
                             );
                         }
                         Some(col.into_any_element())
@@ -5142,29 +6344,42 @@ impl WorkspaceView {
                                     div()
                                         .text_xs()
                                         .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgb(0xf8fafc))
-                                        .child(format!("~/.ssh/known_hosts — {} trusted host keys", known_hosts_list.len())),
+                                        .text_color(theme.fg)
+                                        .child(format!(
+                                            "~/.ssh/known_hosts — {} trusted host keys",
+                                            known_hosts_list.len()
+                                        )),
                                 )
                                 .child(
-                                    vault_btn("kh-hash".into(), "# Hash Hostnames (-H)", 0xfbbf24, 0xf59e0b)
-                                        .on_click(cx.listener(|view, _, window, cx| {
-                                            view.dispatch_command_to_split_pane("ssh-keygen -H -f ~/.ssh/known_hosts", window, cx);
-                                        })),
+                                    vault_btn(
+                                        "kh-hash".into(),
+                                        "# Hash Hostnames (-H)",
+                                        0xfbbf24,
+                                        0xf59e0b,
+                                    )
+                                    .on_click(cx.listener(
+                                        |view, _, window, cx| {
+                                            view.dispatch_command_to_split_pane(
+                                                "ssh-keygen -H -f ~/.ssh/known_hosts",
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    )),
                                 ),
                         );
                         if known_hosts_list.is_empty() {
                             col = col.child(
-                                div().text_xs().text_color(rgb(0x64748b)).child("No known_hosts entries yet."),
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x64748b))
+                                    .child("No known_hosts entries yet."),
                             );
                         }
                         for (hidx, kh) in known_hosts_list.iter().enumerate() {
                             let raw = kh.raw_line.clone();
-                            let host_first = kh
-                                .host_pattern
-                                .split(',')
-                                .next()
-                                .unwrap_or("")
-                                .to_string();
+                            let host_first =
+                                kh.host_pattern.split(',').next().unwrap_or("").to_string();
                             let host_forget = host_first.clone();
                             let host_scan = host_first.clone();
                             col = col.child(
@@ -5173,7 +6388,7 @@ impl WorkspaceView {
                                     .px_3()
                                     .py_1p5()
                                     .rounded_lg()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(rgb(0x162032))
                                     .flex()
@@ -5213,7 +6428,7 @@ impl WorkspaceView {
                                                 vault_btn(format!("kh-scan-{hidx}").into(), "↻ Re-scan", 0x38bdf8, 0x0284c7)
                                                     .on_click(cx.listener(move |view, _, window, cx| {
                                                         view.dispatch_command_to_split_pane(
-                                                            &format!("ssh-keyscan -T 3 {host_scan} | ssh-keygen -lf -"),
+                                                            &format!("ssh-keyscan -T 3 -- {} | ssh-keygen -lf -",well_shell::ssh::quote_argument(&host_scan)),
                                                             window,
                                                             cx,
                                                         );
@@ -5269,14 +6484,14 @@ impl WorkspaceView {
                                         div()
                                             .text_base()
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
+                                            .text_color(theme.fg)
                                             .child("🔑 Local SSH Key Vault"),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
-                                            .child("Secure hardware-grade Ed25519 & RSA key management directly in macOS Keychain & ~/.ssh"),
+                                            .text_color(theme.fg)
+                                            .child("Local OpenSSH keys and agent identities. Hardware passkeys require a compatible authenticator."),
                                     ),
                             )
                             .child(
@@ -5286,23 +6501,13 @@ impl WorkspaceView {
                                     .py_1p5()
                                     .rounded_lg()
                                     .bg(rgb(0x10b981))
-                                    .text_color(rgb(0x090d16))
+                                    .text_color(theme.bg)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        if let Ok(home) = std::env::var("HOME") {
-                                            let key_file = format!("{home}/.ssh/id_ed25519_well");
-                                            if !std::path::Path::new(&key_file).exists() {
-                                                let _ = std::process::Command::new("ssh-keygen")
-                                                    .args(["-t", "ed25519", "-f", &key_file, "-N", "", "-C", "well-netops"])
-                                                    .output();
-                                            }
-                                            view.ssh_state.status_message = Some(format!(
-                                                "✨ Ed25519 key pair ready at {key_file}"
-                                            ));
-                                        }
-                                        cx.notify();
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.dispatch_command_to_split_pane(
+                                            "mkdir -p \"$HOME/.ssh\" && if [ -e \"$HOME/.ssh/id_ed25519_well\" ]; then printf '%s\\n' 'Key already exists; it was preserved.'; else ssh-keygen -t ed25519 -f \"$HOME/.ssh/id_ed25519_well\" -C well-netops; fi",window,cx);
                                     }))
                                     .child("+ Generate Key Pair"),
                             ),
@@ -5311,9 +6516,9 @@ impl WorkspaceView {
                         div()
                             .p_1()
                             .rounded_lg()
-                            .bg(rgb(0x090d16))
+                            .bg(theme.bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_row()
                             .gap_1()
@@ -5352,7 +6557,7 @@ impl WorkspaceView {
                         div()
                             .p_3()
                             .rounded_xl()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
                             .border_color(if ks_running {
                                 rgb(0x10b981)
@@ -5378,7 +6583,7 @@ impl WorkspaceView {
                                                 div()
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .child("🌐 HTTP Authorized Key Server (/authorized_keys)"),
                                             )
                                             .child(
@@ -5390,12 +6595,12 @@ impl WorkspaceView {
                                                     .bg(if ks_running {
                                                         gpui::rgba(0x10b98128)
                                                     } else {
-                                                        rgb(0x1e293b)
+                                                        theme.border_inactive
                                                     })
                                                     .text_color(if ks_running {
                                                         rgb(0x34d399)
                                                     } else {
-                                                        rgb(0x94a3b8)
+                                                        theme.fg
                                                     })
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
@@ -5453,9 +6658,9 @@ impl WorkspaceView {
                                                     .bg(if ks_running {
                                                         rgb(0xef4444)
                                                     } else {
-                                                        rgb(0x06b6d4)
+                                                        theme.border_active
                                                     })
-                                                    .text_color(rgb(0x090d16))
+                                                    .text_color(theme.bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -5517,7 +6722,7 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(rgb(0x162032))
                                     .font_family("OpenDyslexic Nerd Font")
@@ -5542,13 +6747,13 @@ impl WorkspaceView {
                                 div()
                                     .text_base()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xf8fafc))
+                                    .text_color(theme.fg)
                                     .child("🖧 SSH Server Hosting & SSH Agent Hub"),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
+                                    .text_color(theme.fg)
                                     .child("Run an embedded macOS SSH server daemon and manage loaded credentials in $SSH_AUTH_SOCK"),
                             ),
                     )
@@ -5556,9 +6761,9 @@ impl WorkspaceView {
                         div()
                             .p_1()
                             .rounded_lg()
-                            .bg(rgb(0x090d16))
+                            .bg(theme.bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_row()
                             .gap_1()
@@ -5569,14 +6774,14 @@ impl WorkspaceView {
                                     .py_1()
                                     .rounded_md()
                                     .bg(if server_subtab == ServerHubSubtab::ServerHosting {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
                                         gpui::rgba(0x00000000)
                                     })
                                     .text_color(if server_subtab == ServerHubSubtab::ServerHosting {
-                                        rgb(0x090d16)
+                                        theme.bg
                                     } else {
-                                        rgb(0x94a3b8)
+                                        theme.fg
                                     })
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
@@ -5595,14 +6800,14 @@ impl WorkspaceView {
                                     .py_1()
                                     .rounded_md()
                                     .bg(if server_subtab == ServerHubSubtab::AgentHub {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
                                         gpui::rgba(0x00000000)
                                     })
                                     .text_color(if server_subtab == ServerHubSubtab::AgentHub {
-                                        rgb(0x090d16)
+                                        theme.bg
                                     } else {
-                                        rgb(0x94a3b8)
+                                        theme.fg
                                     })
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
@@ -5620,14 +6825,14 @@ impl WorkspaceView {
                                     .py_1()
                                     .rounded_md()
                                     .bg(if server_subtab == ServerHubSubtab::OpsAgent {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
                                         gpui::rgba(0x00000000)
                                     })
                                     .text_color(if server_subtab == ServerHubSubtab::OpsAgent {
-                                        rgb(0x090d16)
+                                        theme.bg
                                     } else {
-                                        rgb(0x94a3b8)
+                                        theme.fg
                                     })
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
@@ -5642,13 +6847,15 @@ impl WorkspaceView {
 
                 let body = match server_subtab {
                     ServerHubSubtab::ServerHosting => {
-                        let running = self.ssh_state.server_running;
+                        let running = self.ssh_state.server_host.as_ref().is_some_and(|host| {
+                            host.running.load(std::sync::atomic::Ordering::Acquire)
+                        });
                         let s_port = self.ssh_state.server_port.clone();
                         let s_addr = self.ssh_state.server_listen_addr.clone();
                         let allow_pub = self.ssh_state.allow_pubkey_auth;
                         let allow_pw = self.ssh_state.allow_password_auth;
                         let port_focused = active_input == SshConsoleInputField::ServerPort;
-                        let keys = DiscoveredSshKey::discover_local_keys();
+                        let keys = DiscoveredSshKey::authorized();
 
                         div()
                             .flex()
@@ -5658,9 +6865,9 @@ impl WorkspaceView {
                                 div()
                                     .p_3p5()
                                     .rounded_xl()
-                                    .bg(rgb(0x111726))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
-                                    .border_color(rgb(0x1e293b))
+                                    .border_color(theme.border_inactive)
                                     .flex()
                                     .flex_row()
                                     .justify_between()
@@ -5680,7 +6887,7 @@ impl WorkspaceView {
                                                         div()
                                                             .text_sm()
                                                             .font_weight(gpui::FontWeight::BOLD)
-                                                            .text_color(rgb(0xf8fafc))
+                                                            .text_color(theme.fg)
                                                             .child("Embedded SSH Server Daemon"),
                                                     )
                                                     .child(
@@ -5691,12 +6898,12 @@ impl WorkspaceView {
                                                             .bg(if running {
                                                                 gpui::rgba(0x10b98128)
                                                             } else {
-                                                                rgb(0x1e293b)
+                                                                theme.border_inactive
                                                             })
                                                             .text_color(if running {
                                                                 rgb(0x34d399)
                                                             } else {
-                                                                rgb(0x94a3b8)
+                                                                theme.fg
                                                             })
                                                             .text_xs()
                                                             .font_weight(gpui::FontWeight::BOLD)
@@ -5706,8 +6913,8 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
-                                                    .child("Ready to accept incoming terminal sessions on unprivileged port"),
+                                                    .text_color(theme.fg)
+                                                    .child("Uses ~/.ssh/authorized_keys. Password auth requires WELL_SSH_PASSWORD in the launch environment."),
                                             ),
                                     )
                                     .child(
@@ -5724,15 +6931,22 @@ impl WorkspaceView {
                                                     .bg(if running {
                                                         rgb(0xef4444)
                                                     } else {
-                                                        rgb(0x06b6d4)
+                                                        theme.border_active
                                                     })
-                                                    .text_color(rgb(0x090d16))
+                                                    .text_color(theme.bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .cursor(gpui::CursorStyle::PointingHand)
                                                     .on_click(cx.listener(|view, _, _, cx| {
-                                                        view.ssh_state.server_running =
-                                                            !view.ssh_state.server_running;
+                                                        if let Some(host)=view.ssh_state.server_host.take() {host.stop();view.ssh_state.server_running=false;}
+                                                        else {
+                                                            let address=format!("{}:{}",view.ssh_state.server_listen_addr,view.ssh_state.server_port).parse();
+                                                            match address {
+                                                                Ok(address)=>{view.ssh_state.server_host=Some(well_ssh::server::SshHost::start(well_ssh::server::HostConfig{address,public_key_auth:view.ssh_state.allow_pubkey_auth,password_auth:view.ssh_state.allow_password_auth,home:std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default(),user:std::env::var("USER").unwrap_or_default()}));}
+                                                                Err(e)=>{view.ssh_state.status_message=Some(format!("Invalid listen address: {e}"));}
+                                                            }
+                                                        }
+
                                                         cx.notify();
                                                     }))
                                                     .child(if running {
@@ -5757,8 +6971,9 @@ impl WorkspaceView {
                                                     .on_click(cx.listener(|view, _, _, cx| {
                                                         view.ssh_state.server_port = "2222".to_string();
                                                         view.ssh_state.server_listen_addr =
-                                                            "0.0.0.0 (All LAN & VPN Interfaces)"
+                                                            "127.0.0.1"
                                                                 .to_string();
+                                                        if view.ssh_state.server_host.is_some(){view.ssh_state.status_message=Some("Stop the SSH host before changing authentication".into());cx.notify();return;}
                                                         view.ssh_state.allow_pubkey_auth = true;
                                                         cx.notify();
                                                     }))
@@ -5776,9 +6991,9 @@ impl WorkspaceView {
                                             .flex_1()
                                             .p_3p5()
                                             .rounded_xl()
-                                            .bg(rgb(0x111726))
+                                            .bg(theme.tab_active_bg)
                                             .border_1()
-                                            .border_color(rgb(0x1e293b))
+                                            .border_color(theme.border_inactive)
                                             .flex()
                                             .flex_col()
                                             .gap_2()
@@ -5786,13 +7001,13 @@ impl WorkspaceView {
                                                 div()
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .child("Listener Configuration"),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Server Port (Unprivileged > 1024)"),
                                             )
                                             .child(
@@ -5801,16 +7016,16 @@ impl WorkspaceView {
                                                     .px_3()
                                                     .py_1p5()
                                                     .rounded_md()
-                                                    .bg(rgb(0x090d16))
+                                                    .bg(theme.bg)
                                                     .border_1()
                                                     .border_color(if port_focused {
-                                                        rgb(0x06b6d4)
+                                                        theme.border_active
                                                     } else {
-                                                        rgb(0x1e293b)
+                                                        theme.border_inactive
                                                     })
                                                     .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .cursor(gpui::CursorStyle::IBeam)
                                                     .on_click(cx.listener(|view, _, _, cx| {
                                                         view.ssh_state.active_input =
@@ -5826,7 +7041,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Listen Interface Address"),
                                             )
                                             .child(
@@ -5835,20 +7050,20 @@ impl WorkspaceView {
                                                     .px_3()
                                                     .py_1p5()
                                                     .rounded_md()
-                                                    .bg(rgb(0x090d16))
+                                                    .bg(theme.bg)
                                                     .border_1()
                                                     .border_color(
                                                         if active_input
                                                             == SshConsoleInputField::ServerListenAddr
                                                         {
-                                                            rgb(0x06b6d4)
+                                                            theme.border_active
                                                         } else {
-                                                            rgb(0x1e293b)
+                                                            theme.border_inactive
                                                         },
                                                     )
                                                     .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .cursor(gpui::CursorStyle::IBeam)
                                                     .on_click(cx.listener(|view, _, _, cx| {
                                                         view.ssh_state.active_input =
@@ -5861,7 +7076,7 @@ impl WorkspaceView {
                                                 div()
                                                     .id("toggle-srv-pubkey")
                                                     .text_xs()
-                                                    .text_color(rgb(0xe2e8f0))
+                                                    .text_color(theme.fg)
                                                     .cursor(gpui::CursorStyle::PointingHand)
                                                     .on_click(cx.listener(|view, _, _, cx| {
                                                         view.ssh_state.allow_pubkey_auth =
@@ -5878,9 +7093,10 @@ impl WorkspaceView {
                                                 div()
                                                     .id("toggle-srv-pw")
                                                     .text_xs()
-                                                    .text_color(rgb(0xe2e8f0))
+                                                    .text_color(theme.fg)
                                                     .cursor(gpui::CursorStyle::PointingHand)
                                                     .on_click(cx.listener(|view, _, _, cx| {
+                                                        if view.ssh_state.server_host.is_some(){view.ssh_state.status_message=Some("Stop the SSH host before changing authentication".into());cx.notify();return;}
                                                         view.ssh_state.allow_password_auth =
                                                             !view.ssh_state.allow_password_auth;
                                                         cx.notify();
@@ -5897,9 +7113,9 @@ impl WorkspaceView {
                                             .flex_1()
                                             .p_3p5()
                                             .rounded_xl()
-                                            .bg(rgb(0x111726))
+                                            .bg(theme.tab_active_bg)
                                             .border_1()
-                                            .border_color(rgb(0x1e293b))
+                                            .border_color(theme.border_inactive)
                                             .flex()
                                             .flex_col()
                                             .gap_2()
@@ -5907,13 +7123,13 @@ impl WorkspaceView {
                                                 div()
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .child("Host Key Security"),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Algorithm & Key Path"),
                                             )
                                             .child(
@@ -5926,7 +7142,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Host Key Fingerprint"),
                                             )
                                             .child(
@@ -5934,13 +7150,13 @@ impl WorkspaceView {
                                                     .px_3()
                                                     .py_1p5()
                                                     .rounded_md()
-                                                    .bg(rgb(0x090d16))
+                                                    .bg(theme.bg)
                                                     .border_1()
-                                                    .border_color(rgb(0x1e293b))
+                                                    .border_color(theme.border_inactive)
                                                     .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
-                                                    .text_color(rgb(0xe2e8f0))
-                                                    .child("SHA256:2MxNZ+ew0X6C0j3bs3z6K4Xj9j++N+AECkI9t2NcasY"),
+                                                    .text_color(theme.fg)
+                                                    .child("Host fingerprint is shown after startup"),
                                             )
                                             .child(
                                                 div()
@@ -5951,7 +7167,7 @@ impl WorkspaceView {
                                                     .border_color(rgb(0x0e7490))
                                                     .text_xs()
                                                     .text_color(rgb(0x7dd3fc))
-                                                    .child("ⓘ Isolated Daemon Sandbox: Runs isolated from macOS system remote login with dedicated keys."),
+                                                    .child("ⓘ Dedicated SSH listener and host keys. Authenticated shells run as your local OS user."),
                                             ),
                                     ),
                             )
@@ -5959,9 +7175,9 @@ impl WorkspaceView {
                                 div()
                                     .p_3p5()
                                     .rounded_xl()
-                                    .bg(rgb(0x111726))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
-                                    .border_color(rgb(0x1e293b))
+                                    .border_color(theme.border_inactive)
                                     .flex()
                                     .flex_col()
                                     .gap_2()
@@ -5979,13 +7195,13 @@ impl WorkspaceView {
                                                         div()
                                                             .text_xs()
                                                             .font_weight(gpui::FontWeight::BOLD)
-                                                            .text_color(rgb(0xf8fafc))
+                                                            .text_color(theme.fg)
                                                             .child(format!("Authorized Public Keys ({})", keys.len())),
                                                     )
                                                     .child(
                                                         div()
                                                             .text_xs()
-                                                            .text_color(rgb(0x94a3b8))
+                                                            .text_color(theme.fg)
                                                             .child("Clients whose public keys appear below can authenticate via SSH key"),
                                                     ),
                                             )
@@ -5995,16 +7211,17 @@ impl WorkspaceView {
                                                     .px_2p5()
                                                     .py_1()
                                                     .rounded_md()
-                                                    .bg(rgb(0x06b6d4))
-                                                    .text_color(rgb(0x090d16))
+                                                    .bg(theme.border_active)
+                                                    .text_color(theme.bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .cursor(gpui::CursorStyle::PointingHand)
                                                     .on_click(cx.listener(|view, _, _, cx| {
-                                                        view.ssh_state.status_message = Some(
-                                                            "📋 Paste client public key or copy from Key Vault to authorize."
-                                                                .to_string(),
-                                                        );
+                                                        view.ssh_state.status_message=Some(match cx.read_from_clipboard().and_then(|item|item.text()) {
+                                                            Some(line)=>match ssh_console::authorize_public_key(&line){Ok(())=>"Public key authorized. Restart the SSH host to apply.".into(),Err(e)=>e},
+                                                            None=>"Copy an OpenSSH client public key first".into(),
+                                                        });
+
                                                         cx.notify();
                                                     }))
                                                     .child("+ Add Public Key"),
@@ -6016,7 +7233,7 @@ impl WorkspaceView {
                                             .px_3()
                                             .py_1p5()
                                             .rounded_md()
-                                            .bg(rgb(0x090d16))
+                                            .bg(theme.bg)
                                             .border_1()
                                             .border_color(rgb(0x162032))
                                             .flex()
@@ -6029,7 +7246,7 @@ impl WorkspaceView {
                                                     .flex_1()
                                                     .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child(k.public_key_line),
                                             )
                                             .child(
@@ -6046,14 +7263,14 @@ impl WorkspaceView {
                                     .px_3()
                                     .py_1p5()
                                     .rounded_lg()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
-                                    .border_color(rgb(0x1e293b))
+                                    .border_color(theme.border_inactive)
                                     .flex()
                                     .flex_row()
                                     .items_center()
                                     .gap_2()
-                                    .child(div().text_xs().text_color(rgb(0x06b6d4)).child("⚡"))
+                                    .child(div().text_xs().text_color(theme.border_active).child("⚡"))
                                     .child(
                                         div()
                                             .text_xs()
@@ -6079,7 +7296,7 @@ impl WorkspaceView {
                                 div()
                                     .p_3p5()
                                     .rounded_xl()
-                                    .bg(rgb(0x111726))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
                                     .border_color(rgb(0x0e7490))
                                     .flex()
@@ -6101,7 +7318,7 @@ impl WorkspaceView {
                                                         div()
                                                             .text_sm()
                                                             .font_weight(gpui::FontWeight::BOLD)
-                                                            .text_color(rgb(0xf8fafc))
+                                                            .text_color(theme.fg)
                                                             .child("macOS SSH Authentication Agent ($SSH_AUTH_SOCK)"),
                                                     )
                                                     .child(
@@ -6152,9 +7369,9 @@ impl WorkspaceView {
                                 div()
                                     .p_3p5()
                                     .rounded_xl()
-                                    .bg(rgb(0x111726))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
-                                    .border_color(rgb(0x1e293b))
+                                    .border_color(theme.border_inactive)
                                     .flex()
                                     .flex_col()
                                     .gap_2()
@@ -6162,7 +7379,7 @@ impl WorkspaceView {
                                         div()
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
+                                            .text_color(theme.fg)
                                             .child("Add SSH Key to Agent (ssh-add)"),
                                     )
                                     .child(
@@ -6178,16 +7395,16 @@ impl WorkspaceView {
                                                     .px_3()
                                                     .py_2()
                                                     .rounded_md()
-                                                    .bg(rgb(0x090d16))
+                                                    .bg(theme.bg)
                                                     .border_1()
                                                     .border_color(if a_focused {
-                                                        rgb(0x06b6d4)
+                                                        theme.border_active
                                                     } else {
-                                                        rgb(0x1e293b)
+                                                        theme.border_inactive
                                                     })
                                                     .font_family("OpenDyslexic Nerd Font")
                                                     .text_xs()
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .cursor(gpui::CursorStyle::IBeam)
                                                     .on_click(cx.listener(|view, _, window, cx| {
                                                         view.ssh_state.active_input =
@@ -6207,8 +7424,8 @@ impl WorkspaceView {
                                                     .px_3p5()
                                                     .py_2()
                                                     .rounded_md()
-                                                    .bg(rgb(0x06b6d4))
-                                                    .text_color(rgb(0x090d16))
+                                                    .bg(theme.border_active)
+                                                    .text_color(theme.bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -6238,9 +7455,9 @@ impl WorkspaceView {
                                 div()
                                     .p_3p5()
                                     .rounded_xl()
-                                    .bg(rgb(0x111726))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
-                                    .border_color(rgb(0x1e293b))
+                                    .border_color(theme.border_inactive)
                                     .flex()
                                     .flex_col()
                                     .gap_1p5()
@@ -6254,7 +7471,7 @@ impl WorkspaceView {
                                                 div()
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .child(format!(
                                                         "Loaded Key Identities in Memory ({})",
                                                         loaded_ids.len()
@@ -6282,7 +7499,7 @@ impl WorkspaceView {
                                                     .px_3()
                                                     .py_1p5()
                                                     .rounded_md()
-                                                    .bg(rgb(0x090d16))
+                                                    .bg(theme.bg)
                                                     .border_1()
                                                     .border_color(rgb(0x162032))
                                                     .font_family("OpenDyslexic Nerd Font")
@@ -6317,7 +7534,7 @@ impl WorkspaceView {
                                 div()
                                     .p_3p5()
                                     .rounded_xl()
-                                    .bg(rgb(0x111726))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
                                     .border_color(rgb(0x8b5cf6))
                                     .flex()
@@ -6339,8 +7556,8 @@ impl WorkspaceView {
                                                         div()
                                                             .text_sm()
                                                             .font_weight(gpui::FontWeight::BOLD)
-                                                            .text_color(rgb(0xf8fafc))
-                                                            .child("🤖 Well Helper — Autonomous NetOps & Bare-Metal Agent"),
+                                                            .text_color(theme.fg)
+                                                            .child("🤖 Well Helper — NetOps & Bare-Metal Tools"),
                                                     )
                                                     .child(
                                                         div()
@@ -6357,7 +7574,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Orchestrates SSH tunnels, Key Server bootstrap, PXE Option 43 TLV verification, SMB mounts, and UEFI QEMU harnesses."),
                                             ),
                                     ),
@@ -6372,9 +7589,9 @@ impl WorkspaceView {
                                             .flex_1()
                                             .p_3p5()
                                             .rounded_xl()
-                                            .bg(rgb(0x111726))
+                                            .bg(theme.tab_active_bg)
                                             .border_1()
-                                            .border_color(rgb(0x1e293b))
+                                            .border_color(theme.border_inactive)
                                             .flex()
                                             .flex_col()
                                             .gap_2()
@@ -6383,14 +7600,14 @@ impl WorkspaceView {
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .text_color(rgb(0x22d3ee))
-                                                    .child("1. Full Netboot & Key Server Stack Start"),
+                                                    .child("1. Key Server & AgentOS Netboot"),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child(format!(
-                                                        "Starts both the HTTP Authorized Key Server (:8787) and the PXE HTTP iPXE Boot Server (:8080) on {lan_ip}."
+                                                        "Starts the key server on {lan_ip}:8787 and opens the real netboot companion for sudo authorization."
                                                     )),
                                             )
                                             .child(
@@ -6399,43 +7616,23 @@ impl WorkspaceView {
                                                     .px_3()
                                                     .py_1p5()
                                                     .rounded_md()
-                                                    .bg(rgb(0x06b6d4))
-                                                    .text_color(rgb(0x090d16))
+                                                    .bg(theme.border_active)
+                                                    .text_color(theme.bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .cursor(gpui::CursorStyle::PointingHand)
-                                                    .on_click(cx.listener(|view, _, _, cx| {
+                                                    .on_click(cx.listener(|view, _, window, cx| {
                                                         if !view.ssh_state.key_server_running {
-                                                            let stop = std::sync::Arc::new(
-                                                                std::sync::atomic::AtomicBool::new(false),
-                                                            );
-                                                            if start_http_key_server(8787, stop.clone())
-                                                                .is_ok()
-                                                            {
-                                                                view.ssh_state.key_server_running = true;
-                                                                view.ssh_state.key_server_stop = Some(stop);
+                                                            let stop=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                                            match start_http_key_server(8787,stop.clone()) {
+                                                                Ok(_)=>{view.ssh_state.key_server_running=true;view.ssh_state.key_server_stop=Some(stop);}
+                                                                Err(e)=>{view.ssh_state.status_message=Some(e);cx.notify();return;}
                                                             }
                                                         }
-                                                        if !view.ssh_state.pxe_http_running {
-                                                            let stop = std::sync::Arc::new(
-                                                                std::sync::atomic::AtomicBool::new(false),
-                                                            );
-                                                            if start_pxe_http_boot_server(
-                                                                8080,
-                                                                view.ssh_state.pxe_bootfile.clone(),
-                                                                stop.clone(),
-                                                            )
-                                                            .is_ok()
-                                                            {
-                                                                view.ssh_state.pxe_http_running = true;
-                                                                view.ssh_state.pxe_http_stop = Some(stop);
-                                                            }
+                                                        match view.netboot_command() {
+                                                            Ok(command)=>view.dispatch_command_to_split_pane(&command,window,cx),
+                                                            Err(e)=>{view.ssh_state.status_message=Some(e);cx.notify();}
                                                         }
-                                                        view.ssh_state.status_message = Some(
-                                                            "🤖 NetOps Agent: Started HTTP Key Server (:8787) + PXE HTTP Boot Server (:8080)!"
-                                                                .to_string(),
-                                                        );
-                                                        cx.notify();
                                                     }))
                                                     .child("⚡ Activate Key Server + PXE Boot Server"),
                                             ),
@@ -6445,9 +7642,9 @@ impl WorkspaceView {
                                             .flex_1()
                                             .p_3p5()
                                             .rounded_xl()
-                                            .bg(rgb(0x111726))
+                                            .bg(theme.tab_active_bg)
                                             .border_1()
-                                            .border_color(rgb(0x1e293b))
+                                            .border_color(theme.border_inactive)
                                             .flex()
                                             .flex_col()
                                             .gap_2()
@@ -6461,7 +7658,7 @@ impl WorkspaceView {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child(format!(
                                                         "Scans {target_host} across 15 ports (SSH, DHCP, TFTP, SMB, ProxyDHCP 4011) and refreshes ARP neighbors."
                                                     )),
@@ -6473,7 +7670,7 @@ impl WorkspaceView {
                                                     .py_1p5()
                                                     .rounded_md()
                                                     .bg(rgb(0x10b981))
-                                                    .text_color(rgb(0x090d16))
+                                                    .text_color(theme.bg)
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
                                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -6498,9 +7695,9 @@ impl WorkspaceView {
                                 div()
                                     .p_3p5()
                                     .rounded_xl()
-                                    .bg(rgb(0x111726))
+                                    .bg(theme.tab_active_bg)
                                     .border_1()
-                                    .border_color(rgb(0x1e293b))
+                                    .border_color(theme.border_inactive)
                                     .flex()
                                     .flex_row()
                                     .justify_between()
@@ -6514,13 +7711,13 @@ impl WorkspaceView {
                                                 div()
                                                     .text_xs()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .child("3. Interactive Pythia AI + Well Helper Terminal Session"),
                                             )
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Spawn a split terminal pane running live network interface, route, and SSH agent telemetry."),
                                             ),
                                     )
@@ -6560,740 +7757,7 @@ impl WorkspaceView {
                     .child(body)
                     .into_any_element()
             }
-            SshConsoleSection::PxeAndBootloader => {
-                let pxe_subtab = self.ssh_state.pxe_subtab;
-                let pxe_mode = self.ssh_state.pxe_mode;
-                let pxe_arch = self.ssh_state.pxe_arch;
-                let srv_ip_str = self.ssh_state.pxe_server_ip.clone();
-                let http_port_str = self.ssh_state.pxe_http_port.clone();
-                let bootfile_str = self.ssh_state.pxe_bootfile.clone();
-                let pxe_running = self.ssh_state.pxe_http_running;
-                let ip_focused = active_input == SshConsoleInputField::PxeServerIp;
-                let port_focused = active_input == SshConsoleInputField::PxeHttpPort;
-                let file_focused = active_input == SshConsoleInputField::PxeBootFile;
-
-                let parsed_ip = srv_ip_str
-                    .parse::<std::net::Ipv4Addr>()
-                    .unwrap_or(std::net::Ipv4Addr::new(192, 168, 1, 12));
-                let http_port_num = http_port_str.parse::<u16>().unwrap_or(8080);
-                let opt43_bytes = build_legacy_bios_option43(parsed_ip);
-                let opt43_hex: String = opt43_bytes
-                    .iter()
-                    .map(|b| format!("{b:02X}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let dns_opt6 = build_standalone_dns_option6(Some(parsed_ip));
-                let dns_hex: String = dns_opt6
-                    .iter()
-                    .map(|b| format!("{b}"))
-                    .collect::<Vec<_>>()
-                    .join(".");
-                let ipxe_script = generate_strict_ipxe_script(http_port_num, &bootfile_str);
-                let chain_kind = classify_chainload_payload(ipxe_script.as_bytes());
-                let stage2_ok = is_ipxe_stage2_client(Some(b"iPXE"), Some(&[175, 2, 1, 1]));
-                let tftp_sample = TftpAction::from_opcode(3, 1, 512, 1468);
-                let _ = (
-                    matches!(
-                        chain_kind,
-                        ChainloadTargetKind::IpxeScript
-                            | ChainloadTargetKind::UefiPe32Image
-                            | ChainloadTargetKind::Unknown
-                    ),
-                    stage2_ok,
-                    matches!(
-                        tftp_sample,
-                        TftpAction::Ack(_, _) | TftpAction::Error | TftpAction::Ignore
-                    ),
-                );
-                let ipxe_script_copy = ipxe_script.clone();
-                let ipxe_script_write = ipxe_script.clone();
-                let qemu_cmd = build_qemu_uefi_test_command("tftpboot", &bootfile_str);
-                let qemu_cmd_copy = qemu_cmd.clone();
-                let qemu_cmd_run = qemu_cmd.clone();
-
-                let header = div()
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xf8fafc))
-                                    .child("🚀 PXE / ProxyDHCP Server & Custom UEFI Bootloader"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x94a3b8))
-                                    .child("Strict Option 43 TLV, Port 4011 Unicast ProxyDHCP, ${next-server} iPXE & bare-metal no_std UEFI SNP"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .p_1()
-                            .rounded_lg()
-                            .bg(rgb(0x090d16))
-                            .border_1()
-                            .border_color(rgb(0x1e293b))
-                            .flex()
-                            .flex_row()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .id("pxe-subtab-server")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(if pxe_subtab == PxeBootSubtab::PxeServer {
-                                        rgb(0x06b6d4)
-                                    } else {
-                                        gpui::rgba(0x00000000)
-                                    })
-                                    .text_color(if pxe_subtab == PxeBootSubtab::PxeServer {
-                                        rgb(0x090d16)
-                                    } else {
-                                        rgb(0x94a3b8)
-                                    })
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.ssh_state.pxe_subtab = PxeBootSubtab::PxeServer;
-                                        cx.notify();
-                                    }))
-                                    .child("🌐 PXE & ProxyDHCP Server"),
-                            )
-                            .child(
-                                div()
-                                    .id("pxe-subtab-bootloader")
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(if pxe_subtab == PxeBootSubtab::CustomBootloader {
-                                        rgb(0x06b6d4)
-                                    } else {
-                                        gpui::rgba(0x00000000)
-                                    })
-                                    .text_color(if pxe_subtab == PxeBootSubtab::CustomBootloader {
-                                        rgb(0x090d16)
-                                    } else {
-                                        rgb(0x94a3b8)
-                                    })
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor(gpui::CursorStyle::PointingHand)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.ssh_state.pxe_subtab = PxeBootSubtab::CustomBootloader;
-                                        cx.notify();
-                                    }))
-                                    .child("⚙ Custom UEFI Bootloader (ipxe-uefi)"),
-                            ),
-                    );
-
-                let body = match pxe_subtab {
-                    PxeBootSubtab::PxeServer => div()
-                        .flex()
-                        .flex_col()
-                        .gap_2p5()
-                        .child(
-                            div()
-                                .p_3()
-                                .rounded_xl()
-                                .bg(rgb(0x111726))
-                                .border_1()
-                                .border_color(rgb(0x1e293b))
-                                .flex()
-                                .flex_row()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .id("cycle-pxe-mode-btn")
-                                                .px_3()
-                                                .py_1p5()
-                                                .rounded_md()
-                                                .bg(gpui::rgba(0x06b6d428))
-                                                .border_1()
-                                                .border_color(rgb(0x06b6d4))
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0x22d3ee))
-                                                .cursor(gpui::CursorStyle::PointingHand)
-                                                .on_click(cx.listener(|view, _, _, cx| {
-                                                    view.ssh_state.pxe_mode = match view.ssh_state.pxe_mode
-                                                    {
-                                                        PxeServerMode::ProxyDhcp => {
-                                                            PxeServerMode::StandaloneDhcp
-                                                        }
-                                                        PxeServerMode::StandaloneDhcp => {
-                                                            PxeServerMode::ProxyDhcp
-                                                        }
-                                                    };
-                                                    cx.notify();
-                                                }))
-                                                .child(format!("Mode: {} ▾", pxe_mode.label())),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("cycle-pxe-arch-btn")
-                                                .px_2p5()
-                                                .py_1p5()
-                                                .rounded_md()
-                                                .bg(rgb(0x161f33))
-                                                .border_1()
-                                                .border_color(rgb(0x26324d))
-                                                .text_xs()
-                                                .text_color(rgb(0xe2e8f0))
-                                                .cursor(gpui::CursorStyle::PointingHand)
-                                                .on_click(cx.listener(|view, _, _, cx| {
-                                                    view.ssh_state.pxe_arch =
-                                                        view.ssh_state.pxe_arch.next();
-                                                    cx.notify();
-                                                }))
-                                                .child(format!("{} ▾", pxe_arch.label())),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id("toggle-pxe-http-srv")
-                                        .px_3p5()
-                                        .py_1p5()
-                                        .rounded_md()
-                                        .bg(if pxe_running {
-                                            rgb(0xef4444)
-                                        } else {
-                                            rgb(0x10b981)
-                                        })
-                                        .text_color(rgb(0x090d16))
-                                        .text_xs()
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .cursor(gpui::CursorStyle::PointingHand)
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            if view.ssh_state.pxe_http_running {
-                                                if let Some(stop) = view.ssh_state.pxe_http_stop.take() {
-                                                    stop.store(
-                                                        true,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                }
-                                                view.ssh_state.pxe_http_running = false;
-                                                view.ssh_state.status_message = Some(
-                                                    "■ Stopped PXE HTTP Boot Server.".to_string(),
-                                                );
-                                            } else {
-                                                let port = view
-                                                    .ssh_state
-                                                    .pxe_http_port
-                                                    .parse::<u16>()
-                                                    .unwrap_or(8080);
-                                                let stop = std::sync::Arc::new(
-                                                    std::sync::atomic::AtomicBool::new(false),
-                                                );
-                                                match start_pxe_http_boot_server(
-                                                    port,
-                                                    view.ssh_state.pxe_bootfile.clone(),
-                                                    stop.clone(),
-                                                ) {
-                                                    Ok(addr) => {
-                                                        view.ssh_state.pxe_http_running = true;
-                                                        view.ssh_state.pxe_http_stop = Some(stop);
-                                                        view.ssh_state.status_message = Some(format!(
-                                                            "🟢 PXE HTTP Boot Server active on http://{}/{}",
-                                                            addr, view.ssh_state.pxe_bootfile
-                                                        ));
-                                                    }
-                                                    Err(e) => {
-                                                        view.ssh_state.status_message =
-                                                            Some(format!("⚠ {e}"));
-                                                    }
-                                                }
-                                            }
-                                            cx.notify();
-                                        }))
-                                        .child(if pxe_running {
-                                            "■ Stop HTTP Boot (:8080)"
-                                        } else {
-                                            "▶ Start HTTP Boot (:8080)"
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_2p5()
-                                .child(
-                                    div()
-                                        .id("pxe-ip-input")
-                                        .flex_1()
-                                        .px_3()
-                                        .py_1p5()
-                                        .rounded_md()
-                                        .bg(rgb(0x090d16))
-                                        .border_1()
-                                        .border_color(if ip_focused {
-                                            rgb(0x06b6d4)
-                                        } else {
-                                            rgb(0x1e293b)
-                                        })
-                                        .font_family("OpenDyslexic Nerd Font")
-                                        .text_xs()
-                                        .text_color(rgb(0x22d3ee))
-                                        .cursor(gpui::CursorStyle::IBeam)
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.ssh_state.active_input =
-                                                SshConsoleInputField::PxeServerIp;
-                                            cx.notify();
-                                        }))
-                                        .child(if ip_focused {
-                                            format!("siaddr (TFTP/Next-Server): {srv_ip_str}│")
-                                        } else {
-                                            format!("siaddr (TFTP/Next-Server): {srv_ip_str}")
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .id("pxe-port-input")
-                                        .px_3()
-                                        .py_1p5()
-                                        .rounded_md()
-                                        .bg(rgb(0x090d16))
-                                        .border_1()
-                                        .border_color(if port_focused {
-                                            rgb(0x06b6d4)
-                                        } else {
-                                            rgb(0x1e293b)
-                                        })
-                                        .font_family("OpenDyslexic Nerd Font")
-                                        .text_xs()
-                                        .text_color(rgb(0xf8fafc))
-                                        .cursor(gpui::CursorStyle::IBeam)
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.ssh_state.active_input =
-                                                SshConsoleInputField::PxeHttpPort;
-                                            cx.notify();
-                                        }))
-                                        .child(if port_focused {
-                                            format!("HTTP Port: {http_port_str}│")
-                                        } else {
-                                            format!("HTTP Port: {http_port_str}")
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .id("pxe-bootfile-input")
-                                        .px_3()
-                                        .py_1p5()
-                                        .rounded_md()
-                                        .bg(rgb(0x090d16))
-                                        .border_1()
-                                        .border_color(if file_focused {
-                                            rgb(0x06b6d4)
-                                        } else {
-                                            rgb(0x1e293b)
-                                        })
-                                        .font_family("OpenDyslexic Nerd Font")
-                                        .text_xs()
-                                        .text_color(rgb(0x34d399))
-                                        .cursor(gpui::CursorStyle::IBeam)
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.ssh_state.active_input =
-                                                SshConsoleInputField::PxeBootFile;
-                                            cx.notify();
-                                        }))
-                                        .child(if file_focused {
-                                            format!("Bootfile: {bootfile_str}│")
-                                        } else {
-                                            format!("Bootfile: {bootfile_str}")
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .p_3()
-                                .rounded_xl()
-                                .bg(rgb(0x111726))
-                                .border_1()
-                                .border_color(rgb(0x1e293b))
-                                .flex()
-                                .flex_col()
-                                .gap_1p5()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .justify_between()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0xf8fafc))
-                                                .child("Strict Option 43 TLV Layout (26 Bytes: Sub-opt 6=8, Sub-opt 8=IP, Sub-opt 9/10='PXE')"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_family("OpenDyslexic Nerd Font")
-                                                .text_color(rgb(0x34d399))
-                                                .child(if pxe_mode == PxeServerMode::ProxyDhcp {
-                                                    "yiaddr: 0.0.0.0 • Opt 60: PXEClient • Opt 1/3/51 Excluded • Opt 54 Guard".to_string()
-                                                } else {
-                                                    format!("Option 6 DNS + Fallback: {dns_hex}")
-                                                }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .px_3()
-                                        .py_1p5()
-                                        .rounded_md()
-                                        .bg(rgb(0x090d16))
-                                        .border_1()
-                                        .border_color(rgb(0x162032))
-                                        .font_family("OpenDyslexic Nerd Font")
-                                        .text_xs()
-                                        .text_color(rgb(0x22d3ee))
-                                        .child(opt43_hex),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .p_3()
-                                .rounded_xl()
-                                .bg(rgb(0x111726))
-                                .border_1()
-                                .border_color(rgb(0x1e293b))
-                                .flex()
-                                .flex_col()
-                                .gap_1p5()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .justify_between()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0xf8fafc))
-                                                .child("Dynamic iPXE Script (Uses ${next-server} & Unconditional set dns 8.8.8.8)"),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .gap_2()
-                                                .child(
-                                                    div()
-                                                        .id("write-tftpboot-ipxe")
-                                                        .px_2p5()
-                                                        .py_1()
-                                                        .rounded_md()
-                                                        .bg(rgb(0x10b981))
-                                                        .text_color(rgb(0x090d16))
-                                                        .text_xs()
-                                                        .font_weight(gpui::FontWeight::BOLD)
-                                                        .cursor(gpui::CursorStyle::PointingHand)
-                                                        .on_click(cx.listener(move |view, _, _, cx| {
-                                                            let _ = std::fs::create_dir_all("tftpboot");
-                                                            let path = format!(
-                                                                "tftpboot/{}",
-                                                                view.ssh_state.pxe_bootfile
-                                                            );
-                                                            match std::fs::write(&path, &ipxe_script_write)
-                                                            {
-                                                                Ok(()) => {
-                                                                    view.ssh_state.status_message =
-                                                                        Some(format!(
-                                                                        "💾 Wrote strict iPXE script to {path}"
-                                                                    ));
-                                                                }
-                                                                Err(e) => {
-                                                                    view.ssh_state.status_message =
-                                                                        Some(format!("⚠ {e}"));
-                                                                }
-                                                            }
-                                                            cx.notify();
-                                                        }))
-                                                        .child("💾 Save tftpboot/boot.ipxe"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("copy-ipxe-script")
-                                                        .px_2p5()
-                                                        .py_1()
-                                                        .rounded_md()
-                                                        .bg(rgb(0x161f33))
-                                                        .border_1()
-                                                        .border_color(rgb(0x38bdf8))
-                                                        .text_xs()
-                                                        .text_color(rgb(0x38bdf8))
-                                                        .cursor(gpui::CursorStyle::PointingHand)
-                                                        .on_click(cx.listener(move |view, _, _, cx| {
-                                                            cx.write_to_clipboard(
-                                                                gpui::ClipboardItem::new_string(
-                                                                    ipxe_script_copy.clone(),
-                                                                ),
-                                                            );
-                                                            view.ssh_state.status_message = Some(
-                                                                "📋 Copied iPXE script to clipboard!"
-                                                                    .to_string(),
-                                                            );
-                                                            cx.notify();
-                                                        }))
-                                                        .child("📋 Copy Script"),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_md()
-                                        .bg(rgb(0x090d16))
-                                        .border_1()
-                                        .border_color(rgb(0x162032))
-                                        .font_family("OpenDyslexic Nerd Font")
-                                        .text_xs()
-                                        .text_color(rgb(0xe2e8f0))
-                                        .child(ipxe_script),
-                                ),
-                        )
-                        .into_any_element(),
-                    PxeBootSubtab::CustomBootloader => div()
-                        .flex()
-                        .flex_col()
-                        .gap_2p5()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_2p5()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .p_3()
-                                        .rounded_xl()
-                                        .bg(rgb(0x111726))
-                                        .border_1()
-                                        .border_color(rgb(0x06b6d4))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0x22d3ee))
-                                                .child("1. Bare-Metal UEFI SimpleNetworkProtocol (SNP)"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .child("Routes Layer 2 frame RX/TX strictly through firmware-initialized UEFI SNP. Never performs raw PCIe MMIO PHY resets (prevents Intel Haswell/I218-V bus freezes)."),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .p_3()
-                                        .rounded_xl()
-                                        .bg(rgb(0x111726))
-                                        .border_1()
-                                        .border_color(rgb(0xa855f7))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0xc084fc))
-                                                .child("2. DHCP Option 77 ('iPXE') + Option 175 Handshake"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .child("Broadcasts User Class 'iPXE' (Opt 77) and encapsulated Opt 175 in DHCPDISCOVER/REQUEST so pxe-rs transitions from ROM Stage 1 to HTTP Stage 2 without bootloops."),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_2p5()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .p_3()
-                                        .rounded_xl()
-                                        .bg(rgb(0x111726))
-                                        .border_1()
-                                        .border_color(rgb(0x10b981))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0x34d399))
-                                                .child("3. Dual-Path Chainloader (#!ipxe vs MZ PE32/COFF)"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .child("Inspects payload magic bytes before LoadImage: b\"#!ipxe\" evaluates via Evaluator::execute with inherited ${ip}/${server_ip}; b\"MZ\" delegates to UEFI LoadImage + StartImage."),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .p_3()
-                                        .rounded_xl()
-                                        .bg(rgb(0x111726))
-                                        .border_1()
-                                        .border_color(rgb(0xf59e0b))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0xfbbf24))
-                                                .child("4. Zero-Copy TftpAction & Cargo Isolation"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x94a3b8))
-                                                .child("Decouples rx_frame_buffer parsing from send_udp via stack TftpAction::Ack(block, is_eof), and isolates [[bin]] ipxe-uefi with test = false."),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .p_3()
-                                .rounded_xl()
-                                .bg(rgb(0x111726))
-                                .border_1()
-                                .border_color(rgb(0x1e293b))
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .justify_between()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_weight(gpui::FontWeight::BOLD)
-                                                .text_color(rgb(0xf8fafc))
-                                                .child("Headless QEMU EDK2 UEFI Netboot Regression Harness (Slirp DHCP + TFTP + Serial Log)"),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .gap_2()
-                                                .child(
-                                                    div()
-                                                        .id("copy-qemu-uefi-cmd")
-                                                        .px_2p5()
-                                                        .py_1()
-                                                        .rounded_md()
-                                                        .bg(rgb(0x161f33))
-                                                        .border_1()
-                                                        .border_color(rgb(0x38bdf8))
-                                                        .text_xs()
-                                                        .text_color(rgb(0x38bdf8))
-                                                        .cursor(gpui::CursorStyle::PointingHand)
-                                                        .on_click(cx.listener(move |view, _, _, cx| {
-                                                            cx.write_to_clipboard(
-                                                                gpui::ClipboardItem::new_string(
-                                                                    qemu_cmd_copy.clone(),
-                                                                ),
-                                                            );
-                                                            view.ssh_state.status_message = Some(
-                                                                "📋 Copied Headless QEMU EDK2 UEFI command!"
-                                                                    .to_string(),
-                                                            );
-                                                            cx.notify();
-                                                        }))
-                                                        .child("📋 Copy QEMU Cmd"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("run-qemu-uefi-split")
-                                                        .px_3()
-                                                        .py_1()
-                                                        .rounded_md()
-                                                        .bg(rgb(0x10b981))
-                                                        .text_color(rgb(0x090d16))
-                                                        .text_xs()
-                                                        .font_weight(gpui::FontWeight::BOLD)
-                                                        .cursor(gpui::CursorStyle::PointingHand)
-                                                        .on_click(cx.listener(move |view, _, window, cx| {
-                                                            let _ = std::fs::create_dir_all("tftpboot");
-                                                            let _ = std::fs::create_dir_all("target/esp");
-                                                            view.dispatch_command_to_split_pane(
-                                                                &qemu_cmd_run,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        }))
-                                                        .child("▶ Launch QEMU UEFI in Split Pane"),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_md()
-                                        .bg(rgb(0x090d16))
-                                        .border_1()
-                                        .border_color(rgb(0x162032))
-                                        .font_family("OpenDyslexic Nerd Font")
-                                        .text_xs()
-                                        .text_color(rgb(0x22d3ee))
-                                        .child(qemu_cmd),
-                                ),
-                        )
-                        .into_any_element(),
-                };
-
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap_2p5()
-                    .child(header)
-                    .child(body)
-                    .into_any_element()
-            }
+            SshConsoleSection::PxeAndBootloader => self.render_agentos_boot(cx).into_any_element(),
             SshConsoleSection::SmbShares => {
                 let shares = self.ssh_state.smb_shares.clone();
                 let s_host = self.ssh_state.smb_draft_host.clone();
@@ -7319,12 +7783,12 @@ impl WorkspaceView {
                             .id(("smb-share-card", sidx))
                             .p_3()
                             .rounded_xl()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
                             .border_color(if mounted {
                                 rgb(0x10b981)
                             } else {
-                                rgb(0x1e293b)
+                                theme.border_inactive
                             })
                             .flex()
                             .flex_col()
@@ -7356,7 +7820,7 @@ impl WorkspaceView {
                                                 div()
                                                     .text_sm()
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0xf8fafc))
+                                                    .text_color(theme.fg)
                                                     .child(stitle),
                                             ),
                                     )
@@ -7389,7 +7853,7 @@ impl WorkspaceView {
                                             .px_3()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(rgb(0x090d16))
+                                            .bg(theme.bg)
                                             .border_1()
                                             .border_color(rgb(0x162032))
                                             .font_family("OpenDyslexic Nerd Font")
@@ -7404,8 +7868,8 @@ impl WorkspaceView {
                                             .px_2p5()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(rgb(0x06b6d4))
-                                            .text_color(rgb(0x090d16))
+                                            .bg(theme.border_active)
+                                            .text_color(theme.bg)
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .cursor(gpui::CursorStyle::PointingHand)
@@ -7437,9 +7901,7 @@ impl WorkspaceView {
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, window, cx| {
                                                 view.dispatch_command_to_split_pane(
-                                                    &mount_cmd,
-                                                    window,
-                                                    cx,
+                                                    &mount_cmd, window, cx,
                                                 );
                                             }))
                                             .child("🪟 Mount in Split"),
@@ -7455,7 +7917,7 @@ impl WorkspaceView {
                                             .border_1()
                                             .border_color(rgb(0x26324d))
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(theme.fg)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(move |view, _, _, cx| {
                                                 cx.write_to_clipboard(
@@ -7494,13 +7956,13 @@ impl WorkspaceView {
                                         div()
                                             .text_base()
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
+                                            .text_color(theme.fg)
                                             .child("📁 SMB / CIFS Network Shares & Netboot Payload Mounts"),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(theme.fg)
                                             .child("Mount PXE boot shares (WinPE / Kickstart / ISOs) and remote SMB3 volumes directly into /Volumes"),
                                     ),
                             )
@@ -7511,7 +7973,7 @@ impl WorkspaceView {
                                     .py_1p5()
                                     .rounded_lg()
                                     .bg(rgb(0x10b981))
-                                    .text_color(rgb(0x090d16))
+                                    .text_color(theme.bg)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -7546,9 +8008,9 @@ impl WorkspaceView {
                             .px_3()
                             .py_2()
                             .rounded_lg()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_row()
                             .gap_2()
@@ -7560,12 +8022,12 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if host_foc {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x1e293b)
+                                        theme.border_inactive
                                     })
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
@@ -7589,12 +8051,12 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if share_foc {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x1e293b)
+                                        theme.border_inactive
                                     })
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
@@ -7617,16 +8079,16 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if user_foc {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x1e293b)
+                                        theme.border_inactive
                                     })
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
-                                    .text_color(rgb(0xf8fafc))
+                                    .text_color(theme.fg)
                                     .cursor(gpui::CursorStyle::IBeam)
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.ssh_state.active_input =
@@ -7669,16 +8131,16 @@ impl WorkspaceView {
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(rgb(fg))
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|st| st.bg(rgb(0x1e293b)))
+                        .hover(|st| st.bg(theme.border_inactive))
                         .child(label)
                 };
                 let card = || {
                     div()
                         .p_3()
                         .rounded_xl()
-                        .bg(rgb(0x111726))
+                        .bg(theme.tab_active_bg)
                         .border_1()
-                        .border_color(rgb(0x1e293b))
+                        .border_color(theme.border_inactive)
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -7688,12 +8150,17 @@ impl WorkspaceView {
                         .px_3()
                         .py_1p5()
                         .rounded_lg()
-                        .bg(rgb(0x090d16))
+                        .bg(theme.bg)
                         .border_1()
                         .border_color(rgb(0x162032))
                         .flex()
                         .flex_col()
-                        .child(div().text_size(px(10.0)).text_color(rgb(0x64748b)).child(label))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(0x64748b))
+                                .child(label),
+                        )
                         .child(
                             div()
                                 .font_family("OpenDyslexic Nerd Font")
@@ -7715,12 +8182,20 @@ impl WorkspaceView {
                         0xf87171
                     };
                     diag_stats = diag_stats
-                        .child(stat("REPLIES", format!("{}/{}", p.received, p.transmitted), 0x22d3ee))
+                        .child(stat(
+                            "REPLIES",
+                            format!("{}/{}", p.received, p.transmitted),
+                            0x22d3ee,
+                        ))
                         .child(stat("LOSS", format!("{:.0}%", p.loss_percent), loss_color))
                         .child(stat("MIN", format!("{:.2} ms", p.min_ms), 0x34d399))
                         .child(stat("AVG", format!("{:.2} ms", p.avg_ms), 0x38bdf8))
                         .child(stat("MAX", format!("{:.2} ms", p.max_ms), 0xa855f7))
-                        .child(stat("JITTER", format!("{:.2} ms", (p.max_ms - p.min_ms).max(0.0)), 0xfbbf24));
+                        .child(stat(
+                            "JITTER",
+                            format!("{:.2} ms", (p.max_ms - p.min_ms).max(0.0)),
+                            0xfbbf24,
+                        ));
                 } else {
                     diag_stats = diag_stats.child(
                         div()
@@ -7763,7 +8238,7 @@ impl WorkspaceView {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xf8fafc))
+                                    .text_color(theme.fg)
                                     .child(format!(
                                         "Latency & DNS Diagnostics — {n_host}{}",
                                         if busy { "  ⏳" } else { "" }
@@ -7804,13 +8279,13 @@ impl WorkspaceView {
                 // ── Local interfaces ─────────────────────────────────────────
                 let mut iface_grid = div().flex().flex_row().flex_wrap().gap_2();
                 if ifaces.is_empty() {
-                    iface_grid = iface_grid.child(
-                        div().text_xs().text_color(rgb(0x64748b)).child(if busy {
+                    iface_grid = iface_grid.child(div().text_xs().text_color(rgb(0x64748b)).child(
+                        if busy {
                             "Discovering interfaces…"
                         } else {
                             "Click '↻ Refresh All' to enumerate interfaces via ifconfig."
-                        }),
-                    );
+                        },
+                    ));
                 }
                 for (iidx, ifc) in ifaces.iter().enumerate() {
                     let ip_copy = ifc.ip.clone();
@@ -7822,16 +8297,23 @@ impl WorkspaceView {
                             .px_3()
                             .py_2()
                             .rounded_lg()
-                            .bg(rgb(0x090d16))
+                            .bg(theme.bg)
                             .border_1()
-                            .border_color(if ifc.is_up && assigned { rgb(0x10b981) } else { rgb(0x1e293b) })
+                            .border_color(if ifc.is_up && assigned {
+                                rgb(0x10b981)
+                            } else {
+                                theme.border_inactive
+                            })
                             .flex()
                             .flex_col()
                             .gap_0p5()
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(cx.listener(move |view, _, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(ip_copy.clone()));
-                                view.ssh_state.status_message = Some(format!("📋 Copied {ip_copy}"));
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    ip_copy.clone(),
+                                ));
+                                view.ssh_state.status_message =
+                                    Some(format!("📋 Copied {ip_copy}"));
                                 cx.notify();
                             }))
                             .child(
@@ -7840,18 +8322,47 @@ impl WorkspaceView {
                                     .flex_row()
                                     .justify_between()
                                     .items_center()
-                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0xf8fafc)).child(ifc.name.clone()))
+                                    .child(
+                                        div()
+                                            .font_family("OpenDyslexic Nerd Font")
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(theme.fg)
+                                            .child(ifc.name.clone()),
+                                    )
                                     .child(
                                         div()
                                             .text_size(px(10.0))
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(if ifc.is_up { rgb(0x34d399) } else { rgb(0xf87171) })
+                                            .text_color(if ifc.is_up {
+                                                rgb(0x34d399)
+                                            } else {
+                                                rgb(0xf87171)
+                                            })
                                             .child(if ifc.is_up { "● UP" } else { "○ DOWN" }),
                                     ),
                             )
-                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x22d3ee)).child(format!("inet {}", ifc.ip)))
-                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(format!("mask {}", ifc.netmask)))
-                            .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0xa855f7)).child(format!("ether {}", ifc.mac))),
+                            .child(
+                                div()
+                                    .font_family("OpenDyslexic Nerd Font")
+                                    .text_xs()
+                                    .text_color(rgb(0x22d3ee))
+                                    .child(format!("inet {}", ifc.ip)),
+                            )
+                            .child(
+                                div()
+                                    .font_family("OpenDyslexic Nerd Font")
+                                    .text_xs()
+                                    .text_color(rgb(0x64748b))
+                                    .child(format!("mask {}", ifc.netmask)),
+                            )
+                            .child(
+                                div()
+                                    .font_family("OpenDyslexic Nerd Font")
+                                    .text_xs()
+                                    .text_color(rgb(0xa855f7))
+                                    .child(format!("ether {}", ifc.mac)),
+                            ),
                     );
                 }
                 let net_ifaces_panel = card()
@@ -7865,7 +8376,7 @@ impl WorkspaceView {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xf8fafc))
+                                    .text_color(theme.fg)
                                     .child(format!("Local Network Interfaces ({}) — click to copy IP", ifaces.len())),
                             )
                             .child(
@@ -7893,13 +8404,12 @@ impl WorkspaceView {
                 // ── Listening sockets ────────────────────────────────────────
                 let mut sock_rows = div().flex().flex_col().gap_1();
                 if sockets.is_empty() {
-                    sock_rows = sock_rows.child(
-                        div().text_xs().text_color(rgb(0x64748b)).child(if busy {
+                    sock_rows =
+                        sock_rows.child(div().text_xs().text_color(rgb(0x64748b)).child(if busy {
                             "Querying lsof…"
                         } else {
                             "No listening TCP sockets discovered (or lsof unavailable)."
-                        }),
-                    );
+                        }));
                 }
                 for (sidx, sock) in sockets.iter().enumerate() {
                     let port = sock.port;
@@ -7910,7 +8420,7 @@ impl WorkspaceView {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(rgb(0x090d16))
+                            .bg(theme.bg)
                             .border_1()
                             .border_color(rgb(0x162032))
                             .flex()
@@ -7923,10 +8433,37 @@ impl WorkspaceView {
                                     .flex_row()
                                     .gap_3()
                                     .items_center()
-                                    .child(div().w(px(64.0)).font_family("OpenDyslexic Nerd Font").text_xs().font_weight(gpui::FontWeight::BOLD).text_color(rgb(0x34d399)).child(format!(":{port}")))
-                                    .child(div().w(px(40.0)).font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(sock.protocol.clone()))
-                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0xf8fafc)).child(sock.process_name.clone()))
-                                    .child(div().font_family("OpenDyslexic Nerd Font").text_xs().text_color(rgb(0x64748b)).child(format!("pid {}", sock.pid))),
+                                    .child(
+                                        div()
+                                            .w(px(64.0))
+                                            .font_family("OpenDyslexic Nerd Font")
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(rgb(0x34d399))
+                                            .child(format!(":{port}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(40.0))
+                                            .font_family("OpenDyslexic Nerd Font")
+                                            .text_xs()
+                                            .text_color(rgb(0x64748b))
+                                            .child(sock.protocol.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family("OpenDyslexic Nerd Font")
+                                            .text_xs()
+                                            .text_color(theme.fg)
+                                            .child(sock.process_name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family("OpenDyslexic Nerd Font")
+                                            .text_xs()
+                                            .text_color(rgb(0x64748b))
+                                            .child(format!("pid {}", sock.pid)),
+                                    ),
                             )
                             .child(
                                 div()
@@ -7947,7 +8484,9 @@ impl WorkspaceView {
                                                 let _ = std::process::Command::new("open")
                                                     .arg(format!("http://127.0.0.1:{port}"))
                                                     .spawn();
-                                                view.ssh_state.status_message = Some(format!("🌐 Opened http://127.0.0.1:{port}"));
+                                                view.ssh_state.status_message = Some(format!(
+                                                    "🌐 Opened http://127.0.0.1:{port}"
+                                                ));
                                                 cx.notify();
                                             }))
                                             .child("🌐 Open"),
@@ -7985,17 +8524,31 @@ impl WorkspaceView {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xf8fafc))
-                                    .child(format!("Listening TCP Sockets on this Mac ({})", sockets.len())),
+                                    .text_color(theme.fg)
+                                    .child(format!(
+                                        "Listening TCP Sockets on this Mac ({})",
+                                        sockets.len()
+                                    )),
                             )
-                            .child(net_btn("net-established-btn", "⇄ Established Conns", 0x38bdf8, 0x0284c7).on_click(
-                                cx.listener(|view, _, window, cx| {
-                                    view.dispatch_command_to_split_pane("lsof -nP -iTCP -sTCP:ESTABLISHED", window, cx);
-                                }),
-                            )),
+                            .child(
+                                net_btn(
+                                    "net-established-btn",
+                                    "⇄ Established Conns",
+                                    0x38bdf8,
+                                    0x0284c7,
+                                )
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.dispatch_command_to_split_pane(
+                                            "lsof -nP -iTCP -sTCP:ESTABLISHED",
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            ),
                     )
                     .child(sock_rows);
-
 
                 let mut port_badges = div().flex().flex_row().flex_wrap().gap_1p5();
                 if scan_results.is_empty() {
@@ -8015,13 +8568,13 @@ impl WorkspaceView {
                                 .bg(if res.open {
                                     gpui::rgba(0x10b98128)
                                 } else {
-                                    rgb(0x090d16)
+                                    theme.bg
                                 })
                                 .border_1()
                                 .border_color(if res.open {
                                     rgb(0x10b981)
                                 } else {
-                                    rgb(0x1e293b)
+                                    theme.border_inactive
                                 })
                                 .font_family("OpenDyslexic Nerd Font")
                                 .text_xs()
@@ -8055,7 +8608,7 @@ impl WorkspaceView {
                             .px_3()
                             .py_1p5()
                             .rounded_lg()
-                            .bg(rgb(0x090d16))
+                            .bg(theme.bg)
                             .border_1()
                             .border_color(rgb(0x162032))
                             .flex()
@@ -8168,13 +8721,13 @@ impl WorkspaceView {
                                         div()
                                             .text_base()
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
+                                            .text_color(theme.fg)
                                             .child("📡 Networking Tools: Interfaces, Latency, DNS, Sockets, Port Scan, ARP & WoL"),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(theme.fg)
                                             .child("Live L2–L4 diagnostics: ifconfig interfaces, ICMP latency/jitter, DNS resolution, lsof listening sockets, TCP port probes, full ARP table, WoL & PXE sniffing"),
                                     ),
                             )
@@ -8235,9 +8788,9 @@ impl WorkspaceView {
                             .px_3()
                             .py_2()
                             .rounded_lg()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_row()
                             .gap_2()
@@ -8249,12 +8802,12 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if host_foc {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x1e293b)
+                                        theme.border_inactive
                                     })
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
@@ -8277,8 +8830,8 @@ impl WorkspaceView {
                                     .px_3()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x06b6d4))
-                                    .text_color(rgb(0x090d16))
+                                    .bg(theme.border_active)
+                                    .text_color(theme.bg)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -8301,12 +8854,12 @@ impl WorkspaceView {
                                     .px_2p5()
                                     .py_1()
                                     .rounded_md()
-                                    .bg(rgb(0x090d16))
+                                    .bg(theme.bg)
                                     .border_1()
                                     .border_color(if mac_foc {
-                                        rgb(0x06b6d4)
+                                        theme.border_active
                                     } else {
-                                        rgb(0x1e293b)
+                                        theme.border_inactive
                                     })
                                     .font_family("OpenDyslexic Nerd Font")
                                     .text_xs()
@@ -8330,7 +8883,7 @@ impl WorkspaceView {
                                     .py_1()
                                     .rounded_md()
                                     .bg(rgb(0xf59e0b))
-                                    .text_color(rgb(0x090d16))
+                                    .text_color(theme.bg)
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .cursor(gpui::CursorStyle::PointingHand)
@@ -8356,9 +8909,9 @@ impl WorkspaceView {
                         div()
                             .p_3()
                             .rounded_xl()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -8366,7 +8919,7 @@ impl WorkspaceView {
                                 div()
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xf8fafc))
+                                    .text_color(theme.fg)
                                     .child(format!("TCP Port Probe Matrix — {n_host}")),
                             )
                             .child(port_badges),
@@ -8378,9 +8931,9 @@ impl WorkspaceView {
                         div()
                             .p_3()
                             .rounded_xl()
-                            .bg(rgb(0x111726))
+                            .bg(theme.tab_active_bg)
                             .border_1()
-                            .border_color(rgb(0x1e293b))
+                            .border_color(theme.border_inactive)
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -8394,7 +8947,7 @@ impl WorkspaceView {
                                         div()
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(rgb(0xf8fafc))
+                                            .text_color(theme.fg)
                                             .child(format!(
                                                 "Live ARP / LAN Neighbor Table ({} entries)",
                                                 arp_list.len()
@@ -8410,7 +8963,7 @@ impl WorkspaceView {
                                             .border_1()
                                             .border_color(rgb(0x26324d))
                                             .text_xs()
-                                            .text_color(rgb(0x94a3b8))
+                                            .text_color(theme.fg)
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, _, cx| {
                                                 view.ssh_state.net_arp_entries =
@@ -8453,11 +9006,10 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("theia-ssh-modal-box")
-                    .w_full()
-                    .h_full()
-                    .max_w(px(1360.0))
-                    .max_h(px(750.0))
-                    .min_h_0()
+                    .w(relative(0.96))
+                    .h(relative(0.94))
+                    .min_w(px(640.0))
+                    .min_h(px(420.0))
                     .overflow_hidden()
                     .bg(theme.bg)
                     .border_2()
@@ -8512,7 +9064,7 @@ impl WorkspaceView {
                                             .rounded_md()
                                             .bg(rgb(0x121926))
                                             .border_1()
-                                            .border_color(rgb(0x1e293b))
+                                            .border_color(theme.border_inactive)
                                             .flex()
                                             .flex_row()
                                             .items_center()
@@ -8520,17 +9072,26 @@ impl WorkspaceView {
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, window, cx| {
                                                 view.ssh_state.open = false;
-                                                let focus = view.tabs[view.active_tab].active_terminal.read(cx).focus_handle.clone();
+                                                let focus = view.tabs[view.active_tab]
+                                                    .active_terminal
+                                                    .read(cx)
+                                                    .focus_handle
+                                                    .clone();
                                                 window.focus(&focus);
                                                 view.sync_modal_open_flag(cx);
                                                 cx.notify();
                                             }))
-                                            .child(div().size(px(6.0)).rounded_full().bg(rgb(0x22c55e)))
+                                            .child(
+                                                div()
+                                                    .size(px(6.0))
+                                                    .rounded_full()
+                                                    .bg(rgb(0x22c55e)),
+                                            )
                                             .child(
                                                 div()
                                                     .text_size(px(10.5))
                                                     .font_weight(gpui::FontWeight::BOLD)
-                                                    .text_color(rgb(0x94a3b8))
+                                                    .text_color(theme.fg)
                                                     .child("Local (zsh)"),
                                             ),
                                     )
@@ -8542,7 +9103,7 @@ impl WorkspaceView {
                                             .rounded_md()
                                             .bg(rgb(0x121926))
                                             .border_1()
-                                            .border_color(rgb(0x1e293b))
+                                            .border_color(theme.border_inactive)
                                             .flex()
                                             .flex_row()
                                             .items_center()
@@ -8566,8 +9127,8 @@ impl WorkspaceView {
                                             .px_3()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(rgb(0x06b6d4))
-                                            .text_color(rgb(0x090d16))
+                                            .bg(theme.border_active)
+                                            .text_color(theme.bg)
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .flex()
@@ -8602,7 +9163,13 @@ impl WorkspaceView {
                                                 view.sync_modal_open_flag(cx);
                                                 cx.notify();
                                             }))
-                                            .child("⌘K"),
+                                            .child(
+                                                shortcut_for(
+                                                    "well::OpenCommandPalette",
+                                                    &self.settings.read(cx).custom_bindings,
+                                                )
+                                                .to_owned(),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -8618,7 +9185,10 @@ impl WorkspaceView {
                                             .cursor(gpui::CursorStyle::PointingHand)
                                             .on_click(cx.listener(|view, _, window, cx| {
                                                 view.settings_view.update(cx, |sv, cx| {
-                                                    sv.set_section(SettingsSection::AppearancePrism, cx);
+                                                    sv.set_section(
+                                                        SettingsSection::AppearancePrism,
+                                                        cx,
+                                                    );
                                                 });
                                                 view.toggle_settings_modal(window, cx);
                                             }))
@@ -8630,7 +9200,7 @@ impl WorkspaceView {
                                             .px_3()
                                             .py_1()
                                             .rounded_md()
-                                            .bg(rgb(0x1e293b))
+                                            .bg(theme.border_inactive)
                                             .border_1()
                                             .border_color(rgb(0x334155))
                                             .text_color(rgb(0xf1f5f9))
@@ -8672,7 +9242,7 @@ impl WorkspaceView {
                                             .rounded_md()
                                             .bg(gpui::rgba(0x06b6d422))
                                             .border_1()
-                                            .border_color(rgb(0x06b6d4))
+                                            .border_color(theme.border_active)
                                             .text_color(rgb(0x22d3ee))
                                             .text_xs()
                                             .child(msg)
@@ -8706,11 +9276,10 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("theia-prism-modal-box")
-                    .w_full()
-                    .h_full()
-                    .max_w(px(1360.0))
-                    .max_h(px(750.0))
-                    .min_h_0()
+                    .w(relative(0.96))
+                    .h(relative(0.94))
+                    .min_w(px(640.0))
+                    .min_h(px(420.0))
                     .flex()
                     .flex_col()
                     .overflow_hidden()
@@ -8725,7 +9294,8 @@ impl WorkspaceView {
     fn render_command_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.settings.read(cx).theme.clone();
         let query = self.palette_query.clone();
-        let filtered = filter_actions(&query);
+        let filtered =
+            filter_actions_with_bindings(&query, &self.settings.read(cx).custom_bindings);
         let total = filtered.len();
         let selected_idx = if total == 0 {
             0
@@ -8754,18 +9324,13 @@ impl WorkspaceView {
                     .child("No matching actions found in WELL_ACTIONS registry."),
             );
         } else {
-            for (idx, act) in filtered
-                .iter()
-                .enumerate()
-                .skip(page_start)
-                .take(page_size)
-            {
+            for (idx, act) in filtered.iter().enumerate().skip(page_start).take(page_size) {
                 let is_selected = idx == selected_idx;
                 let act_id = act.id;
                 let cat_label = act.category.as_str();
                 let label = act.label;
                 let desc = act.description;
-                let kb = act.default_keybind;
+                let kb = shortcut_for(act.id, &self.settings.read(cx).custom_bindings).to_owned();
                 let ctx_scope = act.key_context;
 
                 list_col = list_col.child(
@@ -8776,9 +9341,17 @@ impl WorkspaceView {
                         .px_3()
                         .py_2()
                         .rounded_lg()
-                        .bg(if is_selected { theme.tab_active_bg } else { theme.tab_inactive_bg })
+                        .bg(if is_selected {
+                            theme.tab_active_bg
+                        } else {
+                            theme.tab_inactive_bg
+                        })
                         .border_1()
-                        .border_color(if is_selected { theme.border_active } else { theme.border_inactive })
+                        .border_color(if is_selected {
+                            theme.border_active
+                        } else {
+                            theme.border_inactive
+                        })
                         .flex()
                         .flex_row()
                         .justify_between()
@@ -8890,7 +9463,9 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("command-palette-box")
-                    .w(px(900.0))
+                    .w(relative(0.76))
+                    .min_w(px(540.0))
+                    .max_w(px(1360.0))
                     .overflow_hidden()
                     .bg(theme.bg)
                     .border_2()
@@ -8911,7 +9486,7 @@ impl WorkspaceView {
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .text_color(theme.border_active)
-                                    .child("⌘ COMMAND PALETTE — LABELED FUNCTION REGISTRY (⇧⌘P)"),
+                                    .child("Command Palette"),
                             )
                             .child(
                                 div()
@@ -9103,7 +9678,10 @@ impl WorkspaceView {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        let filtered = filter_actions(&self.palette_query);
+        let filtered = filter_actions_with_bindings(
+            &self.palette_query,
+            &self.settings.read(cx).custom_bindings,
+        );
         let total = filtered.len();
         let selected_idx = if total == 0 {
             0
@@ -9348,6 +9926,12 @@ impl WorkspaceView {
                     SshConsoleInputField::PxeHttpPort => {
                         self.ssh_state.pxe_http_port.pop();
                     }
+                    SshConsoleInputField::BootSource => {
+                        self.ssh_state.boot_source.pop();
+                    }
+                    SshConsoleInputField::BootLeaseRange => {
+                        self.ssh_state.boot_lease_range.pop();
+                    }
                     SshConsoleInputField::PxeBootFile => {
                         self.ssh_state.pxe_bootfile.pop();
                     }
@@ -9431,6 +10015,12 @@ impl WorkspaceView {
                                 self.ssh_state.pxe_http_port.push_str(&ch);
                             }
                         }
+                        SshConsoleInputField::BootSource => {
+                            self.ssh_state.boot_source.push_str(&ch);
+                        }
+                        SshConsoleInputField::BootLeaseRange => {
+                            self.ssh_state.boot_lease_range.push_str(&ch);
+                        }
                         SshConsoleInputField::PxeBootFile => {
                             self.ssh_state.pxe_bootfile.push_str(&ch);
                         }
@@ -9469,30 +10059,38 @@ impl Render for WorkspaceView {
                 settings.show_line_numbers,
             )
         };
-        if self.palette_open && !self.palette_focus_handle.is_focused(window) {
-            window.focus(&self.palette_focus_handle);
-        } else if self.ssh_state.open && !self.ssh_focus_handle.is_focused(window) {
-            window.focus(&self.ssh_focus_handle);
+        // Select the owner first. An already-focused modal must never fall
+        // through to the terminal: that alternated focus on every blink frame.
+        let desired_focus = if self.palette_open {
+            self.palette_focus_handle.clone()
+        } else if self.ssh_state.open {
+            self.ssh_focus_handle.clone()
         } else if settings_open {
-            let sf = self.settings_view.read(cx).focus_handle.clone();
-            if !sf.is_focused(window) {
-                window.focus(&sf);
-            }
+            self.settings_view.read(cx).focus_handle.clone()
         } else {
-            let active_term_handle = self.tabs[self.active_tab]
+            self.tabs[self.active_tab]
                 .active_terminal
                 .read(cx)
                 .focus_handle
-                .clone();
-            if !active_term_handle.is_focused(window) {
-                window.focus(&active_term_handle);
-            }
+                .clone()
+        };
+        if !desired_focus.is_focused(window) {
+            window.focus(&desired_focus);
         }
 
         let active_tab_idx = self.active_tab;
         let active_tab = &self.tabs[active_tab_idx];
         let is_active_ssh = active_tab.is_ssh;
-        let (git_branch, is_dirty, rows, cols, active_line_no, active_col_no, mneme_active, pythia_active) = {
+        let (
+            git_branch,
+            is_dirty,
+            rows,
+            cols,
+            active_line_no,
+            active_col_no,
+            mneme_active,
+            pythia_active,
+        ) = {
             let active_term = active_tab.active_terminal.read(cx);
             let snap = active_term.astraea.read_snapshot();
             let branch = if !snap.git_branch.is_empty() {
@@ -9527,7 +10125,15 @@ impl Render for WorkspaceView {
                 active_term.pythia.active,
             )
         };
-        let footer_hints = footer_hints_for_context(mneme_active, pythia_active, is_active_ssh);
+        let footer_hints = {
+            let settings = self.settings.read(cx);
+            footer_hints_for_context(
+                mneme_active,
+                pythia_active,
+                is_active_ssh,
+                &settings.custom_bindings,
+            )
+        };
         let tab_title = active_tab.title.clone();
 
         // Tier 1 Left: ❖ THEIA + [● Local (zsh)] + [+ >_ Terminal] + [🖧 Host]

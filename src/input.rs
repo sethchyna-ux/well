@@ -101,6 +101,52 @@ pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
         text.replace('\n', "\r").into_bytes()
     }
 }
+/// Encode xterm mouse reports. Coordinates are zero based at this boundary.
+pub fn mouse(
+    button: u8,
+    pressed: bool,
+    row: u16,
+    col: u16,
+    modifiers: ModifiersState,
+    encoding: well_shell::pty::MouseProtocolEncoding,
+) -> Option<Vec<u8>> {
+    use well_shell::pty::MouseProtocolEncoding;
+    let flags = (modifiers.shift_key() as u8 * 4)
+        | (modifiers.alt_key() as u8 * 8)
+        | (modifiers.control_key() as u8 * 16);
+    let code = button | flags;
+    match encoding {
+        MouseProtocolEncoding::Sgr => Some(
+            format!(
+                "\x1b[<{code};{};{}{}",
+                col as u32 + 1,
+                row as u32 + 1,
+                if pressed { 'M' } else { 'm' }
+            )
+            .into_bytes(),
+        ),
+        MouseProtocolEncoding::Default if row < 223 && col < 223 => Some(vec![
+            27,
+            b'[',
+            b'M',
+            if pressed { code } else { 3 | flags } + 32,
+            col as u8 + 33,
+            row as u8 + 33,
+        ]),
+        MouseProtocolEncoding::Utf8 if row < 2015 && col < 2015 => {
+            let mut report = String::from("\x1b[M");
+            for value in [
+                if pressed { code } else { 3 | flags } as u32 + 32,
+                col as u32 + 33,
+                row as u32 + 33,
+            ] {
+                report.push(char::from_u32(value)?);
+            }
+            Some(report.into_bytes())
+        }
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -149,51 +195,5 @@ mod tests {
         assert_eq!(paste("a\r\nb", true), b"\x1b[200~a\nb\x1b[201~");
         assert_eq!(paste("a\nb", false), b"a\rb");
         assert_eq!(paste("\x1b[201~", true), b"\x1b[200~[201~\x1b[201~");
-    }
-}
-/// Encode xterm mouse reports. Coordinates are zero based at this boundary.
-pub fn mouse(
-    button: u8,
-    pressed: bool,
-    row: u16,
-    col: u16,
-    modifiers: ModifiersState,
-    encoding: well_shell::pty::MouseProtocolEncoding,
-) -> Option<Vec<u8>> {
-    use well_shell::pty::MouseProtocolEncoding;
-    let flags = (modifiers.shift_key() as u8 * 4)
-        | (modifiers.alt_key() as u8 * 8)
-        | (modifiers.control_key() as u8 * 16);
-    let code = button | flags;
-    match encoding {
-        MouseProtocolEncoding::Sgr => Some(
-            format!(
-                "\x1b[<{code};{};{}{}",
-                col as u32 + 1,
-                row as u32 + 1,
-                if pressed { 'M' } else { 'm' }
-            )
-            .into_bytes(),
-        ),
-        MouseProtocolEncoding::Default if row < 223 && col < 223 => Some(vec![
-            27,
-            b'[',
-            b'M',
-            if pressed { code } else { 3 | flags } + 32,
-            col as u8 + 33,
-            row as u8 + 33,
-        ]),
-        MouseProtocolEncoding::Utf8 if row < 2015 && col < 2015 => {
-            let mut report = String::from("\x1b[M");
-            for value in [
-                if pressed { code } else { 3 | flags } as u32 + 32,
-                col as u32 + 33,
-                row as u32 + 33,
-            ] {
-                report.push(char::from_u32(value)?);
-            }
-            Some(report.into_bytes())
-        }
-        _ => None,
     }
 }

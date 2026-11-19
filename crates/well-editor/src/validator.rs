@@ -273,7 +273,45 @@ fn node_has_child_kind(node: Node<'_>, expected_kind: &str) -> bool {
 
 /// Inspects the syntax tree for destructive patterns:
 /// e.g. rm -rf /, mkfs, raw disk redirection (> /dev/sd*), fork bombs.
+#[derive(Clone, Copy, Debug)]
+pub struct SafetyPolicy {
+    pub root_removal: bool,
+    pub cluster_delete: bool,
+    pub force_push: bool,
+    pub terraform_destroy: bool,
+}
+impl Default for SafetyPolicy {
+    fn default() -> Self {
+        Self {
+            root_removal: true,
+            cluster_delete: true,
+            force_push: true,
+            terraform_destroy: true,
+        }
+    }
+}
+/// Revalidate current text at execution; background results may describe an older edit.
+pub fn check_destructive_sync(text: &str, policy: SafetyPolicy) -> Option<String> {
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return Some("Safety parser unavailable".into());
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return Some("Safety validation failed".into());
+    };
+    inspect_destructive_with_policy(tree.root_node(), text, policy)
+}
 fn inspect_destructive_commands(node: Node<'_>, text: &str) -> Option<String> {
+    inspect_destructive_with_policy(node, text, SafetyPolicy::default())
+}
+fn inspect_destructive_with_policy(
+    node: Node<'_>,
+    text: &str,
+    policy: SafetyPolicy,
+) -> Option<String> {
     if node.kind() == "command" {
         let mut command_name = None;
         let mut args = Vec::new();
@@ -292,7 +330,7 @@ fn inspect_destructive_commands(node: Node<'_>, text: &str) -> Option<String> {
         }
 
         if let Some(cmd) = command_name {
-            if cmd == "rm" {
+            if cmd == "rm" && policy.root_removal {
                 let has_recursive = args
                     .iter()
                     .any(|a| *a == "-r" || *a == "-rf" || *a == "-fr");
@@ -326,7 +364,7 @@ fn inspect_destructive_commands(node: Node<'_>, text: &str) -> Option<String> {
                             .into(),
                     );
                 }
-            } else if cmd == "kubectl" {
+            } else if cmd == "kubectl" && policy.cluster_delete {
                 let is_delete = args.iter().any(|a| a.contains("delete"));
                 let has_all = args.iter().any(|a| a.contains("--all") || a.contains("-A"));
                 let targets_critical = args.iter().any(|a| {
@@ -347,7 +385,7 @@ fn inspect_destructive_commands(node: Node<'_>, text: &str) -> Option<String> {
                 let targets_main = args.iter().any(|a| {
                     *a == "main" || *a == "master" || *a == "production" || *a == "release"
                 });
-                if is_push && is_force && targets_main {
+                if is_push && is_force && targets_main && policy.force_push {
                     return Some(
                         "⚠️ Destructive command warning: force push to production branch detected"
                             .into(),
@@ -358,7 +396,7 @@ fn inspect_destructive_commands(node: Node<'_>, text: &str) -> Option<String> {
                 if is_reset && is_hard {
                     return Some("⚠️ Destructive command warning: git reset --hard will discard uncommitted changes".into());
                 }
-            } else if cmd == "terraform" {
+            } else if cmd == "terraform" && policy.terraform_destroy {
                 let is_destroy = args.contains(&"destroy");
                 let auto_approve = args
                     .iter()
@@ -372,7 +410,7 @@ fn inspect_destructive_commands(node: Node<'_>, text: &str) -> Option<String> {
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if let Some(warn) = inspect_destructive_commands(child, text) {
+        if let Some(warn) = inspect_destructive_with_policy(child, text, policy) {
             return Some(warn);
         }
     }

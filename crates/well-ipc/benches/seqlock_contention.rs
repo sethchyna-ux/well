@@ -16,10 +16,12 @@ fn main() {
         let writer_lock = Arc::clone(&seqlock);
         s.spawn(move || {
             for seq in 0..iterations_per_thread {
-                let mut state = HermesViewportState::default();
-                state.cursor_row = (seq % 80) as u16;
-                state.cursor_col = (seq % 120) as u16;
-                state.generation = seq;
+                let state = HermesViewportState {
+                    cursor_row: (seq % 80) as u16,
+                    cursor_col: (seq % 120) as u16,
+                    generation: seq,
+                    ..Default::default()
+                };
                 writer_lock.write(state);
             }
         });
@@ -69,8 +71,7 @@ fn main() {
         }
     });
     let shm_elapsed = shm_start.elapsed();
-    let gib_per_sec =
-        (total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)) / shm_elapsed.as_secs_f64();
+    let gib_per_sec = (total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)) / shm_elapsed.as_secs_f64();
 
     let summary = format!(
         "=== Hermes Seqlock & Shared-Memory Ring Benchmark ===\nseqlock_reads={total_reads} elapsed={seqlock_elapsed:?} mean_read_ns={ns_per_read}ns\nshm_bytes={total_bytes} elapsed={shm_elapsed:?} throughput_gib_s={gib_per_sec:.2} GiB/s\n"

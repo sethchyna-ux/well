@@ -107,9 +107,10 @@ impl TheiaSshProfile {
         let mut target = base_target;
         if self.forward_caduceus_ipc {
             target.extra_args.push("-R".into());
-            target
-                .extra_args
-                .push("/tmp/well-caduceus.sock:/tmp/well-caduceus.sock".into());
+            target.extra_args.push(format!(
+                "/tmp/well-caduceus.sock:{}",
+                well_ipc::runtime::socket_path().display()
+            ));
         }
         if self.use_control_master {
             target.extra_args.push("-o".into());
@@ -179,6 +180,9 @@ mod tests {
         let enriched = profile.build_target(base);
         let cmd_args = enriched.to_command_args();
         assert!(cmd_args.contains(&"-R".to_string()));
-        assert!(cmd_args.contains(&"/tmp/well-caduceus.sock:/tmp/well-caduceus.sock".to_string()));
+        assert!(cmd_args.contains(&format!(
+            "/tmp/well-caduceus.sock:{}",
+            well_ipc::runtime::socket_path().display()
+        )));
     }
 }

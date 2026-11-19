@@ -5,7 +5,19 @@ use vt100::Color;
 pub fn convert_color(color: Color, default: Rgba, theme: &Theme) -> Rgba {
     match color {
         Color::Default => default,
-        Color::Idx(i) => theme.ansi_colors[(i as usize) % 16],
+        Color::Idx(i @ 0..=15) => theme.ansi_colors[i as usize],
+        Color::Idx(i @ 16..=231) => {
+            let n = i as u32 - 16;
+            let levels = [0, 95, 135, 175, 215, 255];
+            rgb((levels[(n / 36) as usize] << 16)
+                | (levels[((n / 6) % 6) as usize] << 8)
+                | levels[(n % 6) as usize])
+        }
+        Color::Idx(i) => {
+            let c = 8 + 10 * (i as u32 - 232);
+            rgb((c << 16) | (c << 8) | c)
+        }
+
         Color::Rgb(r, g, b) => rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32)),
     }
 }
@@ -50,6 +62,12 @@ pub fn calculate_grid_dimensions_for_font(
     let cols = (width / char_width).floor().clamp(1.0, 500.0) as u16;
     let rows = (height / line_height).floor().clamp(1.0, 200.0) as u16;
     (cols, rows)
+}
+
+pub fn image_format(bytes: &[u8]) -> Result<gpui::ImageFormat, String> {
+    let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
+    gpui::ImageFormat::from_mime_type(format.to_mime_type())
+        .ok_or_else(|| "Image format is not supported by GPUI".into())
 }
 
 #[cfg(test)]
@@ -98,6 +116,23 @@ mod tests {
 
     #[test]
     fn test_convert_color_mappings() {
+        let theme = Theme::get(0);
+        assert_eq!(
+            convert_color(Color::Idx(196), theme.fg, &theme),
+            rgb(0xff0000)
+        );
+        assert_eq!(
+            convert_color(Color::Idx(231), theme.fg, &theme),
+            rgb(0xffffff)
+        );
+        assert_eq!(
+            convert_color(Color::Idx(232), theme.fg, &theme),
+            rgb(0x080808)
+        );
+        assert_eq!(
+            convert_color(Color::Idx(255), theme.fg, &theme),
+            rgb(0xeeeeee)
+        );
         let theme = Theme::theia_prism();
         let default_color = rgb(0x123456);
 

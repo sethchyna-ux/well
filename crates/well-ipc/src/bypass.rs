@@ -105,9 +105,9 @@ pub enum BypassExecutionMode {
 #[repr(C, align(64))]
 struct ShmRingHeader {
     write_pos: std::sync::atomic::AtomicUsize,
-    _pad0: [u8; 64 - std::mem::size_of::< std::sync::atomic::AtomicUsize>()],
+    _pad0: [u8; 64 - std::mem::size_of::<std::sync::atomic::AtomicUsize>()],
     read_pos: std::sync::atomic::AtomicUsize,
-    _pad1: [u8; 64 - std::mem::size_of::< std::sync::atomic::AtomicUsize>()],
+    _pad1: [u8; 64 - std::mem::size_of::<std::sync::atomic::AtomicUsize>()],
     capacity: usize,
 }
 

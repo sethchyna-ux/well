@@ -397,13 +397,10 @@ impl MnemeEditor {
             let token = self.buffer.slice(start..cursor).to_string();
             let clean_token = token.trim_start_matches(':');
             if !clean_token.is_empty() {
-                if let Some(snippet) = catalog
-                    .iter()
-                    .find(|s| {
-                        (s.trigger == token || s.trigger.trim_start_matches(':') == clean_token)
-                            && s.scope.matches_context(is_ssh)
-                    })
-                {
+                if let Some(snippet) = catalog.iter().find(|s| {
+                    (s.trigger == token || s.trigger.trim_start_matches(':') == clean_token)
+                        && s.scope.matches_context(is_ssh)
+                }) {
                     let snippet_clone = snippet.clone();
                     self.expand_snippet(&snippet_clone, Some(start..cursor));
                     return true;

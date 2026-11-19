@@ -9,8 +9,7 @@ use std::thread;
 use well_ipc::ring_buffer::RingBuffer;
 use well_ipc::TypedBlock;
 use well_render::{
-    extract_text_from_screen, vt100_color_to_rgb, CellBuildOptions, OrpheusRenderer,
-    SelectionRange,
+    extract_text_from_screen, vt100_color_to_rgb, CellBuildOptions, OrpheusRenderer, SelectionRange,
 };
 
 // =========================================================================
@@ -609,7 +608,9 @@ fn test_ring_buffer_consumer_early_drop_rejection() {
         "Producer must detect disconnected consumer"
     );
     let item = TypedBlock::StdoutChunk(b"dropped".to_vec());
-    let err = producer.try_push(item).expect_err("Pushing to closed consumer must fail");
+    let err = producer
+        .try_push(item)
+        .expect_err("Pushing to closed consumer must fail");
     match err {
         TypedBlock::StdoutChunk(bytes) => assert_eq!(bytes, b"dropped"),
         _ => panic!("Expected returned item"),
@@ -682,4 +683,3 @@ fn test_extract_text_and_build_cells_minimal_screen() {
     );
     assert_eq!(instances[0].grid_position, [0, 0]);
 }
-

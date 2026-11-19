@@ -3,6 +3,7 @@
 //! Provides intelligent multi-provider Natural Language to Shell synthesis,
 //! stderr diagnosis, command explanation, and offline semantic rules.
 
+pub mod artifacts;
 pub mod gemini;
 pub mod gguf;
 pub mod huggingface;
@@ -34,7 +35,9 @@ pub enum LlmProvider {
     Gemini,
     OpenAI,
     Ollama,
-    LocalGguf { model_path: std::path::PathBuf },
+    LocalGguf {
+        model_path: std::path::PathBuf,
+    },
     HuggingFaceGemmaAbliterated,
     #[default]
     OfflineRules,
@@ -328,9 +331,10 @@ impl PythiaTranslator {
                 );
             }
 
-            let is_mock = std::env::var("WELL_MOCK_LLM")
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            let is_mock = (cfg!(test) || cfg!(feature = "test-support"))
+                && std::env::var("WELL_MOCK_LLM")
+                    .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
             let cache_dir = match image_cache_directory() {
                 Ok(cache_dir) => cache_dir,
                 Err(error) => {
@@ -377,6 +381,17 @@ impl PythiaTranslator {
                 );
             }
 
+            if let Err(error) = artifacts::record(
+                &path,
+                artifacts::ImageMetadata {
+                    prompt: img_prompt.into(),
+                    provider: req.provider.clone(),
+                    width,
+                    height,
+                },
+            ) {
+                eprintln!("[Well-LLM] Image saved but history metadata failed: {error}");
+            }
             let explanation = if is_mock {
                 format!(
                     "Created a test-only mock PNG for \"{}\" (WELL_MOCK_LLM is enabled).",

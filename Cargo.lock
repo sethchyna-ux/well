@@ -10732,6 +10732,8 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "well-ipc",
@@ -10778,12 +10780,14 @@ dependencies = [
  "toml 0.8.23",
  "vt100",
  "well-config",
+ "well-core",
  "well-editor",
  "well-ipc",
  "well-llm",
  "well-prompt",
  "well-render",
  "well-shell",
+ "well-ssh",
  "well-wasm",
 ]
 
@@ -10826,6 +10830,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 1.0.69",
  "ureq",
  "well-core",
@@ -10900,11 +10905,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "keyring",
+ "portable-pty",
  "ring",
  "russh",
  "russh-keys",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "well-ipc",
 ]
 
 [[package]]

@@ -92,4 +92,3 @@ mod tests {
         assert_eq!(badges, vec!["[telemetry:100]".to_string()]);
     }
 }
-

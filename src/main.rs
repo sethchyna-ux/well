@@ -156,16 +156,14 @@ impl WellApp {
                 }
                 return Ok(());
             }
-            Action::SwitchTab(index)
-                if self.session.as_ref().map_or(false, |w| index >= w.len()) =>
-            {
+            Action::SwitchTab(index) if self.session.as_ref().is_some_and(|w| index >= w.len()) => {
                 return Err(format!("Tab index {index} does not exist"));
             }
             Action::SwitchTab(index)
                 if self
                     .session
                     .as_ref()
-                    .map_or(false, |w| index == w.active_index()) =>
+                    .is_some_and(|w| index == w.active_index()) =>
             {
                 return Ok(())
             }
@@ -173,7 +171,7 @@ impl WellApp {
                 if self
                     .session
                     .as_ref()
-                    .map_or(false, |w| w.len() >= workspace::MAX_TABS) =>
+                    .is_some_and(|w| w.len() >= workspace::MAX_TABS) =>
             {
                 return Err(format!("The limit is {} tabs", workspace::MAX_TABS));
             }
@@ -447,16 +445,14 @@ impl WellApp {
                         let _ = respond_to.send(result);
                     }
                 }
-                HermesAppCommand::GetAstraeaState { respond_to } => {
-                    if !respond_to.is_closed() {
-                        let result = if let Some(session) = &self.session {
-                            let snap = session.astraea.read_snapshot();
-                            serde_json::to_value(&snap).map_err(|e| e.to_string())
-                        } else {
-                            Err("Workspace is not ready".to_string())
-                        };
-                        let _ = respond_to.send(result);
-                    }
+                HermesAppCommand::GetAstraeaState { respond_to } if !respond_to.is_closed() => {
+                    let result = if let Some(session) = &self.session {
+                        let snap = session.astraea.read_snapshot();
+                        serde_json::to_value(&snap).map_err(|e| e.to_string())
+                    } else {
+                        Err("Workspace is not ready".to_string())
+                    };
+                    let _ = respond_to.send(result);
                 }
                 _ => {}
             }
@@ -953,11 +949,9 @@ impl ApplicationHandler<AppEvent> for WellApp {
             )?;
             session.set_astraea_config(self.preferences.prompt.clone());
             if let Some(target) = self.initial_ssh.take() {
-                if let Ok(_) = session.new_ssh_tab(target) {
-                    if session.len() > 1 {
-                        let _ = session.switch_tab(0);
-                        session.close_tab();
-                    }
+                if session.new_ssh_tab(target).is_ok() && session.len() > 1 {
+                    let _ = session.switch_tab(0);
+                    session.close_tab();
                 }
             }
             self.window = Some(window);

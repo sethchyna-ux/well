@@ -154,7 +154,9 @@ impl OfflineRuleEngine {
         if q == "list files" || q == "show files" || q.contains("list all files") {
             return Some(OfflineTranslation {
                 command: "ls -la".to_string(),
-                explanation: "Lists all files and directories including hidden entries with permissions.".to_string(),
+                explanation:
+                    "Lists all files and directories including hidden entries with permissions."
+                        .to_string(),
                 confidence: 0.99,
             });
         }

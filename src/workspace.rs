@@ -391,9 +391,11 @@ impl Workspace {
         .map_err(|e| e.to_string())?;
 
         let title = format!("🌐 {host_name}");
-        let mut astraea = well_prompt::AstraeaSnapshot::default();
-        astraea.is_ssh = true;
-        astraea.git_branch = host_name.clone();
+        let astraea = well_prompt::AstraeaSnapshot {
+            is_ssh: true,
+            git_branch: host_name.clone(),
+            ..Default::default()
+        };
 
         self.ssh_engine.register_session(id, target);
 

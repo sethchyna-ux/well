@@ -1,0 +1,36 @@
+diff --git a/microvm/build.zig b/microvm/build.zig
+index d6d104d..f5aaabd 100644
+--- a/microvm/build.zig
++++ b/microvm/build.zig
+@@ -64,6 +64,10 @@ pub fn build(b: *std.Build) void {
+     unikernel.entry = .{ .symbol_name = "_pvh_start32" };
+ 
+     b.installArtifact(unikernel);
++    const kernel_only = b.step("kernel", "Build only the canonical AgentOS kernel payload");
++    const kernel_install = b.addInstallArtifact(unikernel, .{});
++    kernel_only.dependOn(&kernel_install.step);
++
+ 
+     // Also install as agent_os_unikernel.elf for backwards compatibility with existing run scripts
+     const install_compat_elf = b.addInstallBinFile(unikernel.getEmittedBin(), "agent_os_unikernel.elf");
+@@ -113,7 +117,7 @@ pub fn build(b: *std.Build) void {
+     const uefi_boot = b.addExecutable(.{
+         .name = "BOOTX64",
+         .root_module = b.createModule(.{
+-            .root_source_file = b.path("boot/uefi_main.zig"),
++            .root_source_file = .{ .cwd_relative = b.option([]const u8, "well-loader", "Canonical Well loader source path") orelse "../../well/boot/agentos/src/main.zig" },
+             .target = uefi_target,
+             .optimize = optimize,
+         }),
+@@ -122,8 +126,11 @@ pub fn build(b: *std.Build) void {
+         .root_source_file = generated_hash_zig,
+         .target = uefi_target,
+     });
++    uefi_boot.root_module.addAnonymousImport("kernel_payload", .{ .root_source_file = unikernel.getEmittedBin() });
++    uefi_boot.root_module.addImport("protocol", b.createModule(.{ .root_source_file = b.path("boot/protocol.zig"), .target = uefi_target }));
+     b.installArtifact(uefi_boot);
+ 
++
+     // ========================================================================
+     // 5. HOST UNIT TESTS (`zig build test`)
+     // ========================================================================

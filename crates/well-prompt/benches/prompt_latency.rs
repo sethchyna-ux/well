@@ -4,7 +4,9 @@ use std::fs;
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use well_prompt::{AstraeaCompiler, AstraeaPreset, AstraeaSnapshot, AstraeaStateVector, ScmOperation};
+use well_prompt::{
+    AstraeaCompiler, AstraeaPreset, AstraeaSnapshot, AstraeaStateVector, ScmOperation,
+};
 
 fn main() {
     let presets = [
@@ -84,4 +86,3 @@ fn main() {
         report_lines.join("\n") + "\n",
     );
 }
-

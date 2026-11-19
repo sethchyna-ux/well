@@ -107,7 +107,7 @@ fn test_ring_buffer_clear_drops_elements_and_resets() {
     rb.clear();
     assert_eq!(rb.len(), 0);
     assert!(rb.is_empty());
-    assert_eq!(rb.latest().is_none(), true);
+    assert!(rb.latest().is_none());
     assert_eq!(
         drops.load(Ordering::SeqCst),
         15,
@@ -223,9 +223,13 @@ fn test_detects_standard_dangerous_commands() {
     assert!(detect_destructive_command("unlink obsolete.sock"));
     assert!(detect_destructive_command("shred -u secret.key"));
     assert!(detect_destructive_command("truncate -s 0 /var/log/syslog"));
-    assert!(detect_destructive_command("dd if=/dev/urandom of=/dev/nvme0n1"));
+    assert!(detect_destructive_command(
+        "dd if=/dev/urandom of=/dev/nvme0n1"
+    ));
     assert!(detect_destructive_command("mkfs.vfat /dev/sdb1"));
-    assert!(detect_destructive_command("diskutil eraseVolume APFS Blank /dev/disk3"));
+    assert!(detect_destructive_command(
+        "diskutil eraseVolume APFS Blank /dev/disk3"
+    ));
     assert!(detect_destructive_command("chmod -R 000 /"));
     assert!(detect_destructive_command("chown root:wheel /etc/shadow"));
 }
@@ -238,10 +242,14 @@ fn test_detects_nested_wrappers_and_execution_chains() {
     ));
 
     // doas with user specification
-    assert!(detect_destructive_command("doas -u operator rm -f /var/run/app.pid"));
+    assert!(detect_destructive_command(
+        "doas -u operator rm -f /var/run/app.pid"
+    ));
 
     // env with multiple variable assignments and flags
-    assert!(detect_destructive_command("env -i PATH=/bin USER=root LC_ALL=C rm test.txt"));
+    assert!(detect_destructive_command(
+        "env -i PATH=/bin USER=root LC_ALL=C rm test.txt"
+    ));
 }
 
 #[test]
@@ -250,12 +258,16 @@ fn test_detects_compound_shell_separators_and_substitutions() {
     assert!(detect_destructive_command("echo starting; rm -rf target"));
     assert!(detect_destructive_command("echo starting\nrm -rf target"));
     assert!(detect_destructive_command("echo yes | rm -i file.txt"));
-    assert!(detect_destructive_command("echo background & rm -rf target &"));
+    assert!(detect_destructive_command(
+        "echo background & rm -rf target &"
+    ));
     assert!(detect_destructive_command("git status && rm -rf target"));
     assert!(detect_destructive_command("git status || rm -rf target"));
 
     // Deep command substitutions
-    assert!(detect_destructive_command("echo $(echo $(echo $(rm -rf /)))"));
+    assert!(detect_destructive_command(
+        "echo $(echo $(echo $(rm -rf /)))"
+    ));
     assert!(detect_destructive_command("VAR=\"`rm -rf /`\""));
 }
 
@@ -283,13 +295,19 @@ fn test_pathological_inputs_do_not_panic_or_hang() {
     }
     let start = Instant::now();
     let _ = detect_destructive_command(&deep_subst);
-    assert!(start.elapsed().as_millis() < 500, "Deeply nested substitutions must finish promptly");
+    assert!(
+        start.elapsed().as_millis() < 500,
+        "Deeply nested substitutions must finish promptly"
+    );
 
     // Huge input string (1 MB of spaces and commands)
     let huge_input = "echo safe ; ".repeat(50_000);
     let start = Instant::now();
     let _ = detect_destructive_command(&huge_input);
-    assert!(start.elapsed().as_millis() < 1000, "1MB command string evaluated within budget");
+    assert!(
+        start.elapsed().as_millis() < 1000,
+        "1MB command string evaluated within budget"
+    );
 
     // Repeated backslashes
     let backslashes = "\\".repeat(10_000);
@@ -314,60 +332,53 @@ fn test_adversarial_findings_documented() {
     let ansi_c_hex = "$'\\x72\\x6d' -rf /";
     let is_detected_ansi_hex = detect_destructive_command(ansi_c_hex);
     // Documenting empirical reality: currently false due to lack of ANSI-C quote expansion
-    assert_eq!(
-        is_detected_ansi_hex, false,
+    assert!(
+        !is_detected_ansi_hex,
         "Documenting heuristic boundary: ANSI-C hex escape ($'\\x72\\x6d') bypasses naive lexer"
     );
 
     // Finding 2: Unhandled wrappers: pkexec, su, busybox, toybox, chroot
     let pkexec_rm = "pkexec rm -rf /";
-    assert_eq!(
-        detect_destructive_command(pkexec_rm),
-        false,
+    assert!(
+        !detect_destructive_command(pkexec_rm),
         "Documenting heuristic boundary: pkexec is not in wrapper table"
     );
 
     let su_rm = "su root -c 'rm -rf /'";
-    assert_eq!(
-        detect_destructive_command(su_rm),
-        false,
+    assert!(
+        !detect_destructive_command(su_rm),
         "Documenting heuristic boundary: su is not in wrapper table"
     );
 
     let busybox_rm = "busybox rm -rf /";
-    assert_eq!(
-        detect_destructive_command(busybox_rm),
-        false,
+    assert!(
+        !detect_destructive_command(busybox_rm),
         "Documenting heuristic boundary: busybox is not in wrapper table"
     );
 
     // Finding 3: Subshell and block wrapping
     let subshell_rm = "(rm -rf /)";
-    assert_eq!(
-        detect_destructive_command(subshell_rm),
-        false,
+    assert!(
+        !detect_destructive_command(subshell_rm),
         "Documenting heuristic boundary: (rm -rf /) produces token '(rm' which does not match 'rm'"
     );
 
     let block_rm = "{ rm -rf /; }";
-    assert_eq!(
-        detect_destructive_command(block_rm),
-        false,
+    assert!(
+        !detect_destructive_command(block_rm),
         "Documenting heuristic boundary: '{{' is treated as command token"
     );
 
     // Finding 4: kubectl and terraform with flags before subcommands
     let kubectl_with_namespace = "kubectl -n production delete pod my-pod";
-    assert_eq!(
-        detect_destructive_command(kubectl_with_namespace),
-        false,
+    assert!(
+        !detect_destructive_command(kubectl_with_namespace),
         "Documenting heuristic boundary: kubectl with -n flag has first arg '-n' instead of 'delete'"
     );
 
     let terraform_with_chdir = "terraform -chdir=prod destroy -auto-approve";
-    assert_eq!(
-        detect_destructive_command(terraform_with_chdir),
-        false,
+    assert!(
+        !detect_destructive_command(terraform_with_chdir),
         "Documenting heuristic boundary: terraform with -chdir flag has first arg '-chdir=prod' instead of 'destroy'"
     );
 
@@ -375,11 +386,10 @@ fn test_adversarial_findings_documented() {
     let git_branch_lower_d = "git branch -d old-branch";
     let git_branch_upper_d = "git branch -D old-branch";
     let git_branch_long = "git branch --delete old-branch";
-    assert_eq!(detect_destructive_command(git_branch_lower_d), true);
-    assert_eq!(detect_destructive_command(git_branch_upper_d), true); // Normalized to -d
-    assert_eq!(
-        detect_destructive_command(git_branch_long),
-        false,
+    assert!(detect_destructive_command(git_branch_lower_d));
+    assert!(detect_destructive_command(git_branch_upper_d)); // Normalized to -d
+    assert!(
+        !detect_destructive_command(git_branch_long),
         "Documenting heuristic boundary: git branch --delete is not recognized, only -d"
     );
 }

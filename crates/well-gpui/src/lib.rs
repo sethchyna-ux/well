@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod diagnostics;
+pub mod inspector;
 pub mod plugins;
 pub mod settings_view;
 pub mod ssh_console;
@@ -17,7 +18,11 @@ mod tests {
     #[test]
     fn test_embedded_opendyslexic_fonts_integrity() {
         let fonts = well_render::embedded_opendyslexic_fonts();
-        assert_eq!(fonts.len(), 6, "Expected 6 embedded OpenDyslexic font assets");
+        assert_eq!(
+            fonts.len(),
+            6,
+            "Expected 6 embedded OpenDyslexic font assets"
+        );
         for (idx, font_cow) in fonts.iter().enumerate() {
             assert!(
                 !font_cow.is_empty(),
@@ -53,10 +58,7 @@ mod tests {
             well_render::canonical_font_family("dyslexic-mono"),
             "OpenDyslexicM Nerd Font Mono"
         );
-        assert_eq!(
-            well_render::canonical_font_family("Menlo"),
-            "Menlo"
-        );
+        assert_eq!(well_render::canonical_font_family("Menlo"), "Menlo");
         assert_eq!(
             well_render::canonical_font_family("JetBrains Mono"),
             "JetBrains Mono"
@@ -67,7 +69,8 @@ mod tests {
     fn test_terminal_settings_initializes_with_opendyslexic() {
         let settings = settings_view::TerminalSettings::new();
         assert!(
-            settings.font_family.contains("OpenDyslexic") || settings.font_family == "OpenDyslexic Nerd Font",
+            settings.font_family.contains("OpenDyslexic")
+                || settings.font_family == "OpenDyslexic Nerd Font",
             "Initial font family should be OpenDyslexic, found: {}",
             settings.font_family
         );

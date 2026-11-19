@@ -11,7 +11,14 @@ use well_ipc::rpc::CaduceusServer;
 use well_ipc::HermesAppCommand;
 
 fn tmp_socket_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("well_ipc_framing_{name}.sock"))
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::Builder::new()
+        .prefix("well-framing-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    root.join(format!("{name}.sock"))
 }
 
 /// Send a JSON-RPC request using the 4-byte LE length-prefix framing and
@@ -35,11 +42,14 @@ async fn framed_rpc(stream: &mut UnixStream, request: serde_json::Value) -> serd
 /// Starts a CaduceusServer bound to `socket_path` in a background task.
 async fn spawn_server(socket_path: PathBuf) -> mpsc::Receiver<HermesAppCommand> {
     let (app_tx, app_rx) = mpsc::channel::<HermesAppCommand>(16);
+    let bound = CaduceusServer::new(app_tx)
+        .bind(&socket_path)
+        .await
+        .unwrap();
     tokio::spawn(async move {
-        CaduceusServer::start(&socket_path, app_tx).await;
+        let _ = bound.serve_until(std::future::pending()).await;
     });
-    // Give the server a moment to bind.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     app_rx
 }
 

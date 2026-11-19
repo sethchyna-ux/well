@@ -202,16 +202,15 @@ mod tests {
         assert_eq!(header.tensor_count, 12);
         assert_eq!(header.metadata_kv_count, 4);
 
-        let bad_magic = b"NOPE\x03\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00";
+        let bad_magic =
+            b"NOPE\x03\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00";
         assert!(GgufHeader::parse(bad_magic).is_err());
     }
 
     #[test]
     fn test_in_process_gguf_engine_synthesizes_command() {
-        let tmp_path = std::env::temp_dir().join(format!(
-            "well_test_model_{}.gguf",
-            std::process::id()
-        ));
+        let tmp_path =
+            std::env::temp_dir().join(format!("well_test_model_{}.gguf", std::process::id()));
         let bytes = GgufEngine::build_minimal_gguf_v3_bytes(8, 2);
         std::fs::write(&tmp_path, &bytes).expect("write test gguf");
 
@@ -226,4 +225,3 @@ mod tests {
         let _ = std::fs::remove_file(&tmp_path);
     }
 }
-

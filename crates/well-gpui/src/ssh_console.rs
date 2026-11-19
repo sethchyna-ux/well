@@ -4,7 +4,7 @@
 //! 2. Visual Port Forwarding & Tunnels (`PortForwarding`: `LOCAL -L`, `DYNAMIC -D` SOCKS5, `REMOTE -R`)
 //! 3. Local SSH Key Vault & Embedded HTTP Authorized Key Server (`KeyVault`: `:8787/authorized_keys`)
 //! 4. SSH Server Hosting, `$SSH_AUTH_SOCK` Agent & NetOps Autonomous Agent (`ServerAndAgentHub`)
-//! 5. PXE / ProxyDHCP Server (`pxe-rs` Option 43 TLV, Port 4011 Unicast, Option 77/175) & Custom UEFI Bootloader (`ipxe-uefi` `#![no_std]` + SNP) (`PxeAndBootloader`)
+//! 5. AgentOS x86_64 EFI build/export/QEMU and the real PXE netboot companion (`PxeAndBootloader`)
 //! 6. SMB / CIFS File Shares & Netboot Payload Mounts (`SmbShares`)
 //! 7. Networking Tools: Fast TCP Port Scanner, Live ARP Table, Wake-on-LAN (WoL) UDP Magic Packet, Ping/Packet Sniffer (`NetworkTools`)
 
@@ -39,13 +39,6 @@ pub enum ServerHubSubtab {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum PxeBootSubtab {
-    #[default]
-    PxeServer,
-    CustomBootloader,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SshConsoleInputField {
     #[default]
     SidebarSearch,
@@ -65,6 +58,8 @@ pub enum SshConsoleInputField {
     PxeServerIp,
     PxeHttpPort,
     PxeBootFile,
+    BootSource,
+    BootLeaseRange,
     SmbServerHost,
     SmbShareName,
     SmbUsername,
@@ -91,15 +86,15 @@ impl Default for SshHostEditorDraft {
     fn default() -> Self {
         Self {
             editing_index: None,
-            name: "chyna".into(),
-            hostname: "192.168.1.12".into(),
-            user: "chyna".into(),
+            name: String::new(),
+            hostname: String::new(),
+            user: String::new(),
             port: "22".into(),
             identity_file: "~/.ssh/id_ed25519".into(),
             proxy_jump: String::new(),
             forward_agent: true,
             use_control_master: true,
-            forward_caduceus_ipc: true,
+            forward_caduceus_ipc: false,
         }
     }
 }
@@ -109,7 +104,7 @@ impl SshHostEditorDraft {
         Self {
             editing_index: None,
             name: "new-server".into(),
-            hostname: "192.168.1.100".into(),
+            hostname: String::new(),
             user: std::env::var("USER").unwrap_or_else(|_| "ops".into()),
             port: "22".into(),
             identity_file: "~/.ssh/id_ed25519".into(),
@@ -155,8 +150,10 @@ impl SshHostEditorDraft {
             .port
             .trim()
             .parse::<u16>()
-            .unwrap_or(22)
-            .clamp(1, 65535);
+            .map_err(|_| "SSH port must be between 1 and 65535")?;
+        if port == 0 {
+            return Err("SSH port must be between 1 and 65535".into());
+        }
         let user = {
             let u = self.user.trim();
             if u.is_empty() {
@@ -251,6 +248,7 @@ pub struct SshTunnelEntry {
 }
 
 impl SshTunnelEntry {
+    #[cfg(test)]
     pub fn default_catalog() -> Vec<Self> {
         vec![
             Self {
@@ -298,25 +296,22 @@ impl SshTunnelEntry {
 
     /// Build the exact OpenSSH CLI invocation for this tunnel.
     pub fn build_ssh_command(&self, ssh_destination: &str) -> String {
-        let dest = if ssh_destination.trim().is_empty() {
-            "chyna@192.168.1.12"
-        } else {
-            ssh_destination.trim()
-        };
-        match self.kind {
-            SshTunnelKind::Local => format!(
-                "ssh -o ExitOnForwardFailure=yes -N -L {}:{} {}",
-                self.local_listen, self.remote_target, dest
-            ),
-            SshTunnelKind::Dynamic => format!(
-                "ssh -o ExitOnForwardFailure=yes -N -D {} {}",
-                self.local_listen, dest
-            ),
-            SshTunnelKind::Remote => format!(
-                "ssh -o ExitOnForwardFailure=yes -N -R {}:{} {}",
-                self.local_listen, self.remote_target, dest
-            ),
+        let dest = ssh_destination.trim();
+        if dest.is_empty() {
+            return String::new();
         }
+        let forward = if self.kind == SshTunnelKind::Dynamic {
+            self.local_listen.clone()
+        } else {
+            format!("{}:{}", self.local_listen, self.remote_target)
+        };
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        format!(
+            "ssh -o ExitOnForwardFailure=yes -N {} {} -- {}",
+            self.kind.ssh_flag(),
+            quote(&forward),
+            quote(dest)
+        )
     }
 
     /// Check if the tunnel's local port is currently accepting TCP connections.
@@ -412,7 +407,7 @@ impl DiscoveredSshKey {
                             } else {
                                 "SSH".to_string()
                             };
-                            let fp = Self::pseudo_fingerprint(&line);
+                            let fp = Self::fingerprint(&line);
                             keys.push(Self {
                                 name: stem,
                                 algorithm: algo,
@@ -427,19 +422,6 @@ impl DiscoveredSshKey {
             }
         }
         keys.sort_by(|a, b| a.name.cmp(&b.name));
-        if keys.is_empty() {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/operator".into());
-            keys.push(Self {
-                name: "id_ed25519".into(),
-                algorithm: "Ed25519".into(),
-                path_display: format!("{home}/.ssh/id_ed25519"),
-                fingerprint: "SHA256:8p72CRrRvx9rNDJsosJzIALDj5/HeTZxlVh8vYs/UEs".into(),
-                public_key_line:
-                    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL+8YfSsACIlz5RRVLpeBQTJigsYWE/Huq9Z7RYek0Hb local@well"
-                        .into(),
-                is_passkey: false,
-            });
-        }
         keys
     }
 
@@ -456,18 +438,32 @@ impl DiscoveredSshKey {
         }
     }
 
-    fn pseudo_fingerprint(pub_line: &str) -> String {
-        let mut h: u64 = 0xcbf29ce484222325;
-        for b in pub_line.as_bytes() {
-            h ^= *b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        let body = pub_line
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("AAAAC3NzaC1lZDI1NTE5");
-        let snippet: String = body.chars().skip(8).take(27).collect();
-        format!("SHA256:{snippet}{:08x}", (h & 0xffff_ffff) as u32)
+    fn fingerprint(pub_line: &str) -> String {
+        well_ssh::public_key_fingerprint(pub_line).unwrap_or_else(|_| "Invalid public key".into())
+    }
+    pub fn authorized() -> Vec<Self> {
+        let Some(home) = std::env::var_os("HOME") else {
+            return Vec::new();
+        };
+        std::fs::read_to_string(PathBuf::from(home).join(".ssh/authorized_keys"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let fingerprint = well_ssh::public_key_fingerprint(line).ok()?;
+                Some(Self {
+                    name: line
+                        .split_whitespace()
+                        .nth(2)
+                        .unwrap_or("Authorized client")
+                        .into(),
+                    algorithm: line.split_whitespace().next().unwrap_or("SSH").into(),
+                    path_display: "~/.ssh/authorized_keys".into(),
+                    fingerprint,
+                    public_key_line: line.into(),
+                    is_passkey: line.starts_with("sk-"),
+                })
+            })
+            .collect()
     }
 }
 
@@ -483,10 +479,16 @@ pub fn discover_known_hosts() -> Vec<KnownHostEntry> {
                     continue;
                 }
                 let mut parts = trimmed.split_whitespace();
-                let host = parts.next().unwrap_or("?").to_string();
+                let first = parts.next().unwrap_or("?");
+                let host = if first.starts_with('@') {
+                    parts.next().unwrap_or("?")
+                } else {
+                    first
+                }
+                .to_string();
                 let key_type = parts.next().unwrap_or("unknown").to_string();
                 let key_data = parts.next().unwrap_or("");
-                let fp = DiscoveredSshKey::pseudo_fingerprint(&format!("{key_type} {key_data}"));
+                let fp = DiscoveredSshKey::fingerprint(&format!("{key_type} {key_data}"));
                 entries.push(KnownHostEntry {
                     line_number: idx + 1,
                     host_pattern: host,
@@ -516,9 +518,21 @@ pub fn discover_network_interfaces() -> Vec<LocalNetworkInterface> {
                 if !cur_name.is_empty() && (!cur_ip.is_empty() || !cur_mac.is_empty()) {
                     ifaces.push(LocalNetworkInterface {
                         name: cur_name,
-                        ip: if cur_ip.is_empty() { "Unassigned".into() } else { cur_ip },
-                        netmask: if cur_mask.is_empty() { "255.255.255.0".into() } else { cur_mask },
-                        mac: if cur_mac.is_empty() { "--".into() } else { cur_mac },
+                        ip: if cur_ip.is_empty() {
+                            "Unassigned".into()
+                        } else {
+                            cur_ip
+                        },
+                        netmask: if cur_mask.is_empty() {
+                            "255.255.255.0".into()
+                        } else {
+                            cur_mask
+                        },
+                        mac: if cur_mac.is_empty() {
+                            "--".into()
+                        } else {
+                            cur_mac
+                        },
                         is_up,
                     });
                 }
@@ -548,28 +562,24 @@ pub fn discover_network_interfaces() -> Vec<LocalNetworkInterface> {
         if !cur_name.is_empty() && (!cur_ip.is_empty() || !cur_mac.is_empty()) {
             ifaces.push(LocalNetworkInterface {
                 name: cur_name,
-                ip: if cur_ip.is_empty() { "Unassigned".into() } else { cur_ip },
-                netmask: if cur_mask.is_empty() { "255.255.255.0".into() } else { cur_mask },
-                mac: if cur_mac.is_empty() { "--".into() } else { cur_mac },
+                ip: if cur_ip.is_empty() {
+                    "Unassigned".into()
+                } else {
+                    cur_ip
+                },
+                netmask: if cur_mask.is_empty() {
+                    "255.255.255.0".into()
+                } else {
+                    cur_mask
+                },
+                mac: if cur_mac.is_empty() {
+                    "--".into()
+                } else {
+                    cur_mac
+                },
                 is_up,
             });
         }
-    }
-    if ifaces.is_empty() {
-        ifaces.push(LocalNetworkInterface {
-            name: "en0".into(),
-            ip: "192.168.1.172".into(),
-            netmask: "255.255.255.0".into(),
-            mac: "f6:8a:a9:f4:83:86".into(),
-            is_up: true,
-        });
-        ifaces.push(LocalNetworkInterface {
-            name: "lo0".into(),
-            ip: "127.0.0.1".into(),
-            netmask: "255.0.0.0".into(),
-            mac: "00:00:00:00:00:00".into(),
-            is_up: true,
-        });
     }
     ifaces
 }
@@ -627,7 +637,11 @@ pub fn run_ping_probe(target_host: &str) -> Option<PingProbeResult> {
 
     for line in text.lines() {
         if line.contains("packet loss") {
-            if let Some(pct_str) = line.split("% packet loss").next().and_then(|s| s.split(',').next_back()) {
+            if let Some(pct_str) = line
+                .split("% packet loss")
+                .next()
+                .and_then(|s| s.split(',').next_back())
+            {
                 loss_pct = pct_str.trim().parse::<f32>().unwrap_or(0.0);
             }
         }
@@ -707,179 +721,11 @@ pub fn start_http_key_server(port: u16, stop_flag: Arc<AtomicBool>) -> Result<So
     Ok(local_addr)
 }
 
-// ============================================================================
-// PXE / ProxyDHCP Protocol Engine & Custom UEFI Bootloader (`pxe-protocol-engineering`)
-// ============================================================================
-
+/// Network deployment mode; packet engines live in the pinned PXE library used by well-boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PxeServerMode {
-    /// ProxyDHCP: `yiaddr = 0.0.0.0`, Option 60 `"PXEClient"`, `siaddr` = TFTP Server IP,
-    /// zero Option 1/3/51 IP lease interference, Option 54 router guard, Port 4011 unicast.
     ProxyDhcp,
-    /// Standalone DHCP: Full IP lease + Option 6 DNS with mandatory `8.4.4.1` secondary fallback.
     StandaloneDhcp,
-}
-
-impl PxeServerMode {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::ProxyDhcp => "ProxyDHCP (Coexists with Router — yiaddr 0.0.0.0 + Port 4011 Unicast)",
-            Self::StandaloneDhcp => "Standalone DHCP (Full Lease + DNS 8.4.4.1 Fallback)",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClientArch {
-    BiosX86,
-    UefiX86_64,
-    UefiArm64,
-}
-
-impl ClientArch {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::BiosX86 => "Legacy BIOS x86 (Arch 00:00 — Option 43 TLV)",
-            Self::UefiX86_64 => "UEFI x86_64 (Arch 00:07 — SNP ipxe-uefi.efi)",
-            Self::UefiArm64 => "UEFI ARM64 (Arch 00:0B — SNP ipxe-aa64.efi)",
-        }
-    }
-
-    pub const fn next(self) -> Self {
-        match self {
-            Self::BiosX86 => Self::UefiX86_64,
-            Self::UefiX86_64 => Self::UefiArm64,
-            Self::UefiArm64 => Self::BiosX86,
-        }
-    }
-}
-
-/// Chainload payload classification inspecting magic bytes (`#!ipxe` vs `MZ` PE32/COFF).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChainloadTargetKind {
-    /// Starts with `b"#!ipxe"` — evaluate recursively via `Evaluator::execute` with inherited lease vars.
-    IpxeScript,
-    /// Starts with `b"MZ"` — delegate to UEFI Boot Services `LoadImage` + `StartImage`.
-    UefiPe32Image,
-    Unknown,
-}
-
-/// Zero-copy TFTP receive action decoupled from `&mut rx_frame_buffer` borrows (`E0499` prevention).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TftpAction {
-    Ack(u16, bool), // (block, is_eof)
-    Error,
-    Ignore,
-}
-
-impl TftpAction {
-    pub fn from_opcode(opcode: u16, block: u16, data_len: usize, active_blksize: usize) -> Self {
-        match opcode {
-            3 => Self::Ack(block, data_len < active_blksize), // TFTP DATA (opcode 3)
-            5 => Self::Error,                                 // TFTP ERROR (opcode 5)
-            _ => Self::Ignore,
-        }
-    }
-}
-
-/// Build strict Legacy BIOS Option 43 TLV bytes per `pxe-protocol-engineering` Rule 1.
-/// Sub-option 6 (Discovery Control = 8), Sub-option 8 (Boot Server IP), Sub-option 9 ("PXE"), Sub-option 10 ("PXE").
-pub fn build_legacy_bios_option43(server_ip: Ipv4Addr) -> Vec<u8> {
-    let s = server_ip.octets();
-    vec![
-        // Sub-option 6: Discovery Control (length 1, value 8 = bypass menu and use bootfile)
-        6, 1, 8,
-        // Sub-option 8: PXE Boot Server IP (type 8, length 7, payload 0,0,1,<server_ip>)
-        8, 7, 0, 0, 1, s[0], s[1], s[2], s[3],
-        // Sub-option 9: PXE Boot Menu (Type 0, Length 6, "PXE")
-        9, 6, 0, 0, 3, b'P', b'X', b'E',
-        // Sub-option 10: PXE Menu Prompt (Timeout 0, "PXE")
-        10, 4, 0, b'P', b'X', b'E',
-    ]
-}
-
-/// Build Standalone DHCP Option 6 (DNS Servers) with mandatory secondary fallback `8.4.4.1` per Rule 3.
-pub fn build_standalone_dns_option6(primary_dns: Option<Ipv4Addr>) -> Vec<u8> {
-    let mut dns_bytes = Vec::with_capacity(8);
-    if let Some(d) = primary_dns {
-        dns_bytes.extend_from_slice(&d.octets());
-    }
-    dns_bytes.extend_from_slice(&Ipv4Addr::new(8, 4, 4, 1).octets());
-    dns_bytes
-}
-
-/// Inspect DHCP Option 77 (`User Class: "iPXE"`) and Option 175 to distinguish Stage 1 ROM vs Stage 2 iPXE.
-pub fn is_ipxe_stage2_client(opt77: Option<&[u8]>, opt175: Option<&[u8]>) -> bool {
-    let has_ipxe_class = opt77
-        .map(|b| b.windows(4).any(|w| w == b"iPXE"))
-        .unwrap_or(false);
-    has_ipxe_class && opt175.is_some()
-}
-
-/// Classify downloaded network payload magic bytes per `pxe-protocol-engineering` Rule 11.
-pub fn classify_chainload_payload(data: &[u8]) -> ChainloadTargetKind {
-    if data.starts_with(b"#!ipxe") {
-        ChainloadTargetKind::IpxeScript
-    } else if data.starts_with(b"MZ") {
-        ChainloadTargetKind::UefiPe32Image
-    } else {
-        ChainloadTargetKind::Unknown
-    }
-}
-
-/// Generate a strict iPXE boot script using `${next-server}` and unconditional `set dns 8.8.8.8` (Rule 5).
-pub fn generate_strict_ipxe_script(http_port: u16, boot_target: &str) -> String {
-    let clean_target = boot_target.trim_start_matches('/');
-    format!(
-        "#!ipxe\ndhcp\nset dns 8.8.8.8\necho Well PXE Netboot Stage 2 -> ${{next-server}}:{http_port}\nchain --autofree http://${{next-server}}:{http_port}/{clean_target} || shell\n"
-    )
-}
-
-/// Build the headless QEMU EDK2 UEFI netboot verification command per `pxe-protocol-engineering` Rule 12.
-pub fn build_qemu_uefi_test_command(tftp_dir: &str, bootfile: &str) -> String {
-    format!(
-        "qemu-system-x86_64 \\\n  -drive if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd \\\n  -drive file=fat:rw:target/esp,format=raw,media=disk \\\n  -netdev user,id=net0,tftp={tftp_dir},bootfile={bootfile} \\\n  -device virtio-net-pci,netdev=net0 \\\n  -serial file:target/qemu-serial.log \\\n  -display none \\\n  -m 512M"
-    )
-}
-
-/// Spawn a lightweight HTTP iPXE Boot Script & Payload Server on `0.0.0.0:<http_port>`.
-pub fn start_pxe_http_boot_server(
-    http_port: u16,
-    boot_target: String,
-    stop_flag: Arc<AtomicBool>,
-) -> Result<SocketAddr, String> {
-    let listener = TcpListener::bind(("0.0.0.0", http_port))
-        .map_err(|e| format!("Failed to bind PXE HTTP Boot Server on :{http_port}: {e}"))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to read local_addr: {e}"))?;
-    let _ = listener.set_nonblocking(true);
-
-    std::thread::spawn(move || {
-        while !stop_flag.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((mut stream, _peer)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                    let mut req_buf = [0u8; 512];
-                    let _ = stream.read(&mut req_buf);
-                    let script = generate_strict_ipxe_script(http_port, &boot_target);
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        script.len(),
-                        script
-                    );
-                    let _ = stream.write_all(resp.as_bytes());
-                    let _ = stream.flush();
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(60));
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    Ok(local_addr)
 }
 
 // ============================================================================
@@ -897,38 +743,13 @@ pub struct SmbShareEntry {
 }
 
 impl SmbShareEntry {
-    pub fn default_catalog() -> Vec<Self> {
-        vec![
-            Self {
-                title: "PXE Netboot & WinPE Images".into(),
-                server_host: "192.168.1.12".into(),
-                share_name: "pxeboot".into(),
-                username: "chyna".into(),
-                mount_point: "/Volumes/pxeboot".into(),
-                purpose_badge: "NETBOOT".into(),
-            },
-            Self {
-                title: "OS Installers & ISO Vault".into(),
-                server_host: "192.168.1.12".into(),
-                share_name: "isos".into(),
-                username: "chyna".into(),
-                mount_point: "/Volumes/isos".into(),
-                purpose_badge: "ISO REPO".into(),
-            },
-            Self {
-                title: "Cluster Shared Artifacts".into(),
-                server_host: "cachey.local".into(),
-                share_name: "artifacts".into(),
-                username: "chyna".into(),
-                mount_point: "/Volumes/artifacts".into(),
-                purpose_badge: "SMB3".into(),
-            },
-        ]
-    }
-
     pub fn smb_url(&self) -> String {
         if self.username.trim().is_empty() {
-            format!("smb://{}/{}", self.server_host.trim(), self.share_name.trim())
+            format!(
+                "smb://{}/{}",
+                self.server_host.trim(),
+                self.share_name.trim()
+            )
         } else {
             format!(
                 "smb://{}@{}/{}",
@@ -945,17 +766,34 @@ impl SmbShareEntry {
         } else {
             self.username.trim()
         };
-        format!(
-            "mkdir -p {} && mount_smbfs //{user}@{}/{} {}",
-            self.mount_point,
+        let url = format!(
+            "//{user}@{}/{}",
             self.server_host.trim(),
-            self.share_name.trim(),
-            self.mount_point
+            self.share_name.trim()
+        );
+        let quote = well_shell::ssh::quote_argument;
+        format!(
+            "mkdir -p {} && mount_smbfs {} {}",
+            quote(&self.mount_point),
+            quote(&url),
+            quote(&self.mount_point)
         )
     }
 
     pub fn is_mounted(&self) -> bool {
-        std::path::Path::new(&self.mount_point).exists()
+        std::process::Command::new("mount")
+            .output()
+            .is_ok_and(|out| {
+                out.status.success()
+                    && String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+                        line.split_once(" on ").is_some_and(|(_, rest)| {
+                            rest.split_once(" (").is_some_and(|(path, kind)| {
+                                path == self.mount_point
+                                    && (kind.contains("smbfs") || kind.contains("cifs"))
+                            })
+                        })
+                    })
+            })
     }
 }
 
@@ -988,7 +826,7 @@ pub fn detect_primary_lan_ip() -> Ipv4Addr {
             }
         }
     }
-    Ipv4Addr::new(192, 168, 1, 10)
+    Ipv4Addr::UNSPECIFIED
 }
 
 /// Scan key infrastructure & PXE/SSH/SMB ports on `target_host` with bounded timeouts.
@@ -1055,10 +893,7 @@ pub fn run_fast_port_scan(target_host: &str) -> Vec<PortScanResult> {
             })
             .collect();
 
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().ok())
-            .collect()
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
     })
 }
 
@@ -1099,14 +934,6 @@ pub fn discover_arp_neighbors() -> Vec<ArpNeighborEntry> {
             }
         }
     }
-    if entries.is_empty() {
-        entries.push(ArpNeighborEntry {
-            hostname: "chyna.local".into(),
-            ip: "192.168.1.12".into(),
-            mac: "a8:a1:59:2c:41:0e".into(),
-            interface: "en0".into(),
-        });
-    }
     entries
 }
 
@@ -1143,6 +970,37 @@ pub fn send_wol_magic_packet(mac_str: &str) -> Result<usize, String> {
         .map_err(|e| format!("UDP set_broadcast failed: {e}"))?;
     sock.send_to(&pkt, "255.255.255.255:9")
         .map_err(|e| format!("UDP broadcast send failed: {e}"))
+}
+
+pub fn authorize_public_key(line: &str) -> Result<(), String> {
+    let line = line.trim();
+    if line.contains(['\n', '\r']) {
+        return Err("Paste one public key at a time".into());
+    }
+    well_ssh::public_key_fingerprint(line)?;
+    let home = std::env::var_os("HOME").ok_or("HOME unavailable")?;
+    let directory = PathBuf::from(home).join(".ssh");
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let path = directory.join("authorized_keys");
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err("Refusing to edit a symlinked authorized_keys file".into());
+    }
+    if std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .any(|old| old.trim() == line)
+    {
+        return Ok(());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| e.to_string())?;
+    writeln!(file, "\n{line}").map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1186,44 +1044,8 @@ mod tests {
         assert_eq!(tunnels[4].kind, SshTunnelKind::Remote);
 
         let cmd = tunnels[0].build_ssh_command("chyna@192.168.1.12");
-        assert!(cmd.contains("-L 127.0.0.1:5433:127.0.0.1:5432"));
+        assert!(cmd.contains("-L '127.0.0.1:5433:127.0.0.1:5432'"));
         assert!(cmd.contains("chyna@192.168.1.12"));
-    }
-
-    #[test]
-    fn test_pxe_option43_tlv_strict_layout() {
-        let opt43 = build_legacy_bios_option43(Ipv4Addr::new(192, 168, 1, 12));
-        // 3 bytes (sub 6) + 9 bytes (sub 8) + 8 bytes (sub 9) + 6 bytes (sub 10) = 26 bytes
-        assert_eq!(opt43.len(), 26);
-        assert_eq!(&opt43[0..3], &[6, 1, 8]);
-        assert_eq!(&opt43[3..12], &[8, 7, 0, 0, 1, 192, 168, 1, 12]);
-        assert_eq!(&opt43[12..20], &[9, 6, 0, 0, 3, b'P', b'X', b'E']);
-        assert_eq!(&opt43[20..26], &[10, 4, 0, b'P', b'X', b'E']);
-    }
-
-    #[test]
-    fn test_standalone_dns_fallback_8_4_4_1() {
-        let dns = build_standalone_dns_option6(Some(Ipv4Addr::new(1, 1, 1, 1)));
-        assert_eq!(dns, vec![1, 1, 1, 1, 8, 4, 4, 1]);
-    }
-
-    #[test]
-    fn test_ipxe_script_and_dual_path_chainload_classification() {
-        let script = generate_strict_ipxe_script(8080, "boot.ipxe");
-        assert!(script.starts_with("#!ipxe\n"));
-        assert!(script.contains("set dns 8.8.8.8"));
-        assert!(script.contains("http://${next-server}:8080/boot.ipxe"));
-
-        assert_eq!(
-            classify_chainload_payload(script.as_bytes()),
-            ChainloadTargetKind::IpxeScript
-        );
-        assert_eq!(
-            classify_chainload_payload(b"MZ\x90\x00\x03\x00"),
-            ChainloadTargetKind::UefiPe32Image
-        );
-        assert!(is_ipxe_stage2_client(Some(b"iPXE"), Some(&[175, 2, 1, 1])));
-        assert!(!is_ipxe_stage2_client(Some(b"PXEClient"), None));
     }
 
     #[test]

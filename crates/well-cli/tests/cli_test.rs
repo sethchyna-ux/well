@@ -57,4 +57,3 @@ fn test_cli_translate_empty_query_returns_nonzero_exit() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("Usage: well-cli translate"));
 }
-

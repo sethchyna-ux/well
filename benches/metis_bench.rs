@@ -59,4 +59,3 @@ fn bench_metis_history_trie(c: &mut Criterion) {
 
 criterion_group!(benches, bench_metis_history_trie);
 criterion_main!(benches);
-

@@ -32,3 +32,6 @@ well-llm = { version = "0.1.0", path = "../well-llm" }
 well-config = { version = "0.1.0", path = "../well-config" }
 well-wasm = { version = "0.1.0", path = "../well-wasm" }
 toml = "0.8"
+
+well-ssh = { path = "../well-ssh" }
+well-core = { path = "../well-core" }

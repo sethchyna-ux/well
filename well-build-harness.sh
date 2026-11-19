@@ -1,71 +1,54 @@
 #!/usr/bin/env bash
-# well-build-harness.sh
-#
-# A comprehensive, automated compiler orchestrator and build harness for "Well" (Phrear).
-# Synthesizes the Zig compilation of libghostty with the Rust Cargo Workspace.
-#
-# Naming Scheme: Hermes, the swift messenger, coordinating and linking subsystems.
-
+# Locked GPUI + companion verification and native artifact packaging.
 set -euo pipefail
-
-# Color indicators for build status
-INFO='\033[0;34m[INFO]\033[0m'
-SUCCESS='\033[0;32m[SUCCESS]\033[0m'
-WARN='\033[0;33m[WARN]\033[0m'
-ERROR='\033[0;31m[ERROR]\033[0m'
-
-echo -e "${INFO} Starting Well build orchestrator..."
-echo -e "${INFO} Verifying system compiler requirements..."
-
-# 1. Check Zig compiler
-if ! command -v zig &> /dev/null; then
-    echo -e "${ERROR} Zig compiler not found. Well's Orpheus rendering core requires Zig." >&2
-    exit 1
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_DIR="${WELL_BUILD_TARGET_DIR:-${ROOT_DIR}/target}"
+OUTPUT_DIR="${ROOT_DIR}/dist"
+SKIP_TESTS=false
+PACKAGE=false
+BENCHMARK=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --skip-tests) SKIP_TESTS=true ;;
+        --package) PACKAGE=true ;;
+        --output) shift; OUTPUT_DIR="${1:?--output requires a directory}" ;;
+        --benchmark|-b) BENCHMARK=true ;;
+        --help|-h) echo 'Usage: well-build-harness.sh [--skip-tests] [--package] [--output DIR] [--benchmark]'; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+cd "${ROOT_DIR}"
+cargo check --workspace --all-targets --locked --target-dir "${BUILD_DIR}"
+cargo check --manifest-path crates/well-boot/Cargo.toml --all-targets --locked --target-dir "${BUILD_DIR}"
+if [ "${SKIP_TESTS}" != true ]; then
+    cargo test --workspace --locked --target-dir "${BUILD_DIR}"
+    cargo test --manifest-path crates/well-boot/Cargo.toml --locked --target-dir "${BUILD_DIR}"
 fi
-ZIG_VERSION=$(zig version)
-echo -e "${SUCCESS} Found Zig compiler: v${ZIG_VERSION}"
-
-# 2. Check Rust/Cargo compiler
-if ! command -v cargo &> /dev/null; then
-    echo -e "${ERROR} Cargo/Rust compiler not found." >&2
-    exit 1
+if [ "${BENCHMARK}" = true ]; then ./well-benchmarks.sh; fi
+if [ "${PACKAGE}" = true ]; then
+    mkdir -p "${OUTPUT_DIR}"
+    case "$(uname -s)" in
+        Darwin)
+            WELL_BUILD_TARGET_DIR="${BUILD_DIR}" ./package-app.sh --archive
+            if [ "$(cd "${OUTPUT_DIR}" && pwd)" != "${ROOT_DIR}/dist" ]; then
+                cp "${ROOT_DIR}"/dist/Well-*.zip "${ROOT_DIR}"/dist/Well-*.zip.sha256 "${OUTPUT_DIR}/"
+            fi
+            ;;
+        Linux)
+            cargo build --release --locked -p well-gpui --target-dir "${BUILD_DIR}"
+            cargo build --release --locked --manifest-path crates/well-boot/Cargo.toml --target-dir "${BUILD_DIR}"
+            STAGING="$(mktemp -d "${TMPDIR:-/tmp}/well-package.XXXXXX")"
+            trap 'rm -rf "${STAGING}"' EXIT
+            mkdir -p "${STAGING}/bin" "${STAGING}/share/well/agentos-loader/src"
+            install -m 755 "${BUILD_DIR}/release/well-gpui" "${BUILD_DIR}/release/well-boot" "${STAGING}/bin/"
+            install -m 644 boot/agentos/build.zig "${STAGING}/share/well/agentos-loader/"
+            install -m 644 boot/agentos/src/main.zig "${STAGING}/share/well/agentos-loader/src/"
+            ARCHIVE="${OUTPUT_DIR}/Well-linux-$(uname -m).tar.gz"
+            tar -czf "${ARCHIVE}" -C "${STAGING}" bin share
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+            ;;
+        *) echo 'Native packaging supports macOS and Linux' >&2; exit 1 ;;
+    esac
 fi
-RUST_VERSION=$(rustc --version)
-echo -e "${SUCCESS} Found Rust compiler: ${RUST_VERSION}"
-
-# 3. Compile libghostty static archive via Zig
-echo -e "${INFO} Compiling vendor/libghostty C-ABI archive with Zig..."
-mkdir -p target/zig-out
-zig build-lib vendor/libghostty/src/lib.zig \
-    -O ReleaseFast \
-    --name ghostty \
-    -lc \
-    -femit-bin=target/zig-out/libghostty.a
-
-echo -e "${SUCCESS} Compiled target/zig-out/libghostty.a"
-
-# 4. Check / Build Cargo Workspace
-echo -e "${INFO} Running Cargo Workspace syntax check..."
-cargo check --workspace
-
-echo -e "${INFO} Running Subsystem Unit Tests..."
-cargo test --workspace
-
-# 5. Optional Hyperfine Benchmarking Step
-if [ "${1:-}" == "--benchmark" ] || [ "${1:-}" == "-b" ]; then
-    echo -e "${INFO} Executing Hyperfine Subsystem Benchmarks..."
-    ./well-benchmarks.sh
-fi
-
-echo -e "--------------------------------------------------------"
-echo -e "${SUCCESS} ALL WELL (PHREAR) SUBSYSTEMS COMPILED & TESTED!"
-echo -e "Subsystems verified:"
-echo -e "  • ATLAS      (winit Windowing Loop)"
-echo -e "  • ORPHEUS    (WebGPU Text Shaper & CRT Shader)"
-echo -e "  • METIS      (Fish Shell Core, HyperShell Engine & O(k) Prefix Trie)"
-echo -e "  • MNEME      (Ropey B-Tree Editor & Tree-sitter AST)"
-echo -e "  • ASTRAEA    (Sub-100µs Memory-Mapped State Vector)"
-echo -e "  • THEIA      (Visual egui Dashboard & Hyprlang .hl Engine)"
-echo -e "  • HERMES     (Lock-Free Seqlock IPC & JSON-RPC)"
-echo -e "  • HYPERFINE  (Subsystem Latency & Startup Benchmark Suite)"
-echo -e "--------------------------------------------------------"
+echo 'Well GPUI and boot companion checks completed.'

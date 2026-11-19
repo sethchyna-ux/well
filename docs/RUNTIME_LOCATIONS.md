@@ -67,7 +67,7 @@ Pythia image generation writes provider-returned image artifacts to:
 ~/.well/generated/
 ```
 
-Files are content-addressed by provider, prompt, and requested dimensions, so repeated prompts reuse cached output. A manual regenerate request bypasses that cache and refreshes the artifact. Test-only mock PNGs are created only when `WELL_MOCK_LLM=1` is explicitly enabled.
+Files are content-addressed by provider, prompt, and requested dimensions, so repeated prompts reuse cached output. A manual regenerate request bypasses that cache and refreshes the artifact. Mock PNGs require a test build or the explicit `test-support` Cargo feature as well as `WELL_MOCK_LLM=1`; release builds ignore the environment switch.
 
 ## Logs and journals
 
@@ -101,3 +101,36 @@ rm -f /tmp/well-history.log
 ```
 
 Be careful with `~/.config/well/config.json`; deleting it resets saved Well settings.
+
+## GPUI operator settings and services
+
+GPUI saves its operator settings to `~/.config/well/operator_settings.json` and syncs
+shared typography through `well-config::ConfigStore`. The older JSON/Hyprlang profile
+system described above remains a separate legacy interface; consolidation requires
+an explicit migration rather than silently choosing one file over another.
+
+Hermes uses `$XDG_STATE_HOME/well/run/caduceus.sock`, or
+`~/.local/state/well/run/caduceus.sock`. The server requires a private parent directory
+and matching local peer UID. Remote SSH forwarding retains the explicit remote socket
+name while resolving the correct private local endpoint.
+
+The GPUI AgentOS panel exports under `~/.local/state/well/agentos` (or the matching
+XDG state location). Its standalone CLI accepts an explicit output directory. Files
+include `BOOTX64.EFI`, `agent_os_unikernel.elf`, `agentos-esp.img`, `manifest.json`, and
+`SHA256SUMS`. An optional checksummed network bootstrap volume is generated from a
+user-supplied full iPXE image. Build caches live below the selected output directory.
+
+Incoming SSH host keys live under `~/.local/state/well/ssh-host`. Authorized clients
+come from `~/.ssh/authorized_keys`; password auth is off by default and requires
+`WELL_SSH_PASSWORD` in the launching environment. The host does not write that password
+to disk. Changes to authentication or authorized keys require restarting the host.
+
+Generated images now have credential-free JSON sidecars containing prompt, provider,
+and requested size. History refresh is explicit and regeneration uses that metadata.
+Delete only removes managed image/sidecar files within the configured image cache;
+it refuses symlinked images and paths outside that cache.
+
+GPUI operator JSON has a version field (currently 1). Existing unversioned files
+remain readable. Writes use the shared config layer, atomic temporary files, writer
+locking and a content revision check. Future-version, malformed or externally
+modified files are preserved and cause a visible save error rather than being overwritten.

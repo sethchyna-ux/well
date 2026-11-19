@@ -7,8 +7,14 @@ fn main() {
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
     let ghostty_dir = workspace_root.join("vendor").join("libghostty");
 
-    println!("cargo:rerun-if-changed={}", ghostty_dir.join("src/lib.zig").display());
-    println!("cargo:rerun-if-changed={}", ghostty_dir.join("include/libghostty.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        ghostty_dir.join("src/lib.zig").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        ghostty_dir.join("include/libghostty.h").display()
+    );
 
     let zig_out_lib = ghostty_dir.join("zig-out").join("lib");
     let archive_path = zig_out_lib.join("libghostty.a");
@@ -25,4 +31,3 @@ fn main() {
         println!("cargo:rustc-link-lib=static=ghostty");
     }
 }
-

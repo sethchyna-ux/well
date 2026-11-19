@@ -327,9 +327,8 @@ pub fn sanitize_utf8_via_ghostty(input: &[u8]) -> String {
         return String::new();
     }
     let mut out = vec![0u8; input.len() * 3];
-    let written = unsafe {
-        ghostty_sanitize_utf8(input.as_ptr(), input.len(), out.as_mut_ptr(), out.len())
-    };
+    let written =
+        unsafe { ghostty_sanitize_utf8(input.as_ptr(), input.len(), out.as_mut_ptr(), out.len()) };
     out.truncate(written);
     String::from_utf8_lossy(&out).into_owned()
 }
@@ -339,9 +338,8 @@ pub fn detect_hyperlink_via_ghostty(line: &str) -> Option<(usize, usize)> {
     let bytes = line.as_bytes();
     let mut start = 0usize;
     let mut len = 0usize;
-    let found = unsafe {
-        ghostty_detect_hyperlink(bytes.as_ptr(), bytes.len(), &mut start, &mut len)
-    };
+    let found =
+        unsafe { ghostty_detect_hyperlink(bytes.as_ptr(), bytes.len(), &mut start, &mut len) };
     if found {
         Some((start, len))
     } else {

@@ -42,12 +42,27 @@ pub fn ensure_opendyslexic_user_fonts_installed() {
         return;
     };
     let assets: &[(&str, &[u8])] = &[
-        ("OpenDyslexicMNerdFontMono-Regular.otf", EMBEDDED_OPENDYSLEXIC_MONO),
-        ("OpenDyslexicMNerdFont-Regular.otf", EMBEDDED_OPENDYSLEXIC_M_REG),
-        ("OpenDyslexicNerdFont-Regular.otf", EMBEDDED_OPENDYSLEXIC_REG),
+        (
+            "OpenDyslexicMNerdFontMono-Regular.otf",
+            EMBEDDED_OPENDYSLEXIC_MONO,
+        ),
+        (
+            "OpenDyslexicMNerdFont-Regular.otf",
+            EMBEDDED_OPENDYSLEXIC_M_REG,
+        ),
+        (
+            "OpenDyslexicNerdFont-Regular.otf",
+            EMBEDDED_OPENDYSLEXIC_REG,
+        ),
         ("OpenDyslexicNerdFont-Bold.otf", EMBEDDED_OPENDYSLEXIC_BOLD),
-        ("OpenDyslexicNerdFont-Italic.otf", EMBEDDED_OPENDYSLEXIC_ITALIC),
-        ("OpenDyslexicNerdFont-BoldItalic.otf", EMBEDDED_OPENDYSLEXIC_BOLD_ITALIC),
+        (
+            "OpenDyslexicNerdFont-Italic.otf",
+            EMBEDDED_OPENDYSLEXIC_ITALIC,
+        ),
+        (
+            "OpenDyslexicNerdFont-BoldItalic.otf",
+            EMBEDDED_OPENDYSLEXIC_BOLD_ITALIC,
+        ),
     ];
     for (filename, bytes) in assets {
         let dest = fonts_dir.join(filename);
@@ -64,7 +79,9 @@ pub fn ensure_opendyslexic_user_fonts_installed() {
 /// Normalizes font family names and aliases to canonical names recognized by GPUI and CoreText.
 pub fn canonical_font_family(family: &str) -> &'static str {
     let lower = family.to_ascii_lowercase();
-    if (lower.contains("mono") || lower.contains("mnerd")) && (lower.contains("opendyslexic") || lower.contains("dyslexic")) {
+    if (lower.contains("mono") || lower.contains("mnerd"))
+        && (lower.contains("opendyslexic") || lower.contains("dyslexic"))
+    {
         "OpenDyslexicM Nerd Font Mono"
     } else if lower.contains("opendyslexic") || lower.contains("dyslexic") {
         "OpenDyslexic Nerd Font"

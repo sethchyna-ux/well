@@ -47,10 +47,12 @@ fn test_config_store_atomic_save_and_reload() {
 
 #[test]
 fn test_preferences_validation_boundaries() {
-    let mut prefs = Preferences::default();
+    let mut prefs = Preferences {
+        version: 2,
+        ..Default::default()
+    };
 
     // Invalid version
-    prefs.version = 2;
     assert!(prefs.validate().is_err());
     prefs.version = 1;
 
