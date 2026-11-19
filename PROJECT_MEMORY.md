@@ -1089,3 +1089,20 @@ Completed all three tracks of Iteration 22 across `well-gpui`, `well-editor`, `w
   - Linux: `dist/linux/well-gpui` (Arch Linux `x86_64` stripped ELF binary) verified and operational.
 - **Continuous Monitoring**:
   - Re-armed 2-hour cadence scheduler (Task ID `2033`).
+
+
+### Session Update: 2026-11-13T22:36:00-05:00 (Shift & Caps Lock Input Fix, `gpui/runtime_shaders` Build Fix & Bundle Deployment)
+- **Root Causes Identified**:
+  - `TerminalView` PTY encoding in `crates/well-gpui/src/main.rs` matched `s if s.len() == 1 => s.as_bytes()` before checking `event.keystroke.key_char` or `modifiers.shift`, so `Shift + a..z` sent lowercase `a..z` to the PTY (`gpui` sets `key = "a".."z"` even when Shift is held) and `Shift + Tab` sent `\t` instead of `\x1b[Z`.
+  - On macOS, `gpui 0.2.2` `parse_keystroke` does not pass `NSAlphaShiftKeyMask` into `UCKeyTranslate`, exposing Caps Lock only via `window.capslock().on` while leaving `key_char` lowercase. All `extract_printable_char` callers ignored `window.capslock().on`.
+  - Xcode 27.2 (`27B52`) update uninstalled `MetalToolchain`, causing `gpui 0.2.2`'s offline `xcrun -sdk macosx metal` build step to fail.
+- **Implemented Fixes**:
+  - Added `shift_us_symbol`, `extract_printable_char_with_capslock`, and `encode_terminal_key_bytes` in `crates/well-gpui/src/settings_view.rs`, properly handling `modifiers.shift`, `window.capslock().on`, US shifted symbols, and `Shift + Tab` (`\x1b[Z`).
+  - Wired `window.capslock().on` and `encode_terminal_key_bytes` into `TerminalView`, Pythia, Mneme, Command Palette, Theia SSH Console (`crates/well-gpui/src/main.rs`), and `SettingsView` (`crates/well-gpui/src/settings_view.rs`).
+  - Enabled `features = ["runtime_shaders"]` on `gpui` in `crates/well-gpui/Cargo.toml` so Metal shaders compile via `Metal.framework` at runtime without needing `xcrun metal`.
+  - Cleared pre-existing rust-1.99.0 clippy lints in `crates/well-gpui/src/ssh_console.rs` (`.next_back()`) and `crates/well-gpui/src/main.rs` (`.then_some(dns_row)`).
+  - Added unit tests `test_shift_and_capslock_printable_char_and_terminal_bytes` in `crates/well-gpui/src/lib.rs`.
+- **Verification & Deployment**:
+  - `cargo clippy -p well-gpui --lib --bins --locked -- -D warnings`: **0 warnings**.
+  - `cargo test -p well-gpui --locked`: **29 passed, 0 failed**.
+  - `./package-app.sh --install`: built release binary in 1m 42s, verified and ad-hoc signed `dist/Well.app`, and installed verified `/Applications/Well.app`.

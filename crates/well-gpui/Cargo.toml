@@ -17,7 +17,7 @@ test = false
 [dependencies]
 base64 = "0.23.1"
 futures = "0.3.34"
-gpui = "0.2.2"
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 image = "0.25.10"
 vt100.workspace = true
 well-render = { version = "0.1.0", path = "../well-render" }

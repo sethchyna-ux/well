@@ -72,4 +72,120 @@ mod tests {
             settings.font_family
         );
     }
+
+    fn mk_keystroke(key: &str, key_char: Option<&str>, shift: bool) -> gpui::Keystroke {
+        gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+            key: key.to_string(),
+            key_char: key_char.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_shift_and_capslock_printable_char_and_terminal_bytes() {
+        // Unshifted lowercase letter
+        let ks_lower = mk_keystroke("a", Some("a"), false);
+        assert_eq!(
+            settings_view::extract_printable_char_with_capslock(&ks_lower, false).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_lower, false),
+            b"a"
+        );
+
+        // Shifted letter with key_char = Some("A")
+        let ks_shift_with_char = mk_keystroke("a", Some("A"), true);
+        assert_eq!(
+            settings_view::extract_printable_char_with_capslock(&ks_shift_with_char, false)
+                .as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_shift_with_char, false),
+            b"A"
+        );
+
+        // Shifted letter with key_char = None (synthetic / fallback path)
+        let ks_shift_no_char = mk_keystroke("a", None, true);
+        assert_eq!(
+            settings_view::extract_printable_char_with_capslock(&ks_shift_no_char, false)
+                .as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_shift_no_char, false),
+            b"A"
+        );
+
+        // Caps Lock active on macOS (key_char is lowercase "a", shift is false, capslock_on = true)
+        assert_eq!(
+            settings_view::extract_printable_char_with_capslock(&ks_lower, true).as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_lower, true),
+            b"A"
+        );
+
+        // Caps Lock active on Linux (key_char is already "A", capslock_on = true)
+        let ks_linux_caps = mk_keystroke("a", Some("A"), false);
+        assert_eq!(
+            settings_view::extract_printable_char_with_capslock(&ks_linux_caps, true).as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_linux_caps, true),
+            b"A"
+        );
+
+        // Caps Lock active with digits and punctuation leaves them unchanged
+        let ks_digit = mk_keystroke("1", Some("1"), false);
+        assert_eq!(
+            settings_view::extract_printable_char_with_capslock(&ks_digit, true).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_digit, true),
+            b"1"
+        );
+
+        // Shifted symbols: platform-resolved and synthetic fallback
+        let ks_bang_resolved = mk_keystroke("!", Some("!"), false);
+        assert_eq!(
+            settings_view::extract_printable_char_with_capslock(&ks_bang_resolved, false)
+                .as_deref(),
+            Some("!")
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_bang_resolved, false),
+            b"!"
+        );
+
+        let ks_bang_synthetic = mk_keystroke("1", None, true);
+        assert_eq!(
+            settings_view::extract_printable_char_with_capslock(&ks_bang_synthetic, false)
+                .as_deref(),
+            Some("!")
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_bang_synthetic, false),
+            b"!"
+        );
+
+        // Shift+Tab vs Tab
+        let ks_tab = mk_keystroke("tab", Some("\t"), false);
+        let ks_shift_tab = mk_keystroke("tab", None, true);
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_tab, false),
+            b"\t"
+        );
+        assert_eq!(
+            settings_view::encode_terminal_key_bytes(&ks_shift_tab, false),
+            b"\x1b[Z"
+        );
+    }
 }

@@ -589,7 +589,7 @@ pub fn discover_listening_sockets() -> Vec<ListeningSocket> {
                 let pid = cols[1].to_string();
                 let node = cols[8];
                 // node is e.g. "*:22", "127.0.0.1:8787", "[::]:5000"
-                if let Some(port_str) = node.split(':').last() {
+                if let Some(port_str) = node.split(':').next_back() {
                     if let Ok(port) = port_str.parse::<u16>() {
                         if !sockets.iter().any(|s: &ListeningSocket| s.port == port) {
                             sockets.push(ListeningSocket {
@@ -627,7 +627,7 @@ pub fn run_ping_probe(target_host: &str) -> Option<PingProbeResult> {
 
     for line in text.lines() {
         if line.contains("packet loss") {
-            if let Some(pct_str) = line.split("% packet loss").next().and_then(|s| s.split(',').last()) {
+            if let Some(pct_str) = line.split("% packet loss").next().and_then(|s| s.split(',').next_back()) {
                 loss_pct = pct_str.trim().parse::<f32>().unwrap_or(0.0);
             }
         }

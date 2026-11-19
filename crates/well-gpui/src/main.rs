@@ -1471,10 +1471,11 @@ impl Render for TerminalView {
                     cx.notify();
                 }
             }))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                 if this.settings.read(cx).modal_open {
                     return;
                 }
+                let capslock_on = window.capslock().on;
                 let is_copilot_toggle = event.keystroke.modifiers.control && event.keystroke.modifiers.shift && event.keystroke.key == "k";
                 if is_copilot_toggle {
                     this.pythia.active = !this.pythia.active;
@@ -1502,7 +1503,10 @@ impl Render for TerminalView {
                             this.execute_pythia(cx);
                         }
                         _ => {
-                            if let Some(c) = settings_view::extract_printable_char(&event.keystroke) {
+                            if let Some(c) = settings_view::extract_printable_char_with_capslock(
+                                &event.keystroke,
+                                capslock_on,
+                            ) {
                                 this.pythia.query.push_str(&c);
                             }
                         }
@@ -1587,7 +1591,10 @@ impl Render for TerminalView {
                             }
                         }
                         _ => {
-                            if let Some(c) = settings_view::extract_printable_char(&event.keystroke) {
+                            if let Some(c) = settings_view::extract_printable_char_with_capslock(
+                                &event.keystroke,
+                                capslock_on,
+                            ) {
                                 this.mneme_editor.insert_text(&c);
                             }
                         }
@@ -1737,7 +1744,10 @@ impl Render for TerminalView {
                     }
                     _ => {
                         if !modifiers.control && !modifiers.platform {
-                            if let Some(c) = settings_view::extract_printable_char(&event.keystroke) {
+                            if let Some(c) = settings_view::extract_printable_char_with_capslock(
+                                &event.keystroke,
+                                capslock_on,
+                            ) {
                                 this.input_buffer.push_str(&c);
                                 let hist = this.metis.read().unwrap();
                                 this.ghost_suggestion = hist.remaining_suggestion(&this.input_buffer);
@@ -1760,28 +1770,11 @@ impl Render for TerminalView {
                     return;
                 }
 
-                let bytes: &[u8] = match key.as_str() {
-                    "enter" => b"\r",
-                    "backspace" => b"\x7f",
-                    "delete" => b"\x1b[3~",
-                    "up" => b"\x1b[A",
-                    "down" => b"\x1b[B",
-                    "right" => b"\x1b[C",
-                    "left" => b"\x1b[D",
-                    "tab" => b"\t",
-                    "escape" => b"\x1b",
-                    s if s.len() == 1 => s.as_bytes(),
-                    _ => {
-                        if let Some(c) = &event.keystroke.key_char {
-                            c.as_bytes()
-                        } else {
-                            b""
-                        }
-                    }
-                };
+                let bytes =
+                    settings_view::encode_terminal_key_bytes(&event.keystroke, capslock_on);
                 if !bytes.is_empty() {
                     use std::io::Write;
-                    let _ = writer.write_all(bytes);
+                    let _ = writer.write_all(&bytes);
                 }
                 cx.notify();
             }))
@@ -7806,7 +7799,7 @@ impl WorkspaceView {
                             ),
                     )
                     .child(diag_stats)
-                    .children((!dns.is_empty()).then(|| dns_row));
+                    .children((!dns.is_empty()).then_some(dns_row));
 
                 // ── Local interfaces ─────────────────────────────────────────
                 let mut iface_grid = div().flex().flex_row().flex_wrap().gap_2();
@@ -9151,7 +9144,10 @@ impl WorkspaceView {
                 cx.notify();
             }
             _ => {
-                if let Some(ch) = settings_view::extract_printable_char(&event.keystroke) {
+                if let Some(ch) = settings_view::extract_printable_char_with_capslock(
+                    &event.keystroke,
+                    window.capslock().on,
+                ) {
                     self.palette_query.push_str(&ch);
                     self.palette_selected_idx = 0;
                     cx.notify();
@@ -9374,7 +9370,10 @@ impl WorkspaceView {
                 cx.notify();
             }
             _ => {
-                if let Some(ch) = settings_view::extract_printable_char(&event.keystroke) {
+                if let Some(ch) = settings_view::extract_printable_char_with_capslock(
+                    &event.keystroke,
+                    window.capslock().on,
+                ) {
                     match self.ssh_state.active_input {
                         SshConsoleInputField::SidebarSearch => {
                             self.ssh_state.search_filter.push_str(&ch);

@@ -103,12 +103,51 @@ pub struct TerminalSettings {
     pub requested_snippet_insert: Option<String>,
 }
 
-pub fn extract_printable_char(keystroke: &gpui::Keystroke) -> Option<String> {
+pub fn shift_us_symbol(s: &str) -> Option<&'static str> {
+    match s {
+        "`" => Some("~"),
+        "1" => Some("!"),
+        "2" => Some("@"),
+        "3" => Some("#"),
+        "4" => Some("$"),
+        "5" => Some("%"),
+        "6" => Some("^"),
+        "7" => Some("&"),
+        "8" => Some("*"),
+        "9" => Some("("),
+        "0" => Some(")"),
+        "-" => Some("_"),
+        "=" => Some("+"),
+        "[" => Some("{"),
+        "]" => Some("}"),
+        "\\" => Some("|"),
+        ";" => Some(":"),
+        "'" => Some("\""),
+        "," => Some("<"),
+        "." => Some(">"),
+        "/" => Some("?"),
+        _ => None,
+    }
+}
+
+pub fn extract_printable_char_with_capslock(
+    keystroke: &gpui::Keystroke,
+    capslock_on: bool,
+) -> Option<String> {
     if keystroke.modifiers.platform || keystroke.modifiers.control {
         return None;
     }
     if let Some(ch) = &keystroke.key_char {
         if !ch.is_empty() && !ch.chars().all(|c| c.is_control()) {
+            if keystroke.modifiers.shift {
+                if let Some(shifted) = shift_us_symbol(ch.as_str()) {
+                    return Some(shifted.to_string());
+                }
+                return Some(ch.to_ascii_uppercase());
+            }
+            if capslock_on {
+                return Some(ch.to_ascii_uppercase());
+            }
             return Some(ch.clone());
         }
     }
@@ -116,12 +155,41 @@ pub fn extract_printable_char(keystroke: &gpui::Keystroke) -> Option<String> {
         "space" => Some(" ".to_string()),
         s if s.len() == 1 => {
             if keystroke.modifiers.shift {
+                if let Some(shifted) = shift_us_symbol(s) {
+                    Some(shifted.to_string())
+                } else {
+                    Some(s.to_ascii_uppercase())
+                }
+            } else if capslock_on {
                 Some(s.to_ascii_uppercase())
             } else {
                 Some(s.to_string())
             }
         }
         _ => None,
+    }
+}
+
+#[allow(dead_code)]
+pub fn extract_printable_char(keystroke: &gpui::Keystroke) -> Option<String> {
+    extract_printable_char_with_capslock(keystroke, false)
+}
+
+pub fn encode_terminal_key_bytes(keystroke: &gpui::Keystroke, capslock_on: bool) -> Vec<u8> {
+    match keystroke.key.as_str() {
+        "enter" => b"\r".to_vec(),
+        "backspace" => b"\x7f".to_vec(),
+        "delete" => b"\x1b[3~".to_vec(),
+        "up" => b"\x1b[A".to_vec(),
+        "down" => b"\x1b[B".to_vec(),
+        "right" => b"\x1b[C".to_vec(),
+        "left" => b"\x1b[D".to_vec(),
+        "tab" if keystroke.modifiers.shift => b"\x1b[Z".to_vec(),
+        "tab" => b"\t".to_vec(),
+        "escape" => b"\x1b".to_vec(),
+        _ => extract_printable_char_with_capslock(keystroke, capslock_on)
+            .map(|s| s.into_bytes())
+            .unwrap_or_default(),
     }
 }
 
@@ -3522,7 +3590,7 @@ impl Render for SettingsView {
             .flex()
             .flex_col()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, window, cx| {
                 // ⌘S or Ctrl+S saves all changes immediately
                 if (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
                     && event.keystroke.key == "s"
@@ -3807,7 +3875,10 @@ impl Render for SettingsView {
                             }
                         }
                         _ => {
-                            if let Some(ch) = extract_printable_char(&event.keystroke) {
+                            if let Some(ch) = extract_printable_char_with_capslock(
+                                &event.keystroke,
+                                window.capslock().on,
+                            ) {
                                 match target_input {
                                     ActiveFormInput::ThemeHex(slot) => {
                                         for c in ch.chars() {
