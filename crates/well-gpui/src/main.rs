@@ -19,35 +19,6 @@ use ssh_console::{
 use well_shell::ssh::{SshEngine, SshHostConfig, SshTarget};
 use well_shell::theia_ssh::TheiaSshProfile;
 
-#[derive(Clone, PartialEq, gpui::Action)]
-#[action(namespace = well, no_json)]
-struct RunWellAction {
-    id: String,
-}
-fn bind_runtime_actions(bindings: &[(String, String, String)], cx: &mut App) {
-    cx.clear_key_bindings();
-    for (id, display, context) in bindings {
-        let key = actions::runtime_shortcut(display);
-        if key.is_empty() {
-            continue;
-        }
-        let Ok(predicate) = gpui::KeyBindingContextPredicate::parse(context) else {
-            continue;
-        };
-        match KeyBinding::load(
-            &key,
-            Box::new(RunWellAction { id: id.clone() }),
-            Some(std::rc::Rc::new(predicate)),
-            false,
-            None,
-            &gpui::DummyKeyboardMapper,
-        ) {
-            Ok(binding) => cx.bind_keys([binding]),
-            Err(e) => eprintln!("[Shortcuts] Invalid binding for {id}: {e}"),
-        }
-    }
-}
-
 actions!(
     well,
     [
@@ -3743,7 +3714,12 @@ impl WorkspaceView {
                 let first_host = self.settings.read(cx).ssh_profiles.first().cloned();
                 if let Some(mut p) = first_host {
                     p.forward_caduceus_ipc = self.ssh_state.forward_caduceus_ipc;
-                    let base = self.ssh_engine.resolve_target(&p.host.name);
+                    let lookup = if p.host.hostname.trim().is_empty() {
+                        &p.host.name
+                    } else {
+                        &p.host.hostname
+                    };
+                    let base = self.ssh_engine.resolve_target(lookup);
                     let target = p.build_target(base);
                     self.connect_ssh_with_mode(
                         target,

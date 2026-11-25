@@ -105,9 +105,9 @@ impl SshHostEditorDraft {
             editing_index: None,
             name: "new-server".into(),
             hostname: String::new(),
-            user: std::env::var("USER").unwrap_or_else(|_| "ops".into()),
+            user: std::env::var("USER").unwrap_or_default(),
             port: "22".into(),
-            identity_file: "~/.ssh/id_ed25519".into(),
+            identity_file: String::new(),
             proxy_jump: String::new(),
             forward_agent: true,
             use_control_master: true,
@@ -120,14 +120,14 @@ impl SshHostEditorDraft {
             editing_index,
             name: prof.host.name.clone(),
             hostname: prof.host.hostname.clone(),
-            user: prof.host.user.clone().unwrap_or_else(|| "ops".into()),
+            user: prof.host.user.clone().unwrap_or_default(),
             port: prof.host.port.to_string(),
             identity_file: prof
                 .host
                 .identity_file
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "~/.ssh/id_ed25519".into()),
+                .unwrap_or_default(),
             proxy_jump: prof.host.proxy_jump.clone().unwrap_or_default(),
             forward_agent: prof.host.forward_agent,
             use_control_master: prof.use_control_master,

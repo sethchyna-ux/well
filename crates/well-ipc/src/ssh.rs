@@ -68,8 +68,9 @@ impl SshTarget {
             args.push(self.port.to_string());
         }
         if let Some(key) = &self.identity_file {
+            let expanded = expand_tilde_path(key);
             args.push("-i".to_string());
-            args.push(key.display().to_string());
+            args.push(expanded.display().to_string());
         }
         if let Some(jump) = &self.proxy_jump {
             args.push("-J".to_string());
@@ -87,6 +88,22 @@ impl SshTarget {
         args.push(target_str);
         args
     }
+}
+
+/// Expand a leading `~/` against `$HOME` so `/usr/bin/ssh` receives a real path
+/// even when spawned directly without a shell.
+fn expand_tilde_path(path: &std::path::Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            return home.join(rest);
+        }
+    } else if raw == "~" {
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            return home;
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Live SSH session telemetry information.
